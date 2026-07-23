@@ -121,6 +121,14 @@ def test_request_to_wire_uses_camel_case_and_canonical_paths(tmp_path: Path) -> 
     }
 
 
+def test_request_round_trips_through_exact_proxy_wire_shape(tmp_path: Path) -> None:
+    req = request(tmp_path, input={"kind": "local"})
+
+    assert EngineRequest.from_wire(req.to_wire()) == req
+    with pytest.raises(EngineProtocolError, match="invalid request field"):
+        EngineRequest.from_wire({**req.to_wire(), "authenticatedReviewerRecords": []})
+
+
 @pytest.mark.parametrize("field", ["workspace", "artifact_root"])
 def test_request_rejects_non_absolute_paths(tmp_path: Path, field: str) -> None:
     req = request(tmp_path, **{field: Path("relative")})
@@ -185,6 +193,10 @@ def test_response_is_immutable_and_typed() -> None:
     assert response.diagnostics == (EngineDiagnostic(code="ok", message="done"),)
     with pytest.raises((AttributeError, TypeError)):
         response.status = "failed"  # type: ignore[misc]
+    assert (
+        EngineResponse.from_wire(response.to_wire(), expected_request_id="r1")
+        == response
+    )
 
 
 def test_bridge_uses_managed_node_and_exactly_one_json_document(

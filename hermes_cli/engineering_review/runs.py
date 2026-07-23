@@ -38,7 +38,8 @@ Effort = Literal["low", "medium", "high"]
 @dataclass(slots=True)
 class _RunCapability:
     secret: bytes
-    bundle_hash: str | None
+    bundle_hash: str
+    bundle_bytes: bytes
     expected_evidence: dict[str, str]
 
 
@@ -170,22 +171,49 @@ def _session_root(home: Path, session_id: str, *, create: bool) -> Path:
     return root
 
 
-def _sha256_file(path: Path) -> str | None:
+def _snapshot_bundle(path: Path) -> tuple[str, bytes]:
+    """Read executable bytes once through a no-follow, identity-bound descriptor."""
     try:
-        digest = hashlib.sha256()
-        with path.open("rb") as handle:
-            for block in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(block)
-        return digest.hexdigest()
-    except OSError:
-        return None
+        before = path.lstat()
+        if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+            raise ReviewRunError(
+                "engineering bundle must be a regular non-symlink file"
+            )
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise ReviewRunError("engineering bundle could not be opened") from exc
+    try:
+        after = os.fstat(descriptor)
+        if not stat.S_ISREG(after.st_mode) or (before.st_dev, before.st_ino) != (
+            after.st_dev,
+            after.st_ino,
+        ):
+            raise ReviewRunError("engineering bundle identity changed while opening")
+        chunks: list[bytes] = []
+        remaining = after.st_size
+        while remaining:
+            chunk = os.read(descriptor, min(remaining, 1024 * 1024))
+            if not chunk:
+                raise ReviewRunError("engineering bundle could not be fully read")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(chunks)
+        if not data:
+            raise ReviewRunError("engineering bundle is empty")
+        return hashlib.sha256(data).hexdigest(), data
+    finally:
+        os.close(descriptor)
 
 
-def _register_capability(root: Path, bundle_hash: str | None) -> None:
+def _register_capability(root: Path, bundle_hash: str, bundle_bytes: bytes) -> None:
     with _CAPABILITY_LOCK:
         _CAPABILITIES[root] = _RunCapability(
             secret=secrets.token_bytes(32),
             bundle_hash=bundle_hash,
+            bundle_bytes=bundle_bytes,
             expected_evidence={},
         )
 
@@ -195,6 +223,7 @@ def _drop_capability(root: Path) -> None:
         capability = _CAPABILITIES.pop(root, None)
         if capability is not None:
             capability.secret = b"\0" * len(capability.secret)
+            capability.bundle_bytes = b""
             capability.expected_evidence.clear()
 
 
@@ -249,6 +278,7 @@ class ReviewRun:
         target: str,
         effort: Effort,
         session_id: str,
+        bundle: Path | None = None,
     ) -> ReviewRun:
         if not isinstance(target, str) or not target:
             raise ReviewRunError("target must be a non-empty string")
@@ -260,6 +290,9 @@ class ReviewRun:
             raise ReviewRunError("workspace could not be resolved") from exc
 
         home = _canonical_home()
+        bundle_hash, bundle_bytes = _snapshot_bundle(
+            bundle_path() if bundle is None else Path(bundle)
+        )
         session_root = _session_root(home, session_id, create=True)
         for _ in range(10):
             run_id = secrets.token_urlsafe(18)
@@ -283,13 +316,15 @@ class ReviewRun:
                 "updated_at": created_at,
                 "completed_at": None,
                 "status": "active",
-                "bundle_hash": _sha256_file(bundle_path()),
-                "provenance_hash": _provenance_hash(canonical_workspace, target, effort),
+                "bundle_hash": bundle_hash,
+                "provenance_hash": _provenance_hash(
+                    canonical_workspace, target, effort
+                ),
             }
             run = cls(run_id, root, canonical_workspace, target, effort, session_id)
             try:
                 run._write_metadata(metadata)
-                _register_capability(root, metadata["bundle_hash"])
+                _register_capability(root, bundle_hash, bundle_bytes)
             except BaseException:
                 _drop_capability(root)
                 raise
@@ -346,7 +381,9 @@ class ReviewRun:
         completed_at = metadata.get("completed_at")
         if completed_at is not None and not isinstance(completed_at, str):
             raise ReviewRunError("run completed_at is invalid")
-        if status in {"complete", "cleanup_failed"} and not isinstance(completed_at, str):
+        if status in {"complete", "cleanup_failed"} and not isinstance(
+            completed_at, str
+        ):
             raise ReviewRunError("terminal review run has no completion timestamp")
         if status == "active" and completed_at is not None:
             raise ReviewRunError("active review run has a completion timestamp")
@@ -390,7 +427,9 @@ class ReviewRun:
             raise ReviewRunError("review run identity does not match its metadata")
         return loaded
 
-    def _atomic_write(self, name: str, data: bytes, *, allow_metadata: bool = False) -> Path:
+    def _atomic_write(
+        self, name: str, data: bytes, *, allow_metadata: bool = False
+    ) -> Path:
         if not allow_metadata:
             name = _artifact_name(name)
         root = self._assert_hierarchy()
@@ -459,34 +498,49 @@ class ReviewRun:
                 raise ReviewRunError(
                     "review capability is unavailable; active runs cannot resume after restart"
                 )
-            digest = _evidence_mac(
-                capability.secret, loaded.run_id, agent_id, data
-            )
+            digest = _evidence_mac(capability.secret, loaded.run_id, agent_id, data)
             capability.expected_evidence[agent_id] = digest
             return digest
 
-    def authenticated_reviewer_records(self, engine_bundle: Path) -> list[dict[str, Any]]:
-        """Return an exact verified snapshot for the trusted engine bridge."""
+    def authorize_engine_invocation(
+        self,
+        *,
+        engine_bundle: Path | None,
+        require_evidence: bool,
+        workspace: Path,
+    ) -> tuple[bytes, list[dict[str, Any]] | None]:
+        """Return the run-bound executable bytes and optional evidence snapshot."""
         loaded = self._validated_loaded()
         if loaded.status != "active":
-            raise ReviewRunError("authoritative evidence requires an active run")
+            raise ReviewRunError(
+                "authoritative engine invocation requires an active run"
+            )
+        try:
+            supplied_workspace = Path(workspace).resolve(strict=False)
+        except (OSError, RuntimeError) as exc:
+            raise ReviewRunError("engine workspace could not be resolved") from exc
+        if supplied_workspace != loaded.workspace:
+            raise ReviewRunError("engine workspace does not match the registered run")
         with _CAPABILITY_LOCK:
             capability = _CAPABILITIES.get(loaded.root)
             if capability is None:
                 raise ReviewRunError(
                     "review capability is unavailable; active runs cannot resume after restart"
                 )
-            actual_bundle_hash = _sha256_file(Path(engine_bundle))
-            if (
-                capability.bundle_hash is None
-                or actual_bundle_hash is None
-                or not hmac.compare_digest(
-                    capability.bundle_hash, actual_bundle_hash
-                )
-            ):
-                raise ReviewRunError("engineering bundle does not match the run capability")
+            if engine_bundle is not None:
+                candidate_hash, candidate_bytes = _snapshot_bundle(Path(engine_bundle))
+                if not hmac.compare_digest(
+                    capability.bundle_hash, candidate_hash
+                ) or not hmac.compare_digest(capability.bundle_bytes, candidate_bytes):
+                    raise ReviewRunError(
+                        "engineering bundle does not match the run capability"
+                    )
             expected = dict(capability.expected_evidence)
             secret = capability.secret
+            executable = capability.bundle_bytes
+
+        if not require_evidence:
+            return executable, None
 
         reviewers = loaded.root / "subagents" / "reviewers"
         try:
@@ -498,7 +552,11 @@ class ReviewRun:
         expected_auth = {f"agent-{agent_id}.auth.json" for agent_id in expected}
         actual_jsonl = {name for name in names if name.endswith(".jsonl")}
         actual_auth = {name for name in names if name.endswith(".auth.json")}
-        if not expected or actual_jsonl != expected_jsonl or actual_auth != expected_auth:
+        if (
+            not expected
+            or actual_jsonl != expected_jsonl
+            or actual_auth != expected_auth
+        ):
             raise ReviewRunError("reviewer evidence set is missing or contains extras")
 
         records: list[dict[str, Any]] = []
@@ -513,14 +571,32 @@ class ReviewRun:
             try:
                 value = json.loads(data)
             except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-                raise ReviewRunError("authenticated reviewer evidence is invalid JSON") from exc
+                raise ReviewRunError(
+                    "authenticated reviewer evidence is invalid JSON"
+                ) from exc
             if not isinstance(value, dict) or value.get("agentId") != agent_id:
-                raise ReviewRunError("authenticated reviewer evidence identity is invalid")
+                raise ReviewRunError(
+                    "authenticated reviewer evidence identity is invalid"
+                )
             records.append(value)
         with _CAPABILITY_LOCK:
             current = _CAPABILITIES.get(loaded.root)
             if current is not capability or current.expected_evidence != expected:
-                raise ReviewRunError("review capability changed during evidence snapshot")
+                raise ReviewRunError(
+                    "review capability changed during evidence snapshot"
+                )
+        return executable, records
+
+    def authenticated_reviewer_records(
+        self, engine_bundle: Path
+    ) -> list[dict[str, Any]]:
+        """Compatibility facade for callers that require evidence only."""
+        _, records = self.authorize_engine_invocation(
+            engine_bundle=engine_bundle,
+            require_evidence=True,
+            workspace=self.workspace,
+        )
+        assert records is not None
         return records
 
     def mark_complete(self) -> ReviewRun:
@@ -575,12 +651,14 @@ def prune_completed_runs(home: Path, keep: int) -> list[Path]:
             try:
                 run_id = _validate_run_id(root.name)
                 _secure_directory(root)
-                run = ReviewRun._from_metadata(root, run_id=run_id, session_id=session_id)
+                run = ReviewRun._from_metadata(
+                    root, run_id=run_id, session_id=session_id
+                )
+                if run.status == "complete":
+                    metadata = run._metadata()
+                    completed.append((str(metadata["completed_at"]), root))
             except ReviewRunError:
                 continue
-            if run.status == "complete":
-                metadata = run._metadata()
-                completed.append((str(metadata["completed_at"]), root))
 
     completed.sort(key=lambda item: (item[0], item[1].name), reverse=True)
     removed: list[Path] = []

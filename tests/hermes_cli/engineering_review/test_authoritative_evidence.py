@@ -20,6 +20,7 @@ from hermes_cli.engineering_review.bridge import (
 )
 from hermes_cli.engineering_review.evidence import encode_verified_findings
 from hermes_cli.engineering_review.protocol import EngineRequest
+from hermes_cli.engineering_review.protocol import ENGINE_COMMANDS
 from hermes_cli.engineering_review.runs import ReviewRun
 
 
@@ -88,9 +89,11 @@ def _run_with_evidence(tmp_path: Path) -> tuple[ReviewRun, EngineRequest, Path]:
                         "id": "diff",
                         "function": {
                             "name": "read_file",
-                            "arguments": json.dumps(
-                                {"file_path": str(diff_path), "offset": 0, "limit": 6}
-                            ),
+                            "arguments": json.dumps({
+                                "file_path": str(diff_path),
+                                "offset": 0,
+                                "limit": 6,
+                            }),
                         },
                     }
                 ],
@@ -119,15 +122,21 @@ def test_full_jsonl_forgery_cannot_change_authoritative_findings(
     assert bridge.invoke(request, timeout=10).status == "passed"
 
     forged_records = [json.loads(line) for line in transcript.read_text().splitlines()]
-    forged_records[-1]["message"]["parts"][0]["text"] = encode_verified_findings(
-        [_finding(severity="low")]
-    )
+    forged_records[-1]["message"]["parts"][0]["text"] = encode_verified_findings([
+        _finding(severity="low")
+    ])
     transcript.write_text(
-        "".join(json.dumps(record, separators=(",", ":")) + "\n" for record in forged_records)
+        "".join(
+            json.dumps(record, separators=(",", ":")) + "\n"
+            for record in forged_records
+        )
     )
-    assert '"severity":"low"' in json.loads(
-        transcript.read_text().splitlines()[-1]
-    )["message"]["parts"][0]["text"]
+    assert (
+        '"severity":"low"'
+        in json.loads(transcript.read_text().splitlines()[-1])["message"]["parts"][0][
+            "text"
+        ]
+    )
     low_request = EngineRequest(
         request_id="forged-low",
         command="resolve-anchors",
@@ -190,7 +199,13 @@ except EngineEvidenceError:
 raise SystemExit("restart unexpectedly retained review capability")
 """
     process = subprocess.run(
-        [sys.executable, "-c", script, str(request.workspace), str(request.artifact_root)],
+        [
+            sys.executable,
+            "-c",
+            script,
+            str(request.workspace),
+            str(request.artifact_root),
+        ],
         cwd=Path(__file__).parents[3],
         env=dict(os.environ),
         text=True,
@@ -213,4 +228,34 @@ def test_authoritative_command_rejects_substituted_bundle(
     metadata_path.write_text(json.dumps(metadata))
 
     with pytest.raises(EngineEvidenceError, match="bundle"):
-        EngineeringReviewBridge(bundle=substituted).invoke(request, timeout=10)
+        EngineeringReviewBridge(bundle=substituted, require_authority=True).invoke(
+            request, timeout=10
+        )
+
+
+@pytest.mark.parametrize("command", sorted(ENGINE_COMMANDS))
+def test_every_run_scoped_command_rejects_substituted_bundle(
+    fake_home: Path, tmp_path: Path, command: str
+) -> None:
+    del fake_home
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run = ReviewRun.create(workspace, target="local", effort="low", session_id="parent")
+    substituted = tmp_path / f"{command}.mjs"
+    substituted.write_bytes(bundle_path().read_bytes() + b"\n// substituted\n")
+    metadata_path = run.root / "run.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["bundle_hash"] = hashlib.sha256(substituted.read_bytes()).hexdigest()
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    request = EngineRequest(
+        request_id=command,
+        command=command,  # type: ignore[arg-type]
+        workspace=workspace.resolve(),
+        artifact_root=run.root,
+        input={},
+    )
+
+    with pytest.raises(EngineEvidenceError, match="bundle"):
+        EngineeringReviewBridge(bundle=substituted, require_authority=True).invoke(
+            request, timeout=10
+        )

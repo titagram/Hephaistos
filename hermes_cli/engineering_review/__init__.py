@@ -26,6 +26,11 @@ from .evidence import (
     encode_verified_findings,
     parse_verified_findings,
 )
+from .authority import (
+    ReviewAuthority,
+    ReviewAuthorityClient,
+    ReviewAuthorityUnavailable,
+)
 
 __all__ = [
     "CheckStatus",
@@ -41,6 +46,9 @@ __all__ = [
     "EngineResponse",
     "EngineTimeoutError",
     "EngineeringReviewBridge",
+    "ReviewAuthority",
+    "ReviewAuthorityClient",
+    "ReviewAuthorityUnavailable",
     "REVIEW_PLAN_MARKER",
     "REVIEW_RUN_MARKER",
     "VERIFIED_FINDINGS_EVIDENCE_MARKER",

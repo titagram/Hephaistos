@@ -78,6 +78,47 @@ class EngineRequest:
     input: Mapping[str, Any]
     protocol_version: int = PROTOCOL_VERSION
 
+    @classmethod
+    def from_wire(cls, value: object) -> EngineRequest:
+        """Parse the exact public caller request shape used by local proxies."""
+        request = _record(value, "request")
+        expected = {
+            "protocolVersion",
+            "requestId",
+            "command",
+            "workspace",
+            "artifactRoot",
+            "input",
+        }
+        if request.keys() != expected:
+            unknown = request.keys() - expected
+            missing = expected - request.keys()
+            field = sorted(unknown or missing)[0]
+            raise EngineProtocolError(f"invalid request field: {field}")
+        if (
+            type(request["protocolVersion"]) is not int
+            or request["protocolVersion"] != 1
+        ):
+            raise EngineProtocolError("request requires protocolVersion 1")
+        command = request["command"]
+        if not isinstance(command, str) or command not in ENGINE_COMMANDS:
+            raise EngineProtocolError("command is not supported by protocolVersion 1")
+        instance = cls(
+            request_id=_required_string(
+                request["requestId"], "requestId", nonempty=True
+            ),
+            command=cast(EngineCommand, command),
+            workspace=Path(
+                _required_string(request["workspace"], "workspace", nonempty=True)
+            ),
+            artifact_root=Path(
+                _required_string(request["artifactRoot"], "artifactRoot", nonempty=True)
+            ),
+            input=_record(request["input"], "input"),
+        )
+        instance.to_wire()
+        return instance
+
     def to_wire(self) -> dict[str, Any]:
         """Validate and convert this request to the protocol's camelCase form."""
         if type(self.protocol_version) is not int or self.protocol_version != 1:
@@ -150,6 +191,19 @@ class EngineResponse:
     output: Mapping[str, Any]
     diagnostics: tuple[EngineDiagnostic, ...]
     protocol_version: int = PROTOCOL_VERSION
+
+    def to_wire(self) -> dict[str, Any]:
+        """Return the exact response shape transported by a local proxy."""
+        return {
+            "protocolVersion": self.protocol_version,
+            "requestId": self.request_id,
+            "status": self.status,
+            "output": dict(self.output),
+            "diagnostics": [
+                {"code": item.code, "message": item.message}
+                for item in self.diagnostics
+            ],
+        }
 
     @classmethod
     def from_wire(cls, value: object, *, expected_request_id: str) -> EngineResponse:

@@ -27,6 +27,7 @@ from .protocol import (
 
 DEFAULT_STDOUT_LIMIT = 4 * 1024 * 1024
 DEFAULT_STDERR_LIMIT = 1024 * 1024
+_DESCRIPTOR_BOOTSTRAP = "await import('file://'+process.argv[1]);"
 
 
 class EngineExecutionError(RuntimeError):
@@ -440,6 +441,7 @@ class EngineeringReviewBridge:
         self,
         *,
         bundle: Path | None = None,
+        require_authority: bool = False,
         stdout_limit: int = DEFAULT_STDOUT_LIMIT,
         stderr_limit: int = DEFAULT_STDERR_LIMIT,
         poll_interval: float = 0.02,
@@ -450,6 +452,8 @@ class EngineeringReviewBridge:
         if poll_interval <= 0 or termination_grace < 0:
             raise ValueError("engine timing settings must be non-negative")
         self.bundle = Path(bundle) if bundle is not None else bundle_path()
+        self._explicit_bundle = bundle is not None
+        self.require_authority = require_authority
         self.stdout_limit = stdout_limit
         self.stderr_limit = stderr_limit
         self.poll_interval = poll_interval
@@ -469,32 +473,63 @@ class EngineeringReviewBridge:
         if timeout <= 0 or not math.isfinite(timeout):
             raise ValueError("timeout must be a positive finite number")
 
+        evidence_commands = {"check-coverage", "resolve-anchors", "compose-review"}
         authenticated_records: list[dict[str, object]] | None = None
-        if request.command in {"check-coverage", "resolve-anchors", "compose-review"}:
-            try:
-                # Lazy import avoids the run module's bundle-provenance import
-                # forming a module initialization cycle.
-                from .runs import ReviewRun, ReviewRunError
+        executable_bytes: bytes | None = None
+        try:
+            # Lazy import avoids the run module's bundle-provenance import
+            # forming a module initialization cycle.
+            from .runs import ReviewRun, ReviewRunError
 
-                root = Path(request.artifact_root)
-                run = ReviewRun.load(root.name, session_id=root.parent.name)
-                authenticated_records = run.authenticated_reviewer_records(self.bundle)
-            except (OSError, ReviewRunError, ValueError) as exc:
+            root = Path(request.artifact_root)
+            run = ReviewRun.load(root.name, session_id=root.parent.name)
+            executable_bytes, authenticated_records = run.authorize_engine_invocation(
+                engine_bundle=self.bundle if self._explicit_bundle else None,
+                require_evidence=request.command in evidence_commands,
+                workspace=request.workspace,
+            )
+        except (OSError, ReviewRunError, ValueError) as exc:
+            if self.require_authority or request.command in evidence_commands:
                 raise EngineEvidenceError(
-                    f"authoritative reviewer evidence is unavailable: {exc}"
+                    f"authoritative review engine is unavailable: {exc}"
                 ) from exc
         payload = _canonical_request_bytes(request, authenticated_records)
         node = find_node_executable("node")
         if not node:
             raise EngineProcessError("a usable managed Node executable was not found")
 
-        with (
-            tempfile.TemporaryFile("w+b") as stdout_file,
-            tempfile.TemporaryFile("w+b") as stderr_file,
-        ):
+        executable_file: BinaryIO | None = None
+        argv = [node, str(self.bundle)]
+        popen_extra: dict[str, object] = {}
+        if executable_bytes is not None:
+            if os.name == "nt":
+                raise EngineProcessError(
+                    "authoritative descriptor execution is unavailable on Windows"
+                )
+            executable_file = tempfile.TemporaryFile("w+b")
+            executable_file.write(executable_bytes)
+            executable_file.flush()
+            executable_file.seek(0)
+            descriptor = executable_file.fileno()
+            descriptor_root = (
+                "/proc/self/fd" if Path("/proc/self/fd").is_dir() else "/dev/fd"
+            )
+            descriptor_path = f"{descriptor_root}/{descriptor}"
+            argv = [
+                node,
+                "--input-type=module",
+                "--eval",
+                _DESCRIPTOR_BOOTSTRAP,
+                descriptor_path,
+            ]
+            popen_extra["pass_fds"] = (descriptor,)
+
+        try:
+            stdout_file = tempfile.TemporaryFile("w+b")
+            stderr_file = tempfile.TemporaryFile("w+b")
             try:
                 process = subprocess.Popen(
-                    [node, str(self.bundle)],
+                    argv,
                     stdin=subprocess.PIPE,
                     stdout=stdout_file,
                     stderr=stderr_file,
@@ -503,6 +538,7 @@ class EngineeringReviewBridge:
                     start_new_session=(os.name != "nt"),
                     creationflags=windows_process_group_flags(),
                     shell=False,
+                    **popen_extra,
                 )
             except OSError as exc:
                 raise EngineProcessError(
@@ -610,3 +646,14 @@ class EngineeringReviewBridge:
                     windows_job=windows_job,
                     grace=self.termination_grace,
                 )
+        finally:
+            try:
+                stdout_file.close()
+            except UnboundLocalError:
+                pass
+            try:
+                stderr_file.close()
+            except UnboundLocalError:
+                pass
+            if executable_file is not None:
+                executable_file.close()

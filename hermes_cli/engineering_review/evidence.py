@@ -12,6 +12,14 @@ fields are serialized without regex redaction so code such as ``api_key`` or
 ``Authorization`` keeps its meaning.  Unknown fields are rejected instead of
 being persisted, which prevents arbitrary credential objects from hitching a
 ride in the evidence format.
+
+Task 11's lifecycle owner is the long-lived public Hermes process. It creates
+and serves ``ReviewAuthority`` only after the session exists; the internal CLI
+is a short-lived proxy and must not create/load runs or invoke the bridge
+directly. The reviewer callback commits this envelope in the authority process.
+Every run-scoped engine operation executes there against the registered
+workspace and its descriptor-backed bundle snapshot. Authority loss or a
+platform without safe local-peer and descriptor execution fails closed.
 """
 
 from __future__ import annotations
@@ -53,9 +61,7 @@ def parse_verified_findings(value: object) -> list[dict[str, Any]]:
         raise ValueError("verified findings must be a JSON array")
     normalized: list[dict[str, Any]] = []
     for index, raw in enumerate(value):
-        if not isinstance(raw, Mapping) or not all(
-            isinstance(key, str) for key in raw
-        ):
+        if not isinstance(raw, Mapping) or not all(isinstance(key, str) for key in raw):
             raise ValueError(f"verified finding {index} must be an object")
         keys = frozenset(raw)
         if keys != _FINDING_KEYS:
@@ -108,7 +114,11 @@ def canonical_verified_findings_response(
         raise ValueError("verified finding envelope is invalid JSON") from exc
     findings = parse_verified_findings(parsed)
     secrets = sorted(
-        {secret for secret in sensitive_values if isinstance(secret, str) and len(secret) >= 4},
+        {
+            secret
+            for secret in sensitive_values
+            if isinstance(secret, str) and len(secret) >= 4
+        },
         key=len,
         reverse=True,
     )

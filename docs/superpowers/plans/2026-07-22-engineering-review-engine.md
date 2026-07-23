@@ -1211,11 +1211,40 @@ Expected: FAIL because the parser/command and new skill contract are absent.
 hermes-review-engine = "hermes_cli.engineering_review.internal_cli:main"
 ```
 
-The internal executable accepts an operation and a request JSON path and is documented as unstable/internal. Its `start` operation is Python-local: it validates `${HERMES_SESSION_ID}` and calls `ReviewRun.create`. The operations in the stable `EngineCommand` union invoke `EngineeringReviewBridge` and print exactly one response JSON. It does not launch an agent.
+The internal executable accepts an operation and a request JSON path and is
+documented as unstable/internal. It is only a short-lived proxy to the live
+`ReviewAuthority` owned by the public Hermes process; it must never call
+`ReviewRun.create`, load a run capability from disk, accept a bundle path, or
+invoke `EngineeringReviewBridge` directly. Its `start` operation validates
+`${HERMES_SESSION_ID}`, contacts that session's authority, and prints the
+already-created run ID and prospective plan path. Operations in the stable
+`EngineCommand` union forward the exact caller request to the authority and
+print exactly one response JSON. No proxy operation may commit reviewer
+evidence. Absence of the live authority fails closed.
 
 - [ ] **Step 4: Launch the normal Hermes chat path, not oneshot/yolo**
 
-`review_command` hands a generated query to the existing `cmd_chat` path with classic interactive callbacks, `pass_session_id=True`, and `requesting-code-review` preloaded. `AIAgent` creates the session before skill preprocessing exposes `${HERMES_SESSION_ID}`. Do not create a review run before that session exists, and do not call `run_oneshot`; it deliberately enables `HERMES_YOLO_MODE`.
+`review_command` hands a generated query to the existing `cmd_chat` path with
+classic interactive callbacks, `pass_session_id=True`, and
+`requesting-code-review` preloaded. `AIAgent` creates the session before skill
+preprocessing exposes `${HERMES_SESSION_ID}`. Immediately after that session
+exists, the same long-lived public Hermes process creates and serves one
+`ReviewAuthority(workspace, target, effort, session_id)` for the entire chat
+lifecycle. The authority exclusively owns the run capability, exact reviewer
+manifest, and executable bundle snapshot; the delegate writer commits evidence
+directly in that process. Every engine operation, including `capture-target`,
+`build-prompts`, `build-test`, and `test-efficacy`, executes inside the authority
+against the registered workspace/run and the captured bundle bytes. On POSIX,
+the bytes execute through an inherited anonymous descriptor, never by reopening
+the bundle path after hashing. Platforms without safe descriptor execution or
+kernel-authenticated local-peer ownership fail closed until an equivalent
+backend is implemented.
+
+Authority cleanup first cancels active bridge work and closes the private proxy
+socket, then completes the run and destroys the HMAC capability, exact evidence
+manifest, and executable snapshot. Do not create a review run before the
+session exists, and do not call `run_oneshot`; it deliberately enables
+`HERMES_YOLO_MODE`.
 
 The generated user message contains only target/effort and a direction to execute the preloaded skill. It does not inject system content, invent a run ID or plan path, or rebuild the toolset.
 
@@ -1223,7 +1252,7 @@ The generated user message contains only target/effort and a direction to execut
 
 The skill must explicitly direct the agent to:
 
-1. call `hermes-review-engine start --session-id ${HERMES_SESSION_ID}` and treat the returned run ID plus plan path as the accepted run marker;
+1. call `hermes-review-engine start --session-id ${HERMES_SESSION_ID}` and treat the returned run ID plus plan path from the live parent authority as the accepted run marker; never retry by creating/loading a run directly when the authority is absent;
 2. call `hermes-review-engine capture-target` for the requested target only after the run exists;
 3. call `hermes-review-engine build-prompts` and deliver each printed prompt verbatim with `delegate_task(role="reviewer")`;
 4. use only configured logical routes, never caller-selected provider/model IDs;
