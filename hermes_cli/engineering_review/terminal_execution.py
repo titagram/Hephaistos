@@ -323,6 +323,7 @@ class SandboxTerminalExecutor:
         self._snapshot_builder = snapshot_builder
         self._container_env = _container_environment(decision.sanitized_env)
         self._cancelled = threading.Event()
+        self._invoke_lock = threading.Lock()
         self._environment_lock = threading.RLock()
         self._teardown_lock = threading.RLock()
         self._idle = threading.Event()
@@ -349,6 +350,20 @@ class SandboxTerminalExecutor:
                 self._cleanup_failure or "sandbox execution did not stop"
             )
         return self._cleanup_failure
+
+    def shutdown(self) -> str | None:
+        """Cancel active work and release teardown identities once it is idle."""
+        failure = self.cancel()
+        if not self._idle.is_set():
+            # The invocation still owns its environment and teardown state.
+            # Keep those references intact so its finally block can finish.
+            return failure
+        with self._teardown_lock:
+            self._teardown_results.clear()
+        with self._environment_lock:
+            self._active_environment = None
+            self._active_identity = None
+        return failure
 
     def _recovery_identity(
         self, environment: _TerminalEnvironment
@@ -490,6 +505,28 @@ class SandboxTerminalExecutor:
         timeout: float,
         source: SandboxSource | None,
     ) -> EngineResponse:
+        """Serialize invocations and make shutdown's idle barrier authoritative."""
+        with self._invoke_lock:
+            with self._environment_lock:
+                if self._cancelled.is_set():
+                    return _inconclusive(
+                        request,
+                        "sandbox_execution_cancelled",
+                        "sandbox execution was cancelled by the review authority",
+                    )
+                self._idle.clear()
+            try:
+                return self._invoke_once(request, timeout=timeout, source=source)
+            finally:
+                self._idle.set()
+
+    def _invoke_once(
+        self,
+        request: EngineRequest,
+        *,
+        timeout: float,
+        source: SandboxSource | None,
+    ) -> EngineResponse:
         if request.command not in {"build-test", "test-efficacy"}:
             return _inconclusive(
                 request,
@@ -597,7 +634,6 @@ class SandboxTerminalExecutor:
         environment: _TerminalEnvironment | None = None
         environment_identity: dict[str, str] | None = None
         response: EngineResponse | None = None
-        self._idle.clear()
         try:
             container_config = dict(config)
             container_config.update({
@@ -751,7 +787,6 @@ class SandboxTerminalExecutor:
                 _remove_runtime(runtime, runtime_identity)
             except Exception:
                 pass
-            self._idle.set()
             if cleanup_failure is not None:
                 response = _inconclusive(
                     request,

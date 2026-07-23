@@ -423,8 +423,10 @@ class ReviewAuthority:
             self._closed = True
             listener = self._listener
             self._stop.set()
-            if self._sandbox_executor is not None:
-                sandbox_cleanup_failure = self._sandbox_executor.cancel()
+            sandbox_executor = self._sandbox_executor
+            if sandbox_executor is not None:
+                sandbox_cleanup_failure = sandbox_executor.shutdown()
+                self._sandbox_executor = None
                 if sandbox_cleanup_failure is not None:
                     self._engine_cleanup_failed = True
                     cleanup_failures.append(sandbox_cleanup_failure)

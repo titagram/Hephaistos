@@ -250,7 +250,7 @@ def test_authority_routes_sandboxed_checks_to_terminal_executor_not_host_bridge(
                 diagnostics=(),
             )
 
-        def cancel(self) -> None:
+        def shutdown(self) -> None:
             seen["cancelled"] = True
 
     authority._bridge = HostBridgeMustNotRun()  # type: ignore[assignment]
@@ -366,7 +366,7 @@ def test_authority_close_persists_observed_sandbox_cleanup_failure(
     )
 
     class FailedCleanupExecutor:
-        def cancel(self) -> str:
+        def shutdown(self) -> str:
             return "sandbox cleanup failed: container remains"
 
     authority._sandbox_executor = FailedCleanupExecutor()  # type: ignore[assignment]

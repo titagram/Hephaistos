@@ -1,8 +1,11 @@
 from __future__ import annotations
 
-import json
+import gc
 import hashlib
+import json
 import subprocess
+import threading
+import weakref
 from pathlib import Path
 from typing import Any
 
@@ -588,6 +591,161 @@ def test_distinct_environments_cannot_share_teardown_result_when_ids_are_reused(
     recovery = json.loads((run.root / "sandbox-recovery.json").read_text("utf-8"))
     assert recovery["containerId"] == "b" * 64
     assert recovery["containerName"] == "hermes-review-second"
+
+
+def test_shutdown_releases_torn_down_environment_instances(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run, _ = _run(tmp_path, monkeypatch)
+    decision = decide_execution(
+        target_kind="pr",
+        sandbox="docker",
+        allow_local=False,
+        environ={"PATH": "/usr/bin"},
+    )
+    references: list[weakref.ReferenceType[object]] = []
+
+    class Environment:
+        cleanup_error = None
+
+        def execute(self, command: str, **kwargs: object) -> dict[str, object]:
+            if command == "node --version":
+                return {"returncode": 0, "output": "v22.23.1\n"}
+            if command.startswith("git clone "):
+                return {"returncode": 0, "output": ""}
+            request = json.loads(str(kwargs["stdin_data"]))
+            return {
+                "returncode": 0,
+                "output": json.dumps({
+                    "protocolVersion": 1,
+                    "requestId": request["requestId"],
+                    "status": "passed",
+                    "output": {"packageManager": None, "commands": []},
+                    "diagnostics": [],
+                }),
+            }
+
+        def cleanup(self, *, force_remove: bool = False) -> None:
+            assert force_remove is True
+
+        def wait_for_cleanup(self, timeout: float = 30.0) -> bool:
+            return True
+
+        def recovery_identity(self) -> dict[str, str]:
+            return {}
+
+    def factory(**_kwargs: object) -> Environment:
+        environment = Environment()
+        references.append(weakref.ref(environment))
+        return environment
+
+    executor = SandboxTerminalExecutor(
+        run=run,
+        decision=decision,
+        config_loader=lambda: {
+            "env_type": "docker",
+            "docker_image": "trusted-image",
+        },
+        environment_factory=factory,
+        snapshot_builder=_write_fake_bundle,
+    )
+
+    assert executor.invoke(
+        _request(run), timeout=30, source=_source(run)
+    ).status == "passed"
+    gc.collect()
+    assert references[0]() is not None
+
+    assert executor.shutdown() is None
+    gc.collect()
+    assert references[0]() is None
+
+
+def test_shutdown_waits_for_inflight_teardown_before_releasing_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run, _ = _run(tmp_path, monkeypatch)
+    decision = decide_execution(
+        target_kind="pr",
+        sandbox="docker",
+        allow_local=False,
+        environ={"PATH": "/usr/bin"},
+    )
+    executing = threading.Event()
+    release_execute = threading.Event()
+    cleanup_recorded = threading.Event()
+    shutdown_returned = threading.Event()
+    references: list[weakref.ReferenceType[object]] = []
+    cleanup_calls: list[bool] = []
+
+    class Environment:
+        cleanup_error = "forced cleanup failure"
+
+        def execute(self, command: str, **_kwargs: object) -> dict[str, object]:
+            assert command == "node --version"
+            executing.set()
+            assert release_execute.wait(timeout=5)
+            return {"returncode": 1, "output": ""}
+
+        def cleanup(self, *, force_remove: bool = False) -> None:
+            cleanup_calls.append(force_remove)
+            release_execute.set()
+
+        def wait_for_cleanup(self, timeout: float = 30.0) -> bool:
+            cleanup_recorded.set()
+            return True
+
+        def recovery_identity(self) -> dict[str, str]:
+            return {
+                "containerId": "c" * 64,
+                "containerName": "hermes-review-race",
+                "taskId": f"review-{run.run_id}",
+            }
+
+    def factory(**_kwargs: object) -> Environment:
+        environment = Environment()
+        references.append(weakref.ref(environment))
+        return environment
+
+    executor = SandboxTerminalExecutor(
+        run=run,
+        decision=decision,
+        config_loader=lambda: {
+            "env_type": "docker",
+            "docker_image": "trusted-image",
+        },
+        environment_factory=factory,
+        snapshot_builder=_write_fake_bundle,
+    )
+    responses: list[object] = []
+    invoke_thread = threading.Thread(
+        target=lambda: responses.append(
+            executor.invoke(_request(run), timeout=30, source=_source(run))
+        )
+    )
+    invoke_thread.start()
+    assert executing.wait(timeout=5)
+
+    def shutdown() -> None:
+        executor.shutdown()
+        shutdown_returned.set()
+
+    shutdown_thread = threading.Thread(target=shutdown)
+    shutdown_thread.start()
+    assert cleanup_recorded.wait(timeout=5)
+    assert not shutdown_returned.is_set()
+
+    invoke_thread.join(timeout=5)
+    shutdown_thread.join(timeout=5)
+    assert not invoke_thread.is_alive()
+    assert not shutdown_thread.is_alive()
+    assert shutdown_returned.is_set()
+    assert cleanup_calls == [True]
+    assert getattr(responses[0], "diagnostics")[0].code == "cleanup_failed"
+    recovery = json.loads((run.root / "sandbox-recovery.json").read_text("utf-8"))
+    assert recovery["containerId"] == "c" * 64
+    gc.collect()
+    assert references[0]() is None
 
 
 def test_snapshot_failure_is_inconclusive_and_removes_runtime_staging(
