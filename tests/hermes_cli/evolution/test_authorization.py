@@ -29,6 +29,7 @@ LATER = "2026-07-23T10:02:01.000000Z"
 DIGEST_A = "a" * 64
 DIGEST_B = "b" * 64
 DIGEST_C = "c" * 64
+SEPARATED_OPAQUE = "a1b2c3d4-e5f6g7h8-i9j0k1l2-m3n4o5p6"
 
 
 def research_scope(**changes: object) -> dict[str, object]:
@@ -931,8 +932,13 @@ def test_ordinary_symbolic_families_policies_and_actor_remain_valid(
                 "sk-live-credential",
                 "sk_live",
                 "authorization-protocol-version-2026",
+                "python-3.13",
             ],
-            dependency_families=["python3", "sqlite", "key-rotation"],
+            dependency_families=[
+                "python3",
+                "sqlite",
+                "key-rotation-v2",
+            ],
             isolation_policy={
                 "network-access": "deny",
                 "sandbox-profile": "strict",
@@ -959,6 +965,71 @@ def test_ordinary_symbolic_families_policies_and_actor_remain_valid(
     )
 
     assert grant.approved_by == "auth-operator"
+
+
+@pytest.mark.parametrize(
+    "surface",
+    ["scope-value", "scope-key", "actor", "domain-label"],
+)
+def test_separated_opaque_material_is_rejected_without_echo(
+    ledger: EvolutionLedger,
+    surface: str,
+) -> None:
+    if surface == "actor":
+        request = create_authorization_request(
+            ledger,
+            attempt_id=ledger.attempt_id,
+            kind="research",
+            subject_digest=DIGEST_A,
+            scope=research_scope(),
+            ttl_seconds=120,
+        )
+        confirmation = content_digest(
+            request.canonical_payload(),
+            domain="hades-evolution-authorization-request-v1",
+        )
+        operation = lambda: issue_grant(
+            ledger,
+            request_id=request.request_id,
+            approved_by=SEPARATED_OPAQUE,
+            confirmation_digest=confirmation,
+        )
+        expected_code = "invalid_approver"
+    elif surface == "domain-label":
+        operation = lambda: create_authorization_request(
+            ledger,
+            attempt_id=ledger.attempt_id,
+            kind="research",
+            subject_digest=DIGEST_A,
+            scope=research_scope(
+                domains=[f"{SEPARATED_OPAQUE}.example.com"]
+            ),
+            ttl_seconds=120,
+        )
+        expected_code = "invalid_scope"
+    else:
+        scope = (
+            build_scope(source_families=[SEPARATED_OPAQUE])
+            if surface == "scope-value"
+            else build_scope(
+                isolation_policy={SEPARATED_OPAQUE: "deny"}
+            )
+        )
+        operation = lambda: create_authorization_request(
+            ledger,
+            attempt_id=ledger.attempt_id,
+            kind="build",
+            subject_digest=DIGEST_A,
+            scope=scope,
+            ttl_seconds=120,
+        )
+        expected_code = "invalid_scope"
+
+    with pytest.raises(AuthorizationError) as captured:
+        operation()
+
+    assert captured.value.code == expected_code
+    assert SEPARATED_OPAQUE not in str(captured.value)
 
 
 @pytest.mark.parametrize(

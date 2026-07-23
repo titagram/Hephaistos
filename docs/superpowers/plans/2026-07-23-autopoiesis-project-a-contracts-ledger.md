@@ -332,8 +332,10 @@ transaction.
 Read the issue/deny/consume clock only after `BEGIN IMMEDIATE` acquires the
 write lock. Validate all nested scope symbols and actor identifiers
 syntactically, then apply a separate bounded credential-material detector;
-apply the material detector to every hostname label without rejecting ordinary
-semantic vocabulary. Enforce exact request-to-decision-to-grant coherence,
+analyze compacted and segmented mixed-alphanumeric material independently of
+its separators, and apply the material detector to every hostname label
+without rejecting ordinary semantic vocabulary or bounded version suffixes.
+Enforce exact request-to-decision-to-grant coherence,
 including decision/grant audit timestamps, in SQLite so direct SQL cannot
 invent or reshape authority, and validate canonical UUID lookup identifiers
 before any query. After acquiring the migration lock, re-read the schema
@@ -343,7 +345,10 @@ idempotently.
 - [ ] **Step 5: Prove concurrency behavior**
 
 Use two independent ledger connections and a barrier; exactly one consumer
-succeeds and one receives `grant_unavailable`.
+succeeds and one receives `grant_unavailable`. For concurrent migration,
+synchronize both preflight completion and entry into the real migrator after
+both writable connections exist, then exercise the real `BEGIN IMMEDIATE` and
+migration SQL with bounded waits.
 
 - [ ] **Step 6: Run tests and commit**
 

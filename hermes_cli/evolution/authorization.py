@@ -199,6 +199,24 @@ def _looks_like_credential_material(value: str) -> bool:
     if not has_separator and len(compact) >= 40 and unique >= 14:
         return True
 
+    mixed_segments = [
+        segment
+        for segment in re.split(r"[._-]", value)
+        if len(segment) >= 4
+        and any(character.isalpha() for character in segment)
+        and any(character.isdigit() for character in segment)
+    ]
+    mixed_length = sum(len(segment) for segment in mixed_segments)
+    if (
+        len(compact) >= 24
+        and len(mixed_segments) >= 3
+        and mixed_length * 4 >= len(compact) * 3
+        and unique >= 12
+        and sum(character.isalpha() for character in compact) >= 6
+        and sum(character.isdigit() for character in compact) >= 6
+    ):
+        return True
+
     for prefix in _CREDENTIAL_PREFIXES:
         if not value.startswith(prefix):
             continue

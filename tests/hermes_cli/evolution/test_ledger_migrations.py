@@ -174,18 +174,33 @@ def test_two_connections_that_preflight_v1_concurrently_both_open_v2(
 ) -> None:
     path = tmp_path / "evolution.db"
     _create_valid_v1_database(path)
-    barrier = threading.Barrier(2)
+    preflight_barrier = threading.Barrier(2)
+    migration_barrier = threading.Barrier(2)
     original_preflight = ledger_module._preflight_existing
+    original_migrate = EvolutionLedger._migrate_v1_to_v2
     outcomes: list[object] = []
     lock = threading.Lock()
+    writable_connection_ids: set[int] = set()
 
     def synchronized_preflight(candidate_path, guard):
         version = original_preflight(candidate_path, guard)
-        barrier.wait(timeout=10)
+        preflight_barrier.wait(timeout=10)
         return version
 
     monkeypatch.setattr(
         ledger_module, "_preflight_existing", synchronized_preflight
+    )
+
+    def synchronized_migrate(connection):
+        with lock:
+            writable_connection_ids.add(id(connection))
+        migration_barrier.wait(timeout=10)
+        return original_migrate(connection)
+
+    monkeypatch.setattr(
+        EvolutionLedger,
+        "_migrate_v1_to_v2",
+        staticmethod(synchronized_migrate),
     )
 
     def skip_unrelated_wal_transition(_connection, *, db_label):
@@ -216,6 +231,7 @@ def test_two_connections_that_preflight_v1_concurrently_both_open_v2(
         thread.join(timeout=15)
 
     assert all(not thread.is_alive() for thread in threads)
+    assert len(writable_connection_ids) == 2
     assert outcomes == [
         ledger_module.SCHEMA_VERSION,
         ledger_module.SCHEMA_VERSION,
