@@ -23,11 +23,21 @@ _SENSITIVE_KEY = re.compile(
     re.IGNORECASE,
 )
 _SENSITIVE_ASSIGNMENT = re.compile(
-    r"(?i)\b(api[_-]?key|authorization|credential|password|private[_-]?key|"
-    r"secret|session[_-]?token|access[_-]?token|refresh[_-]?token|token)"
-    r"(\s*[:=]\s*)(?:bearer\s+)?(?:[\"']?)[^\s,;\"'}\]]+"
+    r"(?i)\b((?=[A-Za-z0-9_.-]*(?:api[_-]?key|authorization|cookie|"
+    r"credential|password|private[_-]?key|secret|token))"
+    r"[A-Za-z][A-Za-z0-9_.-]*)"
+    r"(\s*[:=]\s*)(?:bearer\s+)?"
+    r"(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s,;}\]]+)"
 )
 _BEARER = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/-]+=*")
+_CANCELLED_RESULT = re.compile(
+    r"(?i)^\[?\s*(?:(?:tool\s+(?:execution|call)|execution|operation|task)\s+)?"
+    r"(?:was\s+)?(?:aborted|canceled|cancelled|interrupted|skipped|stopped)\b"
+)
+_INTERRUPTED_SKIP = re.compile(
+    r"(?i)\b(?:(?:was\s+)?skipped\s+due\s+to\s+(?:a\s+)?(?:user\s+)?interrupt"
+    r"|user\s+interrupt(?:ed|ion)?)"
+)
 
 
 def _timestamp() -> str:
@@ -90,16 +100,31 @@ def _is_error_result(content: Any) -> bool:
         if structured.get("error") is not None:
             return True
         status = str(structured.get("status") or "").strip().lower()
-        if status in {"denied", "error", "failed", "failure", "timeout"}:
+        if status in {
+            "aborted",
+            "canceled",
+            "cancelled",
+            "denied",
+            "error",
+            "failed",
+            "failure",
+            "interrupted",
+            "skipped",
+            "stopped",
+            "timeout",
+        }:
             return True
 
     first_line = _content_text(content).lstrip().splitlines()
     first = first_line[0].strip().lower() if first_line else ""
+    if _CANCELLED_RESULT.search(first) or _INTERRUPTED_SKIP.search(first):
+        return True
     return first.startswith((
         "denied",
         "error:",
         "exception:",
         "failed:",
+        "keyboardinterrupt",
         "permission denied",
         "traceback ",
     ))

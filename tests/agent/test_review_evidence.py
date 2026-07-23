@@ -79,12 +79,27 @@ def _child_result() -> dict[str, object]:
                             }),
                         },
                     },
+                    {
+                        "id": "cancelled-read",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": json.dumps({"file_path": "/cancelled"}),
+                        },
+                    },
                 ],
             },
             {
                 "role": "tool",
                 "tool_call_id": "diff-read",
-                "content": "diff contents\nAuthorization: Bearer result-secret",
+                "content": (
+                    "diff contents\n"
+                    "Authorization: Bearer result-secret\n"
+                    "OPENAI_API_KEY=sk-openai-result\n"
+                    "ANTHROPIC_API_KEY: sk-anthropic-result\n"
+                    "HERMES_TOKEN=hermes-token-result\n"
+                    "AWS_SECRET_ACCESS_KEY=aws-secret-result\n"
+                    "cookie: cookie-result"
+                ),
             },
             {
                 "role": "tool",
@@ -95,6 +110,14 @@ def _child_result() -> dict[str, object]:
                 "role": "tool",
                 "tool_call_id": "brief-read",
                 "content": "brief contents",
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "cancelled-read",
+                "content": (
+                    "[Tool execution cancelled — read_file was skipped due to "
+                    "user interrupt]"
+                ),
             },
             {
                 "role": "assistant",
@@ -134,6 +157,12 @@ def test_only_active_registered_review_markers_create_private_evidence(
     assert "argument-secret" not in raw
     assert "result-secret" not in raw
     assert "final-secret" not in raw
+    assert "sk-openai-result" not in raw
+    assert "sk-anthropic-result" not in raw
+    assert "hermes-token-result" not in raw
+    assert "aws-secret-result" not in raw
+    assert "cookie-result" not in raw
+    assert "cancelled-read" not in raw
 
     records = [json.loads(line) for line in raw.splitlines()]
     assert records[0]["type"] == "user"
