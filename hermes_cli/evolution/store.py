@@ -8,8 +8,10 @@ import os
 import shutil
 import stat
 import tempfile
+from contextlib import contextmanager
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType
 
@@ -57,6 +59,17 @@ def _readonly_tree(root: Path) -> None:
         _fsync_directory(base)
 
 
+def _remove_owned_tree(root: Path) -> None:
+    for current, directories, files in os.walk(root, topdown=False, followlinks=False):
+        base = Path(current)
+        for name in files:
+            os.chmod(base / name, 0o600)
+        for name in directories:
+            os.chmod(base / name, 0o700)
+        os.chmod(base, 0o700)
+    shutil.rmtree(root)
+
+
 def _write_all(descriptor: int, data: bytes) -> None:
     """Write all bytes, rejecting an I/O implementation that makes no progress."""
 
@@ -86,27 +99,43 @@ class GenerationStore:
         if stat.S_IMODE(info.st_mode) != 0o700:
             raise _error("store root is not private")
 
-    @staticmethod
-    def _read_source(root: Path, relative_path: str) -> bytes:
-        path = root / relative_path
-        info = path.lstat()
-        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
-            raise _error("declared source is unsafe")
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-        descriptor = os.open(path, flags)
+    @contextmanager
+    def _publication_lock(self):
+        import fcntl
+
+        lock = self.root / ".publish.lock"
+        descriptor = os.open(lock, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
         try:
-            opened = os.fstat(descriptor)
-            if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
-                raise _error("declared source changed")
-            chunks: list[bytes] = []
-            while True:
-                chunk = os.read(descriptor, 1024 * 1024)
-                if not chunk:
-                    break
-                chunks.append(chunk)
-            return b"".join(chunks)
+            info = os.fstat(descriptor)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                raise _error("publication lock is unsafe")
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            yield
         finally:
             os.close(descriptor)
+
+    @staticmethod
+    def _read_source(root: Path, relative_path: str) -> bytes:
+        directory = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            parts = relative_path.split("/")
+            for part in parts[:-1]:
+                child = os.open(part, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0), dir_fd=directory)
+                os.close(directory)
+                directory = child
+            descriptor = os.open(parts[-1], os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=directory)
+            try:
+                info = os.fstat(descriptor)
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                    raise _error("declared source is unsafe")
+                chunks: list[bytes] = []
+                while chunk := os.read(descriptor, 1024 * 1024):
+                    chunks.append(chunk)
+                return b"".join(chunks)
+            finally:
+                os.close(descriptor)
+        finally:
+            os.close(directory)
 
     @staticmethod
     def _declared_files(manifest: Mapping[str, object]) -> list[tuple[str, str]]:
@@ -122,21 +151,7 @@ class GenerationStore:
             info = root.lstat()
             if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
                 raise _error("published root is unsafe")
-            manifest_path = root / "manifest.json"
-            manifest_info = manifest_path.lstat()
-            if stat.S_ISLNK(manifest_info.st_mode) or not stat.S_ISREG(manifest_info.st_mode):
-                raise _error("published manifest is unsafe")
-            descriptor = os.open(manifest_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-            try:
-                opened = os.fstat(descriptor)
-                if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
-                    raise _error("published manifest changed")
-                data = b""
-                while chunk := os.read(descriptor, 1024 * 1024):
-                    data += chunk
-            finally:
-                os.close(descriptor)
-            manifest = json.loads(data)
+            manifest = json.loads(self._read_source(root, "manifest.json"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise _error("published manifest is unreadable") from exc
         if not isinstance(manifest, dict):
@@ -174,43 +189,39 @@ class GenerationStore:
             raise _error("staged manifest or bytes") from exc
         generation_id = generation_id_for(manifest)
         destination = self.root / generation_id
-        if destination.exists() or destination.is_symlink():
-            return self._published(generation_id)
-        temporary = Path(tempfile.mkdtemp(prefix=".generation-", dir=self.root))
-        try:
-            final_manifest = dict(manifest)
-            final_manifest["generation_id"] = generation_id
-            for relative_path, digest in self._declared_files(final_manifest):
-                data = self._read_source(staged_root, relative_path)
-                if hashlib.sha256(data).hexdigest() != digest:
-                    raise _error("source digest changed")
-                target = temporary / relative_path
-                target.parent.mkdir(parents=True, exist_ok=True)
-                descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        with self._publication_lock():
+            if destination.exists() or destination.is_symlink():
+                return self._published(generation_id)
+            temporary = Path(tempfile.mkdtemp(prefix=".generation-", dir=self.root))
+            try:
+                final_manifest = dict(manifest)
+                final_manifest["generation_id"] = generation_id
+                for relative_path, digest in self._declared_files(final_manifest):
+                    data = self._read_source(staged_root, relative_path)
+                    if hashlib.sha256(data).hexdigest() != digest:
+                        raise _error("source digest changed")
+                    target = temporary / relative_path
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+                    try:
+                        _write_all(descriptor, data)
+                        os.fsync(descriptor)
+                    finally:
+                        os.close(descriptor)
+                manifest_path = temporary / "manifest.json"
+                descriptor = os.open(manifest_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
                 try:
-                    _write_all(descriptor, data)
+                    _write_all(descriptor, canonical_json_bytes(final_manifest))
                     os.fsync(descriptor)
                 finally:
                     os.close(descriptor)
-            manifest_path = temporary / "manifest.json"
-            descriptor = os.open(manifest_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
-            try:
-                _write_all(descriptor, canonical_json_bytes(final_manifest))
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
-            for current, _, _ in os.walk(temporary, topdown=False):
-                _fsync_directory(Path(current))
-            try:
+                _readonly_tree(temporary)
                 os.rename(temporary, destination)
-            except FileExistsError:
+                _fsync_directory(self.root)
                 return self._published(generation_id)
-            _fsync_directory(self.root)
-            _readonly_tree(destination)
-            return self._published(generation_id)
-        finally:
-            if temporary.exists():
-                shutil.rmtree(temporary)
+            finally:
+                if temporary.exists():
+                    _remove_owned_tree(temporary)
 
     def verify(self, generation_id: str) -> PublishedGeneration:
         self._secure_root()
@@ -229,7 +240,7 @@ class GenerationStore:
             "resource_ceilings": {}, "expected_organism_diff": "empty overlay",
             "build_environment": {"builder": "hermes", "version": stable_base.release},
             "builder_version": stable_base.release, "rollback_plan": "remain on stable base",
-            "incompatibility_reasons": [], "created_at": "1970-01-01T00:00:00.000000Z",
+            "incompatibility_reasons": [], "created_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
         }
         stage = Path(tempfile.mkdtemp(prefix=".baseline-", dir=self.root.parent if self.root.parent.exists() else None))
         try:

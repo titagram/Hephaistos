@@ -120,12 +120,13 @@ def test_manifest_rejects_unsafe_or_incomplete_identity_fields(mutate, code: str
 
 def test_manifest_rehashes_declared_component_and_lockfile_bytes(tmp_path: Path) -> None:
     manifest = _manifest()
-    _stage(tmp_path, manifest)
-    validate_manifest(manifest, tmp_path)
+    stage = tmp_path / "stage"
+    _stage(stage, manifest)
+    validate_manifest(manifest, stage)
 
-    (tmp_path / "bin/hello.sh").write_bytes(b"tampered\n")
+    (stage / "bin/hello.sh").write_bytes(b"tampered\n")
     with pytest.raises(EvolutionContractError, match="invalid_manifest"):
-        validate_manifest(manifest, tmp_path)
+        validate_manifest(manifest, stage)
 
 
 def test_manifest_rejects_a_symlinked_parent_of_declared_bytes(tmp_path: Path) -> None:
@@ -147,3 +148,35 @@ def test_manifest_rejects_generation_id_not_matching_identity() -> None:
 
     with pytest.raises(EvolutionContractError, match="invalid_manifest"):
         validate_manifest(manifest)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda m: m["build_environment"].__setitem__("workspace", "/private/tmp"),
+        lambda m: m["components"][0].__setitem__("source", "https://user@example.test/a"),  # type: ignore[index]
+        lambda m: m.__setitem__("credential_references", ["service/token"]),
+        lambda m: m.__setitem__("created_at", "2026-07-23T12:34:56Z"),
+    ],
+)
+def test_manifest_rejects_noncanonical_privacy_sensitive_nested_fields(mutate) -> None:
+    manifest = _manifest()
+    mutate(manifest)
+
+    with pytest.raises(EvolutionContractError, match="invalid_manifest"):
+        validate_manifest(manifest)
+
+
+@pytest.mark.parametrize("kind", ["extra-dir", "fifo", "manifest"])
+def test_staging_inventory_is_exact_and_has_no_manifest(tmp_path: Path, kind: str) -> None:
+    manifest = _manifest()
+    _stage(tmp_path, manifest)
+    if kind == "extra-dir":
+        (tmp_path / "unexpected").mkdir()
+    elif kind == "fifo":
+        __import__("os").mkfifo(tmp_path / "pipe")
+    else:
+        (tmp_path / "manifest.json").write_text("{}")
+
+    with pytest.raises(EvolutionContractError, match="invalid_manifest"):
+        validate_manifest(manifest, tmp_path)

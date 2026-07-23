@@ -118,6 +118,22 @@ def test_rename_failure_removes_only_the_operation_temporary_directory(
     assert not list((tmp_path / "generations").glob(".generation-*"))
 
 
+def test_metadata_failure_before_rename_cannot_publish_writable_destination(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import hermes_cli.evolution.store as store_module
+
+    store = GenerationStore(tmp_path / "generations")
+    stage = tmp_path / "stage"
+    _stage(stage)
+    monkeypatch.setattr(store_module, "_readonly_tree", lambda _: (_ for _ in ()).throw(OSError("chmod failed")))
+
+    with pytest.raises(OSError, match="chmod failed"):
+        store.publish_staged(stage, _manifest())
+
+    assert not (tmp_path / "generations" / generation_id_for(_manifest())).exists()
+
+
 def test_empty_overlay_baseline_uses_normal_publication(tmp_path: Path) -> None:
     store = GenerationStore(tmp_path / "generations")
     baseline = store.initialize_baseline(
