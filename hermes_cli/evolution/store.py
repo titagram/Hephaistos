@@ -40,6 +40,15 @@ class PublishedGeneration:
     manifest: Mapping[str, object]
 
 
+@dataclass(frozen=True)
+class VerifiedManifestDescriptor:
+    """One descriptor-anchored generation manifest and its exact identity bytes."""
+
+    generation: PublishedGeneration
+    manifest_bytes: bytes
+    manifest_digest: str
+
+
 def _error(message: str) -> ValueError:
     return ValueError(f"generation integrity failure: {message}")
 
@@ -399,7 +408,10 @@ class GenerationStore:
             files.extend((lock["path"], lock["digest"]) for lock in component["lockfiles"])  # type: ignore[index]
         return files
 
-    def _published(self, generation_id: str) -> PublishedGeneration:
+    def _verified_manifest_descriptor(
+        self,
+        generation_id: str,
+    ) -> VerifiedManifestDescriptor:
         root = self.root / generation_id
         try:
             store_descriptor = os.open(self.root, _directory_flags())
@@ -416,13 +428,17 @@ class GenerationStore:
             raise _error("published manifest is unreadable") from exc
         try:
             try:
-                manifest = json.loads(
-                    _read_file_at(generation_descriptor, "manifest.json")
+                manifest_bytes = _read_file_at(
+                    generation_descriptor,
+                    "manifest.json",
                 )
+                manifest = json.loads(manifest_bytes)
             except (UnicodeDecodeError, json.JSONDecodeError) as exc:
                 raise _error("published manifest is unreadable") from exc
             if not isinstance(manifest, dict):
                 raise _error("published manifest is invalid")
+            if canonical_json_bytes(manifest) != manifest_bytes:
+                raise _error("published manifest is not canonical")
             try:
                 _validate_manifest_at_fd(
                     manifest,
@@ -453,16 +469,24 @@ class GenerationStore:
                 or not _same_inode(os.fstat(store_descriptor), self.root.lstat())
             ):
                 raise _error("published root changed during verification")
-            return PublishedGeneration(
-                generation_id,
-                root,
-                MappingProxyType(manifest),
+            generation = PublishedGeneration(
+                generation_id=generation_id,
+                root=root,
+                manifest=MappingProxyType(manifest),
+            )
+            return VerifiedManifestDescriptor(
+                generation=generation,
+                manifest_bytes=manifest_bytes,
+                manifest_digest=hashlib.sha256(manifest_bytes).hexdigest(),
             )
         except OSError as exc:
             raise _error("published content is unreadable") from exc
         finally:
             os.close(generation_descriptor)
             os.close(store_descriptor)
+
+    def _published(self, generation_id: str) -> PublishedGeneration:
+        return self._verified_manifest_descriptor(generation_id).generation
 
     def publish_staged(self, staged_root: Path, manifest: Mapping[str, object]) -> PublishedGeneration:
         """Validate, copy, fsync, atomically publish, then reopen one generation."""
@@ -513,6 +537,16 @@ class GenerationStore:
         self._secure_root()
         require_digest(generation_id)
         return self._published(generation_id)
+
+    def verified_manifest_descriptor(
+        self,
+        generation_id: str,
+    ) -> VerifiedManifestDescriptor:
+        """Verify one generation and return its exact canonical manifest bytes."""
+
+        self._secure_root()
+        require_digest(generation_id)
+        return self._verified_manifest_descriptor(generation_id)
 
     def initialize_baseline(self, stable_base: StableBaseIdentity) -> PublishedGeneration:
         manifest: dict[str, object] = {
