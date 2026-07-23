@@ -135,12 +135,20 @@ review remains available but executable evidence stays inconclusive. Remote
 access is read-only and the final verdict remains a local artifact until a
 separate user-authorized workflow publishes it.
 
-Review sandboxing currently supports `terminal.env_type: docker` only. The
-Docker image must have Node.js 22 or newer and must pre-provision offline test
-dependencies at `/opt/hermes-review-dependencies` (including a `node_modules`
-tree for Vitest or the `python-ready` marker plus pytest for Python). Hades
-forces `network: none`, strips provider credentials, and does not honor user
-Docker flags that could weaken those constraints.
+Review sandboxing currently supports the Docker terminal backend only:
+
+```yaml
+terminal:
+  backend: docker
+```
+
+You can set the same value with
+`hades config set terminal.backend docker`. The Docker image must have Node.js
+22 or newer and must pre-provision offline test dependencies at
+`/opt/hermes-review-dependencies` (including a `node_modules` tree for Vitest
+or the `python-ready` marker plus pytest for Python). Hades forces
+`network: none`, strips provider credentials, and does not honor user Docker
+flags that could weaken those constraints.
 
 Modal, Daytona, SSH, and Singularity currently lack the authority's provable
 workspace-and-network confinement contract. Their executable review checks
