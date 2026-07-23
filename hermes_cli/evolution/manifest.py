@@ -12,15 +12,16 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from .contract import EvolutionContractError, content_digest, require_digest, require_relative_posix_path
+from .authorization import _looks_like_credential_material
 
 
 _EXCLUDED = frozenset({"generation_id", "created_at", "attestations"})
 _TOP = frozenset({"schema_version", "generation_id", "parent_generation_id", "source_suggestion_id", "blueprint_digest", "stable_base", "compatibility_range", "components", "dependency_constraints", "resolved_versions", "credential_references", "service_prerequisites", "capabilities", "invariants", "verification_commands", "canary_policy", "resource_ceilings", "expected_organism_diff", "build_environment", "builder_version", "rollback_plan", "incompatibility_reasons", "created_at", "attestations"})
 _REQUIRED = _TOP - {"generation_id", "attestations"}
 _CLASSES = frozenset({"skill", "script", "plugin", "mcp"})
-_SYMBOL = re.compile(r"[a-z][a-z0-9_-]{0,63}\Z", re.ASCII)
+_SYMBOL = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,63}\Z", re.ASCII)
 _PACKAGE = re.compile(r"[a-z0-9][a-z0-9._-]*(?:/[a-z0-9][a-z0-9._-]*)?(?:@[a-z0-9._+-]+)?\Z", re.ASCII)
-_SENSITIVE = re.compile(r"(?:secret|password|api[_-]?key|access[_-]?token)\Z", re.I)
+_SENSITIVE = re.compile(r"(?:secret|password|api[_-]?key|access[_-]?token|prompt|transcript|raw[_-]?output)\Z", re.I)
 _PATH_KEY = re.compile(r"(?:path|root|workspace|cwd|directory)\Z", re.I)
 _SECRET = re.compile(r"(?:sk|pk)[_-](?:live|test|proj)[_-]|ghp[_-]|github[_-]pat[_-]|glpat[_-]|xox[bp][_-]|akia", re.I)
 _MAX_ITEMS = 64
@@ -47,7 +48,7 @@ def _strings(value: object, *, symbolic: bool = False) -> list[str]:
     if not isinstance(value, list) or len(value) > _MAX_ITEMS:
         _fail()
     values = [_text(item) for item in value]
-    if len(values) != len(set(values)) or (symbolic and any(_SYMBOL.fullmatch(item) is None for item in values)):
+    if len(values) != len(set(values)) or (symbolic and any(_SYMBOL.fullmatch(item) is None or _looks_like_credential_material(item) for item in values)):
         _fail()
     return values
 
@@ -58,7 +59,8 @@ def _privacy(value: object, *, key: str | None = None, depth: int = 0) -> None:
     if key and _SENSITIVE.search(key) and key != "credential_references":
         _fail()
     if isinstance(value, str):
-        if "file://" in value.lower() or _SECRET.search(value) or (key and key != "path" and _PATH_KEY.search(key) and (value.startswith("/") or value.startswith("~"))):
+        local = value.startswith(("/", "~", "./", "../", "\\")) or re.match(r"^[A-Za-z]:[\\/]", value)
+        if "file://" in value.lower() or _SECRET.search(value) or (key and key != "path" and _PATH_KEY.search(key) and local):
             _fail()
     elif isinstance(value, Mapping):
         for child_key, child in _mapping(value).items():

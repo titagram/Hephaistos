@@ -8,6 +8,7 @@ import os
 import shutil
 import stat
 import tempfile
+import sys
 from contextlib import contextmanager
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -52,7 +53,12 @@ def _readonly_tree(root: Path) -> None:
     for current, directories, files in os.walk(root, topdown=False, followlinks=False):
         base = Path(current)
         for name in files:
-            os.chmod(base / name, 0o444)
+            descriptor = os.open(base / name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            try:
+                os.fchmod(descriptor, 0o444)
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
         for name in directories:
             os.chmod(base / name, 0o555)
         os.chmod(base, 0o555)
@@ -88,8 +94,16 @@ class GenerationStore:
         self.root = Path(root) if root is not None else get_hermes_home() / "evolution" / "generations"
 
     def _secure_root(self) -> None:
-        if not self.root.exists():
+        self._require_posix()
+        try:
             self.root.mkdir(parents=True, mode=0o700)
+            created = True
+        except FileExistsError:
+            created = False
+        if created:
+            info = self.root.lstat()
+            if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+                raise _error("store root is unsafe")
             os.chmod(self.root, 0o700)
         info = self.root.lstat()
         if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
@@ -98,6 +112,11 @@ class GenerationStore:
             raise _error("store root ownership")
         if stat.S_IMODE(info.st_mode) != 0o700:
             raise _error("store root is not private")
+
+    @staticmethod
+    def _require_posix() -> None:
+        if os.name != "posix" or not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
+            raise _error("immutable generation store requires POSIX no-follow support")
 
     @contextmanager
     def _publication_lock(self):
