@@ -78,3 +78,47 @@ The full Node suite prints expected stderr from subprocess failure-path fixtures
 Vitest still reports all 701 tests passing. No temporary pytest efficacy trees
 remain. Pre-existing edits to `.superpowers/sdd/progress.md` and
 `.superpowers/sdd/task-4-report.md` were preserved and are not part of this task.
+
+## Reviewer remediation — honor configured discovery roots
+
+Fix commit:
+`b12333580328edbf06ed33c4db1bd9e80a47e334`
+
+The collection probe previously supplied the repository root as an explicit
+pytest positional target. That overrides configured `testpaths` and could make a
+correctly named test outside the project's normal discovery roots appear
+reachable. The probe now runs `--collect-only` without a positional target,
+while retaining the validated `cwd` and `--rootdir` boundary.
+
+The integration fixture now uses `checks/test_not_collected.py`, which matches
+pytest's normal filename pattern but sits outside `testpaths = tests`. Before
+the fix the regression failed because the file was classified `inert`; after
+the fix it is `unreachable`.
+
+Fresh remediation verification:
+
+```text
+scripts/run_tests.sh tests/hermes_cli/engineering_review/test_pytest_probe.py -q
+# 2 passed, 0 failed
+
+npm test --workspace packages/hermes-engineering -- pytest-efficacy.integration.test.ts
+# 1 file passed, 8 tests passed
+
+npm run typecheck --workspace packages/hermes-engineering
+# exit 0
+
+npm run build --workspace packages/hermes-engineering
+# exit 0
+
+prettier --check packages/hermes-engineering/tests/pytest-efficacy.integration.test.ts
+# all matched files use Prettier style
+
+ruff check <Task 7 Python paths>
+# all checks passed
+
+ruff format --check <Task 7 Python paths>
+# 2 files already formatted
+
+git diff --check
+# exit 0
+```
