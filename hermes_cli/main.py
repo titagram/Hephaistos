@@ -303,6 +303,7 @@ from hermes_cli.subcommands.pairing import build_pairing_parser
 from hermes_cli.subcommands.plugins import build_plugins_parser
 from hermes_cli.subcommands.mcp import build_mcp_parser
 from hermes_cli.subcommands.claw import build_claw_parser
+from hermes_cli.subcommands.review import build_review_parser
 
 
 def _require_tty(command_name: str) -> None:
@@ -2399,6 +2400,7 @@ def cmd_chat(args):
         "ignore_rules": getattr(args, "ignore_rules", False) or getattr(args, "safe_mode", False),
         "ignore_user_config": getattr(args, "ignore_user_config", False) or getattr(args, "safe_mode", False),
         "compact": getattr(args, "compact", False),
+        "session_ready_callback": getattr(args, "session_ready_callback", None),
     }
     # Filter out None values
     kwargs = {k: v for k, v in kwargs.items() if v is not None}
@@ -2428,6 +2430,13 @@ def cmd_proxy(args):
     rc = _cmd_proxy(args)
     if isinstance(rc, int) and rc != 0:
         raise SystemExit(rc)
+
+
+def cmd_review(args):
+    """Run the autonomous engineering-review workflow."""
+    from hermes_cli.engineering_review.command import review_command
+
+    return review_command(args)
 
 
 def cmd_whatsapp(args):
@@ -11964,7 +11973,7 @@ _BUILTIN_SUBCOMMANDS = frozenset(
         "model", "pairing", "pets", "plugins", "portal", "postinstall", "profile",
         "project", "proxy",
         "prompt-size",
-        "send", "sessions", "setup",
+        "review", "send", "sessions", "setup",
         "skills", "slack", "status", "tools", "uninstall", "update",
         "version", "webhook", "whatsapp", "whatsapp-cloud", "chat", "secrets", "security",
         # Help-ish invocations — plugin commands not being listed in
@@ -12056,7 +12065,7 @@ def _plugin_cli_discovery_needed() -> bool:
     return True
 
 
-_AGENT_COMMANDS = {None, "chat", "acp", "rl"}
+_AGENT_COMMANDS = {None, "chat", "review", "acp", "rl"}
 _AGENT_SUBCOMMANDS = {
     "cron": ("cron_command", {"run", "tick"}),
     "gateway": ("gateway_command", {"run"}),
@@ -12480,6 +12489,10 @@ def main():
 
     parser, subparsers, chat_parser = build_top_level_parser()
     chat_parser.set_defaults(func=cmd_chat)
+
+    # Public engineering review: a narrow front door into the normal chat
+    # lifecycle, with its deterministic skill preloaded by the handler.
+    build_review_parser(subparsers, cmd_review=cmd_review)
 
     # =========================================================================
     # model command  (parser built in hermes_cli/subcommands/model.py)

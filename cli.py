@@ -42,7 +42,7 @@ from urllib.parse import unquote, urlparse
 from contextlib import contextmanager
 from pathlib import Path
 from datetime import datetime
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -15276,6 +15276,7 @@ def main(
     pass_session_id: bool = False,
     ignore_user_config: bool = False,
     ignore_rules: bool = False,
+    session_ready_callback: Optional[Callable[[str], None]] = None,
 ):
     """
     Hades Agent CLI - Interactive AI Assistant
@@ -15412,6 +15413,13 @@ def main(
         pass_session_id=pass_session_id,
         ignore_rules=ignore_rules,
     )
+
+    # Specialized long-lived workflows may register process-local authority
+    # only after AIAgent has assigned a session ID. This hook is deliberately
+    # not a CLI flag and runs before skill preprocessing, so session-templated
+    # skills see the same live owner for their entire lifecycle.
+    if session_ready_callback is not None:
+        session_ready_callback(cli.session_id)
 
     if parsed_skills:
         skills_prompt, loaded_skills, missing_skills = build_preloaded_skills_prompt(

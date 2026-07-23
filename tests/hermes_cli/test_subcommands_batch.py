@@ -29,6 +29,7 @@ from hermes_cli.subcommands.logs import build_logs_parser
 from hermes_cli.subcommands.model import build_model_parser
 from hermes_cli.subcommands.postinstall import build_postinstall_parser
 from hermes_cli.subcommands.prompt_size import build_prompt_size_parser
+from hermes_cli.subcommands.review import build_review_parser
 from hermes_cli.subcommands.security import build_security_parser
 from hermes_cli.subcommands.setup import build_setup_parser
 from hermes_cli.subcommands.slack import build_slack_parser
@@ -73,6 +74,7 @@ SINGLE_HANDLER_CASES = [
     ("gui", build_gui_parser, "cmd_gui", ["gui"]),
     ("logs", build_logs_parser, "cmd_logs", ["logs"]),
     ("prompt-size", build_prompt_size_parser, "cmd_prompt_size", ["prompt-size"]),
+    ("review", build_review_parser, "cmd_review", ["review"]),
 ]
 
 
