@@ -133,6 +133,11 @@ def test_launch_review_chat_owns_authority_for_chat_lifecycle(
 
     monkeypatch.setattr(command, "ReviewAuthority", FakeAuthority)
     monkeypatch.setattr(command, "_load_chat_command", lambda: fake_chat)
+    monkeypatch.setattr(
+        command,
+        "_prune_completed_review_runs",
+        lambda: events.append("prune"),
+    )
     monkeypatch.setenv("HERMES_YOLO_MODE", "1")
     args = _parser().parse_args(["review", "HEAD~1..HEAD", "--effort", "high"])
 
@@ -166,8 +171,32 @@ def test_launch_review_chat_owns_authority_for_chat_lifecycle(
             backend=None,
         ),
     }
-    assert events[2:] == ["start", "running", "close"]
+    assert events[2:] == ["start", "running", "close", "prune"]
     assert os.environ["HERMES_YOLO_MODE"] == "1"
+
+
+def test_review_lifecycle_prunes_with_profile_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from hermes_cli.engineering_review import runs
+
+    home = tmp_path / "hermes-home"
+    home.mkdir()
+    (home / "config.yaml").write_text(
+        "review:\n  retention_runs: 7\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    seen: list[tuple[Path, int]] = []
+    monkeypatch.setattr(
+        runs,
+        "prune_completed_runs",
+        lambda configured_home, keep: seen.append((configured_home, keep)) or [],
+    )
+
+    command._prune_completed_review_runs()
+
+    assert seen == [(home, 7)]
 
 
 @pytest.mark.parametrize(

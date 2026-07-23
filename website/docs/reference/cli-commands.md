@@ -38,6 +38,7 @@ hermes [global-options] <command> [subcommand/options]
 | Command | Purpose |
 |---------|---------|
 | `hermes chat` | Interactive or one-shot chat with the agent. |
+| `hermes review [target]` | Run an autonomous, evidence-backed engineering review without publishing or modifying the remote target. |
 | `hermes model` | Interactively choose the default provider and model. |
 | `hermes moa` | Configure named Mixture of Agents presets selectable from the model picker. |
 | `hermes fallback` | Manage fallback providers tried when the primary model errors. |
@@ -91,6 +92,53 @@ hermes [global-options] <command> [subcommand/options]
 | `hermes version` | Show version information. |
 | `hermes update` | Pull latest code and reinstall dependencies. `--check` previews without installing; `--backup` takes a pre-pull `HERMES_HOME` snapshot. |
 | `hermes uninstall` | Remove Hermes from the system. |
+
+## `hermes review`
+
+```bash
+hermes review [target] [--effort low|medium|high]
+hermes review cleanup --run RUN_ID
+```
+
+`target` can be:
+
+- omitted or `local` for staged, unstaged, and untracked changes;
+- a Git range such as `HEAD~3..HEAD`;
+- a diff file path;
+- a GitHub pull-request URL.
+
+`--effort` controls review depth and reviewer count. It defaults to `medium`;
+the supported values are `low`, `medium`, and `high`. The engine detects
+pytest and Vitest projects and runs the applicable real test process. If both
+runners apply and the correct choice cannot be proven, the result is
+`inconclusive` until the review conversation resolves the ambiguity.
+
+Each deterministic operation reports `passed`, `failed`, or `inconclusive`.
+`failed` includes a check that ran and disproved a required property;
+`inconclusive` means the engine could not safely prove an answer. The final
+report includes residual uncertainty and is written under
+`~/.hermes/reviews/<session-id>/<run-id>/`.
+
+Remote behavior is read-only: the command may fetch a PR for local inspection,
+but it never pushes, merges, comments, approves, or requests changes. Its
+verdict remains local until you publish it separately. Repository-controlled
+code from a pull request runs only in a configured Hermes sandbox or after an
+explicit local-execution approval. If neither is available, executable checks
+are denied while static review continues.
+
+The packaged engine requires Node.js 22 or newer. Completed artifacts are
+bounded by `review.retention_runs` (default `30`); active and cleanup-failed
+runs are preserved. If cleanup fails, use the printed recovery command:
+
+```bash
+hermes review cleanup --run RUN_ID
+```
+
+The deterministic implementation incorporates a pinned source slice from
+[Qwen Code](https://github.com/QwenLM/qwen-code/tree/d064bd7dcf98e0255283068a775f6e49d70db8aa)
+under the [Apache-2.0 license](https://www.apache.org/licenses/LICENSE-2.0).
+The installed package includes the corresponding notice, license, and
+hash-based provenance manifest.
 
 ## `hermes chat`
 

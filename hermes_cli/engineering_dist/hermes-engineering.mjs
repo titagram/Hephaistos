@@ -6001,6 +6001,12 @@ var within3 = (root, candidate) => {
   return rel === "" || !rel.startsWith(`..${sep6}`) && rel !== ".." && !isAbsolute7(rel);
 };
 var findModuleRoot = () => {
+  const trustedRoot = process.env.HERMES_ENGINE_PYTHON_ROOT;
+  if (trustedRoot !== void 0 && isAbsolute7(trustedRoot) && existsSync6(
+    resolve11(trustedRoot, "hermes_cli/engineering_review/pytest_probe.py")
+  )) {
+    return realpathSync7(trustedRoot);
+  }
   let cursor = resolve11(import.meta.dirname);
   for (; ; ) {
     if (existsSync6(
@@ -6014,6 +6020,10 @@ var findModuleRoot = () => {
   }
 };
 var defaultPython = () => {
+  const trustedPython = process.env.HERMES_ENGINE_PYTHON;
+  if (trustedPython !== void 0 && isAbsolute7(trustedPython) && existsSync6(trustedPython)) {
+    return resolve11(trustedPython);
+  }
   const root = findModuleRoot();
   const names = process.platform === "win32" ? [".venv/Scripts/python.exe", "venv/Scripts/python.exe"] : [".venv/bin/python", "venv/bin/python"];
   for (const name of names) {

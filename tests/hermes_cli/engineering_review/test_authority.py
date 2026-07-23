@@ -5,6 +5,7 @@ from __future__ import annotations
 import gc
 import json
 import os
+import stat
 import subprocess
 import sys
 import weakref
@@ -275,6 +276,54 @@ def test_authority_rejects_unverified_peer_and_bundle_selection_fields(
         )
         with pytest.raises(ReviewAuthorityUnavailable, match="ownership"):
             ReviewAuthorityClient("parent").start()
+
+
+def test_client_reads_structured_response_when_peer_closes_before_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ClosingPeerSocket:
+        def __enter__(self) -> ClosingPeerSocket:
+            return self
+
+        def __exit__(self, *_exc_info: object) -> None:
+            pass
+
+        def settimeout(self, _timeout: float) -> None:
+            pass
+
+        def connect(self, _path: str) -> None:
+            pass
+
+        def shutdown(self, _how: int) -> None:
+            raise OSError("peer already closed")
+
+    client = ReviewAuthorityClient("parent")
+    socket_mode = stat.S_IFSOCK | 0o600
+    monkeypatch.setattr(
+        Path,
+        "lstat",
+        lambda _path: SimpleNamespace(st_mode=socket_mode, st_uid=os.geteuid()),
+    )
+    monkeypatch.setattr(
+        authority_module, "_private_socket_directory", lambda _path: None
+    )
+    monkeypatch.setattr(
+        authority_module.socket,
+        "socket",
+        lambda *_args: ClosingPeerSocket(),
+    )
+    monkeypatch.setattr(authority_module, "_send_message", lambda *_args: None)
+    monkeypatch.setattr(
+        authority_module,
+        "_read_message",
+        lambda _connection: {
+            "ok": False,
+            "error": "authority client ownership could not be verified",
+        },
+    )
+
+    with pytest.raises(ReviewAuthorityUnavailable, match="ownership"):
+        client.start()
 
 
 def test_unsafe_socket_directory_rolls_back_capability(

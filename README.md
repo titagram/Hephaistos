@@ -163,6 +163,30 @@ For the full command lists, see the [CLI guide](https://hades-agent.local/docs/u
 
 ---
 
+## Evidence-backed engineering reviews
+
+Run an autonomous local review from a repository with either command name:
+
+```bash
+hades review --effort medium
+# equivalent:
+hermes review HEAD~3..HEAD --effort high
+```
+
+The review accepts local changes (including untracked files), a Git range, a
+diff file, or a GitHub pull-request URL. It uses real pytest or Vitest probes
+when applicable, records its evidence under `~/.hermes/reviews/`, and leaves
+the verdict local: it never pushes, merges, comments on, approves, or requests
+changes on a remote PR. Reviewing untrusted PR code requires a configured
+sandbox or explicit approval before build/tests run; static review remains
+available when execution is denied. Node.js 22 or newer is required.
+
+The deterministic review engine incorporates a provenance-pinned source slice
+from [Qwen Code](https://github.com/QwenLM/qwen-code), licensed under
+[Apache-2.0](https://www.apache.org/licenses/LICENSE-2.0).
+
+---
+
 ## Documentation
 
 All documentation lives at **[hades-agent.local/docs](https://hades-agent.local/docs/)**:

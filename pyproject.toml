@@ -332,6 +332,7 @@ hermes_cli = [
   "tui_dist/**/*",
   "engineering_dist/*.mjs",
   "engineering_dist/NOTICE.qwen-code",
+  "engineering_dist/UPSTREAM.qwen-code.json",
   "scripts/install.sh",
   "scripts/install.ps1"
 ]

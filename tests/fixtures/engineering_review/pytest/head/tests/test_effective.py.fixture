@@ -1,0 +1,5 @@
+from feature import answer
+
+
+def test_effective_regression_gate() -> None:
+    assert answer() == 2

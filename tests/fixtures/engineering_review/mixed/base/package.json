@@ -1,0 +1,11 @@
+{
+  "name": "engineering-review-mixed-fixture",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.5"
+  }
+}

@@ -94,6 +94,40 @@ Hermes will:
 
 If you're happy with the quality, time to automate it.
 
+### Use the evidence-backed local review command
+
+For a one-off review with deterministic artifacts, real test-efficacy probes,
+reviewer coverage checks, and deduplicated findings, run the dedicated command
+from a checkout of the repository:
+
+```bash
+hermes review https://github.com/OWNER/REPOSITORY/pull/42 --effort medium
+```
+
+The command supports `low`, `medium`, and `high` effort, requires Node.js 22 or
+newer, and detects pytest and Vitest projects. Its deterministic operations
+report `passed`, `failed`, or `inconclusive`; when both test runners apply and
+the choice is ambiguous, the review asks for clarification instead of guessing.
+Artifacts and the final report are stored under
+`~/.hermes/reviews/<session-id>/<run-id>/`.
+
+This workflow is deliberately read-only with respect to GitHub. It can fetch
+the requested PR into a disposable local worktree, but it does not push,
+merge, comment, approve, or request changes. The verdict remains local until
+you explicitly publish it through a separate workflow.
+
+:::caution Reviewing untrusted pull requests
+PR-controlled build and test code runs only through a configured Hermes
+sandbox. With the local terminal backend, Hermes asks for explicit one-session
+approval before executing it. Denying or not answering that prompt leaves
+static review available and marks executable evidence inconclusive; it does
+not silently run the PR code.
+:::
+
+The engine incorporates a provenance-pinned source slice from
+[Qwen Code](https://github.com/QwenLM/qwen-code/tree/d064bd7dcf98e0255283068a775f6e49d70db8aa),
+licensed under [Apache-2.0](https://www.apache.org/licenses/LICENSE-2.0).
+
 ---
 
 ## Step 3: Create a Review Skill

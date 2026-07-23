@@ -52,6 +52,16 @@ const within = (root: string, candidate: string): boolean => {
 };
 
 const findModuleRoot = (): string => {
+  const trustedRoot = process.env.HERMES_ENGINE_PYTHON_ROOT;
+  if (
+    trustedRoot !== undefined &&
+    isAbsolute(trustedRoot) &&
+    existsSync(
+      resolve(trustedRoot, "hermes_cli/engineering_review/pytest_probe.py"),
+    )
+  ) {
+    return realpathSync(trustedRoot);
+  }
   let cursor = resolve(import.meta.dirname);
   for (;;) {
     if (
@@ -68,6 +78,16 @@ const findModuleRoot = (): string => {
 };
 
 const defaultPython = (): string => {
+  const trustedPython = process.env.HERMES_ENGINE_PYTHON;
+  if (
+    trustedPython !== undefined &&
+    isAbsolute(trustedPython) &&
+    existsSync(trustedPython)
+  ) {
+    // Keep a venv launcher path intact. Resolving its symlink to the base
+    // interpreter silently drops the venv's pytest installation.
+    return resolve(trustedPython);
+  }
   const root = findModuleRoot();
   const names =
     process.platform === "win32"

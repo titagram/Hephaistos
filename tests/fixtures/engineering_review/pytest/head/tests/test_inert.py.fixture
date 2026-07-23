@@ -1,0 +1,5 @@
+from feature import answer
+
+
+def test_inert_sibling() -> None:
+    assert answer() > 0

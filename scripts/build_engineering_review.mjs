@@ -1,3 +1,4 @@
+import { copyFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 import { build } from "esbuild";
@@ -33,3 +34,11 @@ await build({
     },
   ],
 });
+
+await copyFile(
+  resolve(repositoryRoot, "third_party/qwen-code/UPSTREAM.json"),
+  resolve(
+    repositoryRoot,
+    "hermes_cli/engineering_dist/UPSTREAM.qwen-code.json",
+  ),
+);
