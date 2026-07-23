@@ -34,6 +34,11 @@ from .bridge import EngineeringReviewBridge
 from .execution_policy import ExecutionDecision, decide_execution, target_kind_for
 from .protocol import MAX_TRANSPORT_BYTES, EngineRequest, EngineResponse
 from .runs import Effort, ReviewRun, ReviewRunError
+from .terminal_execution import (
+    SandboxSource,
+    SandboxTerminalExecutor,
+    sandbox_source_from_capture,
+)
 
 
 _AUTHORITY_VERSION = 1
@@ -137,6 +142,8 @@ class ReviewAuthority:
             sandbox=None,
             allow_local=False,
         )
+        self._sandbox_executor: SandboxTerminalExecutor | None = None
+        self._sandbox_source: SandboxSource | None = None
         self._engine_cleanup_failed = False
         self._capture_completed = False
         self._cleanup_completed = False
@@ -312,13 +319,37 @@ class ReviewAuthority:
                     artifact_root=request.artifact_root,
                     input=trusted_input,
                 )
-            response = self._bridge.invoke(
-                request, timeout=timeout, cancel_event=self._stop
-            )
+            if (
+                request.command in {"build-test", "test-efficacy"}
+                and self._execution_decision.mode == "sandbox"
+            ):
+                executor = self._sandbox_executor
+                if executor is None:
+                    executor = SandboxTerminalExecutor(
+                        run=self.run,
+                        decision=self._execution_decision,
+                    )
+                    self._sandbox_executor = executor
+                response = executor.invoke(
+                    request,
+                    timeout=timeout,
+                    source=self._sandbox_source,
+                )
+            else:
+                response = self._bridge.invoke(
+                    request, timeout=timeout, cancel_event=self._stop
+                )
             if request.command == "capture-target" and isinstance(
                 response.output.get("planPath"), str
             ):
                 self._capture_completed = True
+                if self._execution_decision.mode == "sandbox":
+                    try:
+                        self._sandbox_source = sandbox_source_from_capture(
+                            self.run, response.output
+                        )
+                    except ReviewRunError:
+                        self._sandbox_source = None
             if request.command == "cleanup":
                 self._engine_cleanup_failed = response.status != "passed"
                 self._cleanup_completed = response.status == "passed"
@@ -364,6 +395,8 @@ class ReviewAuthority:
             self._closed = True
             listener = self._listener
             self._stop.set()
+            if self._sandbox_executor is not None:
+                self._sandbox_executor.cancel()
             if listener is not None:
                 try:
                     listener.close()
@@ -413,8 +446,7 @@ class ReviewAuthority:
             raise
         finally:
             self._record_terminal_state(
-                cleanup_failed=bool(cleanup_failures)
-                or self._engine_cleanup_failed,
+                cleanup_failed=bool(cleanup_failures) or self._engine_cleanup_failed,
                 cause="; ".join(cleanup_failures) or "normal close",
             )
 

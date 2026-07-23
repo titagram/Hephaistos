@@ -593,6 +593,8 @@ class DockerEnvironment(BaseEnvironment):
         run_as_host_user: bool = False,
         extra_args: list = None,
         persist_across_processes: bool = True,
+        mount_hermes_resources: bool = True,
+        allow_implicit_env_passthrough: bool = True,
     ):
         if cwd == "~":
             cwd = "/root"
@@ -602,6 +604,7 @@ class DockerEnvironment(BaseEnvironment):
         self._task_id = task_id
         self._forward_env = _normalize_forward_env_names(forward_env)
         self._env = _normalize_env_dict(env)
+        self._allow_implicit_env_passthrough = allow_implicit_env_passthrough
         self._container_id: Optional[str] = None
         self._labels: dict[str, str] = {}
         self._image: str = ""
@@ -712,7 +715,9 @@ class DockerEnvironment(BaseEnvironment):
                 get_cache_directory_mounts,
             )
 
-            for mount_entry in get_credential_file_mounts():
+            for mount_entry in (
+                get_credential_file_mounts() if mount_hermes_resources else []
+            ):
                 src = Path(mount_entry["host_path"])
                 if src.is_dir():
                     # Docker-in-Docker: Docker auto-created the source path as
@@ -741,7 +746,9 @@ class DockerEnvironment(BaseEnvironment):
 
             # Mount skill directories (local + external) so skill
             # scripts/templates are available inside the container.
-            for skills_mount in get_skills_directory_mount():
+            for skills_mount in (
+                get_skills_directory_mount() if mount_hermes_resources else []
+            ):
                 src = Path(skills_mount["host_path"])
                 if not src.is_dir():
                     logger.warning(
@@ -763,7 +770,9 @@ class DockerEnvironment(BaseEnvironment):
             # screenshots) so the agent can access uploaded files and other
             # cached media from inside the container.  Read-only — the
             # container reads these but the host gateway manages writes.
-            for cache_mount in get_cache_directory_mounts():
+            for cache_mount in (
+                get_cache_directory_mounts() if mount_hermes_resources else []
+            ):
                 src = Path(cache_mount["host_path"])
                 if not src.is_dir():
                     logger.warning(
@@ -985,11 +994,12 @@ class DockerEnvironment(BaseEnvironment):
 
         explicit_forward_keys = set(self._forward_env)
         passthrough_keys: set[str] = set()
-        try:
-            from tools.env_passthrough import get_all_passthrough
-            passthrough_keys = set(get_all_passthrough())
-        except Exception:
-            pass
+        if getattr(self, "_allow_implicit_env_passthrough", True):
+            try:
+                from tools.env_passthrough import get_all_passthrough
+                passthrough_keys = set(get_all_passthrough())
+            except Exception:
+                pass
         # Explicit docker_forward_env entries are an intentional opt-in and must
         # win over the generic Hermes secret blocklist. Only implicit passthrough
         # keys are filtered.

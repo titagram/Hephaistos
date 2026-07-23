@@ -1374,7 +1374,10 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
                         ssh_config: dict = None, container_config: dict = None,
                         local_config: dict = None,
                         task_id: str = "default",
-                        host_cwd: str = None):
+                        host_cwd: str = None,
+                        network: bool = True,
+                        mount_hermes_resources: bool = True,
+                        allow_implicit_env_passthrough: bool = True):
     """
     Create an execution environment for sandboxed command execution.
     
@@ -1425,6 +1428,9 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
             run_as_host_user=cc.get("docker_run_as_host_user", False),
             extra_args=docker_extra_args,
             persist_across_processes=cc.get("docker_persist_across_processes", True),
+            network=network,
+            mount_hermes_resources=mount_hermes_resources,
+            allow_implicit_env_passthrough=allow_implicit_env_passthrough,
         )
     
     elif env_type == "singularity":
