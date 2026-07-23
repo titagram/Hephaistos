@@ -9,8 +9,9 @@ authority then injects the immutable decision into executable engine requests.
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
-from typing import Literal, Mapping
+from typing import Literal, Mapping, cast
 
 
 TargetKind = Literal["local", "file", "range", "pr"]
@@ -36,6 +37,12 @@ _SAFE_ENV_NAMES = frozenset({
     "LANG",
     "LANGUAGE",
 })
+_GITHUB_PR_URL = re.compile(
+    r"^https?://github\.com/"
+    r"(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+)/"
+    r"pull/(?P<number>[1-9][0-9]*)/?$",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,11 +130,34 @@ def decide_execution(
 
 def target_kind_for(target: str) -> TargetKind:
     """Classify the public target without inspecting untrusted target content."""
+    return cast(TargetKind, canonical_capture_input(target)["kind"])
+
+
+def canonical_capture_input(target: str) -> dict[str, object]:
+    """Translate the registered public target into its sole capture request.
+
+    The returned value is authority-owned.  A proxy may submit a capture
+    request, but it cannot change a local review into a PR review (or the
+    reverse) by choosing a different input kind.
+    """
+    if not isinstance(target, str):
+        raise ValueError("target must be a string")
     value = target.strip()
+    if not value:
+        raise ValueError("target must not be empty")
     if value == "local":
-        return "local"
-    if value.startswith(("https://github.com/", "http://github.com/")) and "/pull/" in value:
-        return "pr"
+        return {"kind": "local"}
+    pull_request = _GITHUB_PR_URL.fullmatch(value)
+    if pull_request is not None:
+        return {
+            "kind": "pr",
+            "ownerRepo": (
+                f"{pull_request.group('owner')}/{pull_request.group('repo')}"
+            ),
+            "number": int(pull_request.group("number")),
+        }
+    if value.lower().startswith(("http://github.com/", "https://github.com/")):
+        raise ValueError("GitHub pull-request target URL is invalid")
     if ".." in value or value.upper() == "HEAD":
-        return "range"
-    return "file"
+        return {"kind": "range", "range": value}
+    return {"kind": "file", "path": value}

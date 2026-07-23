@@ -145,6 +145,66 @@ def test_authority_replaces_caller_execution_policy(
         authority.close()
 
 
+def test_authority_replaces_local_to_pr_capture_confusion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "hermes"
+    workspace = tmp_path / "workspace"
+    home.mkdir(mode=0o700)
+    workspace.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    authority = ReviewAuthority(
+        workspace=workspace,
+        target="local",
+        effort="low",
+        session_id="session-1",
+    )
+    seen: list[object] = []
+
+    class FakeBridge:
+        def invoke(self, request: object, **_kwargs: object) -> EngineResponse:
+            seen.append(request)
+            command = request.command  # type: ignore[attr-defined]
+            return EngineResponse(
+                request_id=request.request_id,  # type: ignore[attr-defined]
+                status="passed",
+                output=(
+                    {
+                        "planPath": str(authority.run.root / "plan.json"),
+                        "targetKind": "local",
+                    }
+                    if command == "capture-target"
+                    else {}
+                ),
+                diagnostics=(),
+            )
+
+    authority._bridge = FakeBridge()  # type: ignore[assignment]
+    try:
+        authority._dispatch({
+            "version": 1,
+            "action": "invoke",
+            "request": {
+                "protocolVersion": 1,
+                "requestId": "capture-confusion",
+                "command": "capture-target",
+                "workspace": str(workspace),
+                "artifactRoot": str(authority.run.root),
+                "input": {
+                    "kind": "pr",
+                    "ownerRepo": "attacker/project",
+                    "number": 99,
+                },
+            },
+            "timeout": 5,
+        })
+        captured = seen[0]
+        assert captured.input == {"kind": "local"}  # type: ignore[attr-defined]
+        assert authority._execution_decision.mode == "local"
+    finally:
+        authority.close()
+
+
 def test_authority_routes_sandboxed_checks_to_terminal_executor_not_host_bridge(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -255,6 +315,7 @@ def test_authority_close_retries_registered_capture_cleanup(
                 status="passed",
                 output=(
                     {"planPath": str(authority.run.root / "plan.json")}
+                    | {"targetKind": "range"}
                     if command == "capture-target"
                     else {}
                 ),
@@ -280,3 +341,74 @@ def test_authority_close_retries_registered_capture_cleanup(
 
     assert calls == ["capture-target", "cleanup"]
     assert authority.run.status == "complete"
+
+
+def test_authority_close_persists_observed_sandbox_cleanup_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "hermes"
+    workspace = tmp_path / "workspace"
+    home.mkdir(mode=0o700)
+    workspace.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    decision = decide_execution(
+        target_kind="pr",
+        sandbox="docker",
+        allow_local=False,
+        environ={"PATH": "/bin"},
+    )
+    authority = ReviewAuthority(
+        workspace=workspace,
+        target="https://github.com/o/r/pull/1",
+        effort="low",
+        session_id="session-1",
+        execution_decision=decision,
+    )
+
+    class FailedCleanupExecutor:
+        def cancel(self) -> str:
+            return "sandbox cleanup failed: container remains"
+
+    authority._sandbox_executor = FailedCleanupExecutor()  # type: ignore[assignment]
+
+    authority.close()
+
+    assert authority.run.status == "cleanup_failed"
+
+
+def test_later_worktree_cleanup_cannot_erase_sandbox_cleanup_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "hermes"
+    workspace = tmp_path / "workspace"
+    home.mkdir(mode=0o700)
+    workspace.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    authority = ReviewAuthority(
+        workspace=workspace,
+        target="local",
+        effort="low",
+        session_id="session-1",
+    )
+
+    class PassingCleanupBridge:
+        def invoke(self, request: object, **_kwargs: object) -> EngineResponse:
+            return EngineResponse(
+                request_id=request.request_id,  # type: ignore[attr-defined]
+                status="passed",
+                output={},
+                diagnostics=(),
+            )
+
+    authority._bridge = PassingCleanupBridge()  # type: ignore[assignment]
+    authority._engine_cleanup_failed = True
+    authority._dispatch({
+        "version": 1,
+        "action": "cleanup",
+        "runId": authority.run.run_id,
+        "timeout": 5,
+    })
+
+    authority.close()
+
+    assert authority.run.status == "cleanup_failed"

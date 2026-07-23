@@ -118,7 +118,7 @@ describe("cleanup recovery", () => {
     expect(result.status).toBe("inconclusive");
     expect(readFileSync(join(protectedPath, "keep"), "utf8")).toBe("safe");
     expect(result.output.recoveryCommand).toBe(
-      `hermes-review-engine cleanup --run ${value.runId}`,
+      `hermes review cleanup --run ${value.runId}`,
     );
   });
 

@@ -31,7 +31,12 @@ from typing import Any, Mapping
 from hermes_constants import get_hermes_home
 
 from .bridge import EngineeringReviewBridge
-from .execution_policy import ExecutionDecision, decide_execution, target_kind_for
+from .execution_policy import (
+    ExecutionDecision,
+    canonical_capture_input,
+    decide_execution,
+    target_kind_for,
+)
 from .protocol import MAX_TRANSPORT_BYTES, EngineRequest, EngineResponse
 from .runs import Effort, ReviewRun, ReviewRunError
 from .terminal_execution import (
@@ -137,8 +142,9 @@ class ReviewAuthority:
         self._stop = threading.Event()
         self._socket_identity: tuple[int, int] | None = None
         self._bridge = EngineeringReviewBridge(require_authority=True)
+        self._capture_input = canonical_capture_input(target)
         self._execution_decision = execution_decision or decide_execution(
-            target_kind=target_kind_for(target),
+            target_kind=self._capture_input["kind"],  # type: ignore[arg-type]
             sandbox=None,
             allow_local=False,
         )
@@ -306,6 +312,20 @@ class ReviewAuthority:
                 raise ReviewAuthorityUnavailable(
                     "workspace does not match the registered run"
                 )
+            if request.command == "capture-target":
+                if self._capture_completed:
+                    raise ReviewAuthorityUnavailable(
+                        "the registered target was already captured"
+                    )
+                # The public target persisted in run.json is the only capture
+                # authority.  Caller/model fields are discarded wholesale.
+                request = EngineRequest(
+                    request_id=request.request_id,
+                    command=request.command,
+                    workspace=request.workspace,
+                    artifact_root=request.artifact_root,
+                    input=dict(self._capture_input),
+                )
             if request.command in {"build-test", "test-efficacy"}:
                 # The proxy/model cannot choose or weaken executable-code
                 # policy.  Replace any caller value with the authority-owned
@@ -342,6 +362,10 @@ class ReviewAuthority:
             if request.command == "capture-target" and isinstance(
                 response.output.get("planPath"), str
             ):
+                if response.output.get("targetKind") != self._capture_input["kind"]:
+                    raise ReviewAuthorityUnavailable(
+                        "captured target does not match the registered public target"
+                    )
                 self._capture_completed = True
                 if self._execution_decision.mode == "sandbox":
                     try:
@@ -351,7 +375,9 @@ class ReviewAuthority:
                     except ReviewRunError:
                         self._sandbox_source = None
             if request.command == "cleanup":
-                self._engine_cleanup_failed = response.status != "passed"
+                self._engine_cleanup_failed = (
+                    self._engine_cleanup_failed or response.status != "passed"
+                )
                 self._cleanup_completed = response.status == "passed"
             elif any(
                 diagnostic.code == "cleanup_failed"
@@ -380,7 +406,9 @@ class ReviewAuthority:
             response = self._bridge.invoke(
                 request, timeout=timeout, cancel_event=self._stop
             )
-            self._engine_cleanup_failed = response.status != "passed"
+            self._engine_cleanup_failed = (
+                self._engine_cleanup_failed or response.status != "passed"
+            )
             self._cleanup_completed = response.status == "passed"
             return response.to_wire()
         raise ReviewAuthorityUnavailable("authority action or fields are invalid")
@@ -396,7 +424,15 @@ class ReviewAuthority:
             listener = self._listener
             self._stop.set()
             if self._sandbox_executor is not None:
-                self._sandbox_executor.cancel()
+                sandbox_cleanup_failure = self._sandbox_executor.cancel()
+                if sandbox_cleanup_failure is not None:
+                    self._engine_cleanup_failed = True
+                    cleanup_failures.append(sandbox_cleanup_failure)
+                    _LOGGER.warning(
+                        "engineering review sandbox cleanup failed; recovery: "
+                        "hermes review cleanup --run %s",
+                        self.run.run_id,
+                    )
             if listener is not None:
                 try:
                     listener.close()
@@ -422,11 +458,13 @@ class ReviewAuthority:
                 try:
                     response = self._bridge.invoke(request, timeout=60)
                     self._cleanup_completed = response.status == "passed"
-                    self._engine_cleanup_failed = not self._cleanup_completed
+                    self._engine_cleanup_failed = (
+                        self._engine_cleanup_failed or not self._cleanup_completed
+                    )
                     if not self._cleanup_completed:
                         _LOGGER.warning(
                             "engineering review cleanup failed; recovery: "
-                            "hermes-review-engine cleanup --run %s",
+                            "hermes review cleanup --run %s",
                             self.run.run_id,
                         )
                 except BaseException as exc:
@@ -436,7 +474,7 @@ class ReviewAuthority:
                     )
                     _LOGGER.warning(
                         "engineering review cleanup failed; recovery: "
-                        "hermes-review-engine cleanup --run %s",
+                        "hermes review cleanup --run %s",
                         self.run.run_id,
                     )
             if not self._remove_owned_socket():

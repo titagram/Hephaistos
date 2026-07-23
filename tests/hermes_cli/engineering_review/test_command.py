@@ -44,7 +44,7 @@ def test_review_parser_defaults_to_medium_and_accepts_all_targets() -> None:
     assert local.runner == "auto"
 
 
-def test_review_parser_exposes_only_target_and_effort(
+def test_review_parser_exposes_target_effort_and_registered_recovery(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     with pytest.raises(SystemExit) as exc_info:
@@ -53,8 +53,36 @@ def test_review_parser_exposes_only_target_and_effort(
     help_text = capsys.readouterr().out
     assert "[target]" in help_text
     assert "--effort {low,medium,high}" in help_text
+    assert "--run RUN_ID" in help_text
     for hidden in ("runner", "session", "skill", "model", "provider", "operation"):
         assert f"--{hidden}" not in help_text
+
+
+def test_public_review_cleanup_uses_post_session_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from hermes_cli.engineering_review import recovery
+
+    seen: list[str] = []
+    monkeypatch.setattr(
+        recovery,
+        "recover_review_run",
+        lambda run_id: (
+            seen.append(run_id)
+            or {"runId": run_id, "status": "complete", "removed": []}
+        ),
+    )
+    args = _parser().parse_args([
+        "review",
+        "cleanup",
+        "--run",
+        "registered-run-1234",
+    ])
+
+    assert command.review_command(args) == 0
+    assert seen == ["registered-run-1234"]
+    assert json.loads(capsys.readouterr().out)["status"] == "complete"
 
 
 def test_public_review_preloads_skill_and_preserves_approvals(

@@ -122,6 +122,23 @@ def launch_review_chat(
 def review_command(args: Namespace) -> int:
     """Entry point for ``hermes review``."""
     target = str(getattr(args, "target", "local") or "local")
+    recovery_run = getattr(args, "run", None)
+    if target == "cleanup":
+        if not isinstance(recovery_run, str) or not recovery_run:
+            raise ValueError("review cleanup requires --run RUN_ID")
+        from .recovery import recover_review_run
+
+        print(
+            json.dumps(
+                recover_review_run(recovery_run),
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+        )
+        return 0
+    if recovery_run is not None:
+        raise ValueError("--run is accepted only by `hermes review cleanup`")
     effort_value = str(getattr(args, "effort", "medium"))
     if effort_value not in {"low", "medium", "high"}:
         raise ValueError("effort must be low, medium, or high")

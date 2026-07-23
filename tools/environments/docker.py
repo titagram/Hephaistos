@@ -611,6 +611,7 @@ class DockerEnvironment(BaseEnvironment):
         self._container_name: str = ""
         self._image_uses_s6_init: bool = False
         self._all_run_args: list[str] = []
+        self._cleanup_error: str | None = None
         logger.info(f"DockerEnvironment volumes: {volumes}")
         # Ensure volumes is a list (config.yaml could be malformed)
         if volumes is not None and not isinstance(volumes, list):
@@ -1297,6 +1298,7 @@ class DockerEnvironment(BaseEnvironment):
         ``docker rm`` actually completes when we do trigger it.
         """
         container_id = self._container_id
+        self._cleanup_error = None
         if not container_id:
             # Still drop the bind-mount dirs if any were allocated and we're
             # NOT in persist mode (persist mode preserves them).
@@ -1334,24 +1336,46 @@ class DockerEnvironment(BaseEnvironment):
         log_id = container_id[:12]
 
         def _do_cleanup() -> None:
+            failures: list[str] = []
             if should_stop:
                 try:
-                    subprocess.run(
+                    stopped = subprocess.run(
                         [docker_exe, "stop", "-t", "10", container_id],
                         capture_output=True, timeout=30,
                         stdin=subprocess.DEVNULL,
                     )
+                    if stopped.returncode != 0:
+                        failures.append(
+                            f"docker stop exited {stopped.returncode}"
+                        )
                 except (subprocess.TimeoutExpired, OSError) as e:
+                    failures.append(f"docker stop failed: {e}")
                     logger.warning("docker stop %s timed out / failed: %s", log_id, e)
             if should_remove:
                 try:
-                    subprocess.run(
+                    removed = subprocess.run(
                         [docker_exe, "rm", "-f", container_id],
                         capture_output=True, timeout=30,
                         stdin=subprocess.DEVNULL,
                     )
+                    if removed.returncode != 0:
+                        failures.append(
+                            f"docker rm -f exited {removed.returncode}"
+                        )
                 except (subprocess.TimeoutExpired, OSError) as e:
+                    failures.append(f"docker rm -f failed: {e}")
                     logger.warning("docker rm -f %s failed: %s", log_id, e)
+                try:
+                    verified = subprocess.run(
+                        [docker_exe, "inspect", container_id],
+                        capture_output=True, timeout=30,
+                        stdin=subprocess.DEVNULL,
+                    )
+                    if verified.returncode == 0:
+                        failures.append("container remains after docker rm -f")
+                except (subprocess.TimeoutExpired, OSError) as e:
+                    failures.append(f"container removal could not be verified: {e}")
+            self._cleanup_error = "; ".join(failures) or None
 
         # Daemon thread: doesn't block interpreter exit (atexit returns
         # promptly), but unlike the old ``Popen(... &)`` shell trick the
@@ -1387,3 +1411,16 @@ class DockerEnvironment(BaseEnvironment):
             return True
         thread.join(timeout=timeout)
         return not thread.is_alive()
+
+    @property
+    def cleanup_error(self) -> str | None:
+        """Observed stop/remove failure from the most recent cleanup."""
+        return getattr(self, "_cleanup_error", None)
+
+    def recovery_identity(self) -> dict[str, str]:
+        """Return the bounded Docker identity before review teardown."""
+        return {
+            "containerId": self._container_id or "",
+            "containerName": self._container_name,
+            "taskId": self._task_id,
+        }

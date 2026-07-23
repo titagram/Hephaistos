@@ -27,6 +27,8 @@ def _mock_subprocess_run(monkeypatch):
                 return subprocess.CompletedProcess(cmd, 0, stdout="Docker version", stderr="")
             if cmd[1] == "run":
                 return subprocess.CompletedProcess(cmd, 0, stdout="fake-container-id\n", stderr="")
+            if cmd[1] == "inspect":
+                return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="not found")
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
     monkeypatch.setattr(docker_env.subprocess, "run", _run)
@@ -1224,6 +1226,48 @@ def test_wait_for_cleanup_after_cleanup_returns_true(monkeypatch):
     env = _make_dummy_env(task_id="wait-test")
     env.cleanup(force_remove=True)
     assert env.wait_for_cleanup(timeout=5.0) is True
+
+
+def test_cleanup_records_nonzero_stop_or_remove_result(monkeypatch):
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+    monkeypatch.setattr(docker_env, "_get_active_profile_name", lambda: "default")
+    _mock_subprocess_run(monkeypatch)
+    _install_fake_thread(monkeypatch)
+    env = _make_dummy_env(task_id="cleanup-failure")
+    real_run = docker_env.subprocess.run
+
+    def fail_remove(cmd, **kwargs):
+        if isinstance(cmd, list) and len(cmd) > 1 and cmd[1] == "rm":
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="busy")
+        return real_run(cmd, **kwargs)
+
+    monkeypatch.setattr(docker_env.subprocess, "run", fail_remove)
+
+    env.cleanup(force_remove=True)
+
+    assert env.wait_for_cleanup(timeout=5.0) is True
+    assert env.cleanup_error == "docker rm -f exited 1"
+
+
+def test_cleanup_fails_when_container_is_still_inspectable(monkeypatch):
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+    monkeypatch.setattr(docker_env, "_get_active_profile_name", lambda: "default")
+    _mock_subprocess_run(monkeypatch)
+    _install_fake_thread(monkeypatch)
+    env = _make_dummy_env(task_id="cleanup-live")
+    real_run = docker_env.subprocess.run
+
+    def container_remains(cmd, **kwargs):
+        if isinstance(cmd, list) and len(cmd) > 1 and cmd[1] == "inspect":
+            return subprocess.CompletedProcess(cmd, 0, stdout="still here", stderr="")
+        return real_run(cmd, **kwargs)
+
+    monkeypatch.setattr(docker_env.subprocess, "run", container_remains)
+
+    env.cleanup(force_remove=True)
+
+    assert env.wait_for_cleanup(timeout=5.0) is True
+    assert env.cleanup_error == "container remains after docker rm -f"
 
 
 def test_cleanup_on_env_with_no_container_id_does_not_raise(monkeypatch):

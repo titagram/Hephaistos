@@ -6947,7 +6947,7 @@ async function dispatch(request) {
       };
     } catch (cause) {
       const runId = request.input.runId;
-      const recoveryCommand = typeof runId === "string" && /^[A-Za-z0-9_-]{16,128}$/.test(runId) && basename6(request.artifactRoot) === runId ? `hermes-review-engine cleanup --run ${runId}` : null;
+      const recoveryCommand = typeof runId === "string" && /^[A-Za-z0-9_-]{16,128}$/.test(runId) && basename6(request.artifactRoot) === runId ? `hermes review cleanup --run ${runId}` : null;
       return {
         protocolVersion: 1,
         requestId: request.requestId,

@@ -93,6 +93,11 @@ def test_configured_docker_executes_captured_engine_through_environment_only(
 
     class FakeEnvironment:
         def execute(self, command: str, **kwargs: object) -> dict[str, object]:
+            seen.setdefault("commands", []).append(command)
+            if command == "node --version":
+                return {"returncode": 0, "output": "v22.23.1\n"}
+            if command.startswith("git clone "):
+                return {"returncode": 0, "output": ""}
             seen["command"] = command
             seen["execute"] = kwargs
             request = json.loads(str(kwargs["stdin_data"]))
@@ -108,8 +113,24 @@ def test_configured_docker_executes_captured_engine_through_environment_only(
                 }),
             }
 
-        def cleanup(self) -> None:
+        def cleanup(self, *, force_remove: bool = False) -> None:
             seen["cleaned"] = True
+            seen["force_remove"] = force_remove
+
+        def wait_for_cleanup(self, timeout: float = 30.0) -> bool:
+            seen["cleanup_timeout"] = timeout
+            return True
+
+        @property
+        def cleanup_error(self) -> None:
+            return None
+
+        def recovery_identity(self) -> dict[str, str]:
+            return {
+                "containerId": "a" * 64,
+                "containerName": "hermes-review",
+                "taskId": f"review-{run.run_id}",
+            }
 
     def factory(**kwargs: object) -> FakeEnvironment:
         seen["factory"] = kwargs
@@ -134,15 +155,20 @@ def test_configured_docker_executes_captured_engine_through_environment_only(
     ).invoke(_request(run), timeout=40, source=_source(run))
 
     assert response.status == "passed"
-    assert seen["command"] == (
-        "git clone --quiet /hermes-runtime/review.bundle "
-        "/workspace/repository && git -C /workspace/repository checkout "
-        "--quiet 2222222222222222222222222222222222222222 && "
-        "node /hermes-runtime/hermes_cli/engineering_review/"
-        "hermes-engineering.mjs"
-    )
+    assert seen["commands"] == [
+        "node --version",
+        (
+            "git clone --quiet /hermes-runtime/review.bundle "
+            "/workspace/repository && git -C /workspace/repository checkout "
+            "--quiet 2222222222222222222222222222222222222222"
+        ),
+        (
+            "node /hermes-runtime/hermes_cli/engineering_review/"
+            "hermes-engineering.mjs"
+        ),
+    ]
     execute = seen["execute"]
-    assert execute["cwd"] == "/workspace"
+    assert execute["cwd"] == "/workspace/repository"
     assert execute["timeout"] == 40
     factory_args = seen["factory"]
     assert factory_args["env_type"] == "docker"
@@ -180,6 +206,8 @@ def test_configured_docker_executes_captured_engine_through_environment_only(
         "backend": None,
     }
     assert seen["cleaned"] is True
+    assert seen["force_remove"] is True
+    assert seen["cleanup_timeout"] == 60
 
 
 def test_executor_rejects_plan_outside_registered_run_without_creating_backend(
@@ -255,8 +283,18 @@ def test_backend_failure_is_inconclusive_and_environment_is_cleaned(
         def execute(self, *_args: object, **_kwargs: object) -> dict[str, object]:
             raise RuntimeError("backend unavailable")
 
-        def cleanup(self) -> None:
+        def cleanup(self, *, force_remove: bool = False) -> None:
             seen["cleaned"] = True
+
+        def wait_for_cleanup(self, timeout: float = 30.0) -> bool:
+            return True
+
+        @property
+        def cleanup_error(self) -> None:
+            return None
+
+        def recovery_identity(self) -> dict[str, str]:
+            return {}
 
     response = SandboxTerminalExecutor(
         run=run,
@@ -273,6 +311,185 @@ def test_backend_failure_is_inconclusive_and_environment_is_cleaned(
     assert response.diagnostics[0].code == "sandbox_execution_failed"
     assert "backend unavailable" not in response.diagnostics[0].message
     assert seen["cleaned"] is True
+
+
+def test_sandbox_requires_verified_node_22_before_repository_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run, seen = _run(tmp_path, monkeypatch)
+    decision = decide_execution(
+        target_kind="pr",
+        sandbox="docker",
+        allow_local=False,
+        environ={"PATH": "/usr/bin"},
+    )
+
+    class OldNodeEnvironment:
+        cleanup_error = None
+
+        def execute(self, command: str, **_kwargs: object) -> dict[str, object]:
+            seen.setdefault("commands", []).append(command)
+            return {"returncode": 0, "output": "v20.19.0\n"}
+
+        def cleanup(self, *, force_remove: bool = False) -> None:
+            seen["cleaned"] = force_remove
+
+        def wait_for_cleanup(self, timeout: float = 30.0) -> bool:
+            return True
+
+        def recovery_identity(self) -> dict[str, str]:
+            return {}
+
+    response = SandboxTerminalExecutor(
+        run=run,
+        decision=decision,
+        config_loader=lambda: {
+            "env_type": "docker",
+            "docker_image": "trusted-image",
+        },
+        environment_factory=lambda **_kwargs: OldNodeEnvironment(),
+        snapshot_builder=_write_fake_bundle,
+    ).invoke(_request(run), timeout=30, source=_source(run))
+
+    assert response.status == "inconclusive"
+    assert response.diagnostics[0].code == "sandbox_runtime_unavailable"
+    assert seen["commands"] == ["node --version"]
+    assert seen["cleaned"] is True
+
+
+def test_sandbox_missing_project_dependencies_is_not_a_project_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run, seen = _run(tmp_path, monkeypatch)
+    (run.root / "plan.json").write_text(
+        json.dumps({
+            "files": [],
+            "hermes": {
+                "buildTest": {
+                    "packageManager": "npm",
+                    "commands": [
+                        {
+                            "phase": "test",
+                            "executable": "npm",
+                            "args": ["run", "test"],
+                            "cwd": ".",
+                        }
+                    ],
+                }
+            },
+        }),
+        encoding="utf-8",
+    )
+    decision = decide_execution(
+        target_kind="pr",
+        sandbox="docker",
+        allow_local=False,
+        environ={"PATH": "/usr/bin"},
+    )
+
+    class MissingDependenciesEnvironment:
+        cleanup_error = None
+
+        def execute(self, command: str, **_kwargs: object) -> dict[str, object]:
+            seen.setdefault("commands", []).append(command)
+            if command == "node --version":
+                return {"returncode": 0, "output": "v22.23.1\n"}
+            if command.startswith("git clone "):
+                return {"returncode": 0, "output": ""}
+            return {"returncode": 1, "output": ""}
+
+        def cleanup(self, *, force_remove: bool = False) -> None:
+            pass
+
+        def wait_for_cleanup(self, timeout: float = 30.0) -> bool:
+            return True
+
+        def recovery_identity(self) -> dict[str, str]:
+            return {}
+
+    response = SandboxTerminalExecutor(
+        run=run,
+        decision=decision,
+        config_loader=lambda: {
+            "env_type": "docker",
+            "docker_image": "trusted-image",
+        },
+        environment_factory=lambda **_kwargs: MissingDependenciesEnvironment(),
+        snapshot_builder=_write_fake_bundle,
+    ).invoke(_request(run), timeout=30, source=_source(run))
+
+    assert response.status == "inconclusive"
+    assert response.diagnostics[0].code == "sandbox_dependency_unavailable"
+    assert not any(
+        command.startswith("node /hermes-runtime")
+        for command in seen["commands"]
+    )
+
+
+def test_cleanup_failure_is_observed_and_records_public_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run, _ = _run(tmp_path, monkeypatch)
+    decision = decide_execution(
+        target_kind="pr",
+        sandbox="docker",
+        allow_local=False,
+        environ={"PATH": "/usr/bin"},
+    )
+
+    class CleanupFailureEnvironment:
+        cleanup_error = "docker rm -f exited 1"
+
+        def execute(self, command: str, **kwargs: object) -> dict[str, object]:
+            if command == "node --version":
+                return {"returncode": 0, "output": "v22.23.1\n"}
+            if command.startswith("git clone "):
+                return {"returncode": 0, "output": ""}
+            request = json.loads(str(kwargs["stdin_data"]))
+            return {
+                "returncode": 0,
+                "output": json.dumps({
+                    "protocolVersion": 1,
+                    "requestId": request["requestId"],
+                    "status": "passed",
+                    "output": {"packageManager": None, "commands": []},
+                    "diagnostics": [],
+                }),
+            }
+
+        def cleanup(self, *, force_remove: bool = False) -> None:
+            assert force_remove is True
+
+        def wait_for_cleanup(self, timeout: float = 30.0) -> bool:
+            return True
+
+        def recovery_identity(self) -> dict[str, str]:
+            return {
+                "containerId": "b" * 64,
+                "containerName": "hermes-review",
+                "taskId": f"review-{run.run_id}",
+            }
+
+    response = SandboxTerminalExecutor(
+        run=run,
+        decision=decision,
+        config_loader=lambda: {
+            "env_type": "docker",
+            "docker_image": "trusted-image",
+        },
+        environment_factory=lambda **_kwargs: CleanupFailureEnvironment(),
+        snapshot_builder=_write_fake_bundle,
+    ).invoke(_request(run), timeout=30, source=_source(run))
+
+    assert response.status == "inconclusive"
+    assert response.diagnostics[0].code == "cleanup_failed"
+    assert (
+        f"hermes review cleanup --run {run.run_id}"
+        in response.diagnostics[0].message
+    )
+    recovery = json.loads((run.root / "sandbox-recovery.json").read_text("utf-8"))
+    assert recovery["containerId"] == "b" * 64
+    assert recovery["taskId"] == f"review-{run.run_id}"
 
 
 def test_snapshot_failure_is_inconclusive_and_removes_runtime_staging(

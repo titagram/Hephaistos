@@ -276,10 +276,12 @@ review facts. On `inconclusive/cleanup_failed`, preserve all artifacts and
 print the response's exact recovery command once:
 
 ```text
-hermes-review-engine cleanup --run <runId>
+hermes review cleanup --run <runId>
 ```
 
-Never replace it with `rm`, `git worktree remove`, or a caller-supplied path.
+This public recovery command works after the review session and its internal
+proxy have exited. Never replace it with `rm`, `git worktree remove`, or a
+caller-supplied path.
 
 ## Publication and follow-up
 

@@ -32,7 +32,7 @@ export async function dispatch(
         typeof runId === "string" &&
         /^[A-Za-z0-9_-]{16,128}$/.test(runId) &&
         basename(request.artifactRoot) === runId
-          ? `hermes-review-engine cleanup --run ${runId}`
+          ? `hermes review cleanup --run ${runId}`
           : null;
       return {
         protocolVersion: 1,

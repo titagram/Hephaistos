@@ -40,12 +40,21 @@ _CONTAINER_RUNTIME = Path("/hermes-runtime")
 _ENGINE_RELATIVE = Path("hermes_cli/engineering_review/hermes-engineering.mjs")
 _PYTEST_PROBE_RELATIVE = Path("hermes_cli/engineering_review/pytest_probe.py")
 _MAX_TIMEOUT_SECONDS = 660
+_MIN_NODE_MAJOR = 22
+_NODE_VERSION = re.compile(r"^v?(?P<major>[0-9]+)(?:\.[0-9]+){1,2}\s*$")
 
 
 class _TerminalEnvironment(Protocol):
     def execute(self, command: str, **kwargs: object) -> Mapping[str, object]: ...
 
-    def cleanup(self) -> None: ...
+    def cleanup(self, *, force_remove: bool = False) -> None: ...
+
+    def wait_for_cleanup(self, timeout: float = 30.0) -> bool: ...
+
+    @property
+    def cleanup_error(self) -> str | None: ...
+
+    def recovery_identity(self) -> Mapping[str, str]: ...
 
 
 EnvironmentFactory = Callable[..., _TerminalEnvironment]
@@ -315,18 +324,126 @@ class SandboxTerminalExecutor:
         self._container_env = _container_environment(decision.sanitized_env)
         self._cancelled = threading.Event()
         self._environment_lock = threading.RLock()
+        self._teardown_lock = threading.RLock()
+        self._idle = threading.Event()
+        self._idle.set()
         self._active_environment: _TerminalEnvironment | None = None
+        self._active_identity: dict[str, str] | None = None
+        self._teardown_results: dict[int, str | None] = {}
+        self._cleanup_failure: str | None = None
 
-    def cancel(self) -> None:
-        """Best-effort termination of the currently active sandbox."""
+    def cancel(self) -> str | None:
+        """Terminate and observe the active sandbox before authority exit."""
         self._cancelled.set()
         with self._environment_lock:
             environment = self._active_environment
+            identity = self._active_identity
         if environment is not None:
+            self._teardown_environment(environment, identity)
+        if not self._idle.wait(timeout=70):
+            self._cleanup_failure = (
+                self._cleanup_failure or "sandbox execution did not stop"
+            )
+        return self._cleanup_failure
+
+    def _recovery_identity(
+        self, environment: _TerminalEnvironment
+    ) -> dict[str, str]:
+        try:
+            raw = dict(environment.recovery_identity())
+        except Exception:
+            return {}
+        container_id = raw.get("containerId", "")
+        container_name = raw.get("containerName", "")
+        task_id = raw.get("taskId", "")
+        if (
+            not re.fullmatch(r"[0-9a-fA-F]{12,64}", container_id)
+            or not re.fullmatch(r"hermes-[A-Za-z0-9_-]{1,64}", container_name)
+            or task_id != f"review-{self._run.run_id}"
+        ):
+            return {}
+        return {
+            "containerId": container_id.lower(),
+            "containerName": container_name,
+            "taskId": task_id,
+        }
+
+    def _record_cleanup_failure(
+        self, failure: str, identity: Mapping[str, str] | None
+    ) -> None:
+        self._cleanup_failure = failure
+        payload: dict[str, object] = {
+            "schemaVersion": 1,
+            "runId": self._run.run_id,
+            "backend": "docker",
+            "taskId": f"review-{self._run.run_id}",
+        }
+        if identity:
+            payload.update(identity)
+        try:
+            self._run.atomic_artifact(
+                "sandbox-recovery.json",
+                json.dumps(
+                    payload,
+                    allow_nan=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode("utf-8"),
+            )
+        except Exception:
+            self._cleanup_failure = (
+                f"{failure}; sandbox recovery identity could not be recorded"
+            )
+
+    def _teardown_environment(
+        self,
+        environment: _TerminalEnvironment,
+        identity: Mapping[str, str] | None,
+    ) -> str | None:
+        key = id(environment)
+        with self._teardown_lock:
+            if key in self._teardown_results:
+                return self._teardown_results[key]
+            failure: str | None = None
             try:
-                environment.cleanup()
-            except Exception:
-                pass
+                environment.cleanup(force_remove=True)
+                if not environment.wait_for_cleanup(timeout=60):
+                    failure = "sandbox cleanup did not finish"
+                elif environment.cleanup_error:
+                    failure = f"sandbox cleanup failed: {environment.cleanup_error}"
+            except Exception as exc:
+                failure = f"sandbox cleanup failed: {exc}"
+            self._teardown_results[key] = failure
+            if failure is not None:
+                self._record_cleanup_failure(failure, identity)
+            return failure
+
+    def _dependency_kind(
+        self, request: EngineRequest, source: SandboxSource
+    ) -> str | None:
+        if request.command == "build-test":
+            try:
+                plan = json.loads((self._run.root / "plan.json").read_text("utf-8"))
+                commands = plan["hermes"]["buildTest"]["commands"]
+            except (OSError, TypeError, KeyError, json.JSONDecodeError):
+                return None
+            return "node" if isinstance(commands, list) and commands else None
+
+        runner = request.input.get("runner", "auto")
+        if runner == "vitest":
+            return "node"
+        if runner == "pytest":
+            return "python"
+        if runner != "auto":
+            return None
+        node_signal = (source.worktree / "package.json").is_file()
+        python_signal = any(
+            (source.worktree / name).is_file()
+            for name in ("pytest.ini", "pyproject.toml", "setup.cfg", "tox.ini")
+        )
+        if node_signal == python_signal:
+            return None
+        return "node" if node_signal else "python"
 
     def _translated_request(self, request: EngineRequest) -> dict[str, object]:
         if request.workspace.resolve(strict=False) != self._run.workspace:
@@ -474,6 +591,9 @@ class SandboxTerminalExecutor:
             )
 
         environment: _TerminalEnvironment | None = None
+        environment_identity: dict[str, str] | None = None
+        response: EngineResponse | None = None
+        self._idle.clear()
         try:
             container_config = dict(config)
             container_config.update({
@@ -504,36 +624,102 @@ class SandboxTerminalExecutor:
             )
             with self._environment_lock:
                 if self._cancelled.is_set():
-                    try:
-                        environment.cleanup()
-                    finally:
-                        environment = None
                     raise RuntimeError("sandbox execution was cancelled")
                 self._active_environment = environment
-            result = environment.execute(
-                (
-                    "git clone --quiet /hermes-runtime/review.bundle "
-                    "/workspace/repository && "
-                    f"git -C /workspace/repository checkout --quiet {source.head_ref} "
-                    "&& node /hermes-runtime/hermes_cli/engineering_review/"
-                    "hermes-engineering.mjs"
-                ),
+                environment_identity = self._recovery_identity(environment)
+                self._active_identity = environment_identity
+
+            runtime_probe = environment.execute(
+                "node --version",
                 cwd=str(_CONTAINER_WORKSPACE),
-                timeout=min(math.ceil(timeout), _MAX_TIMEOUT_SECONDS),
-                stdin_data=payload,
+                timeout=30,
                 rewrite_compound_background=False,
             )
-            output = result.get("output")
-            returncode = result.get("returncode")
-            if returncode != 0 or not isinstance(output, str):
-                raise RuntimeError("sandbox engine did not complete successfully")
-            encoded = output.encode("utf-8")
-            if len(encoded) > MAX_TRANSPORT_BYTES:
-                raise RuntimeError("sandbox engine output exceeded its limit")
-            value = json.loads(output)
-            return EngineResponse.from_wire(
-                value, expected_request_id=request.request_id
+            runtime_output = runtime_probe.get("output")
+            version_match = (
+                _NODE_VERSION.fullmatch(runtime_output.strip())
+                if isinstance(runtime_output, str)
+                else None
             )
+            if (
+                runtime_probe.get("returncode") != 0
+                or version_match is None
+                or int(version_match.group("major")) < _MIN_NODE_MAJOR
+            ):
+                response = _inconclusive(
+                    request,
+                    "sandbox_runtime_unavailable",
+                    "the configured sandbox does not provide verified Node.js 22 or newer",
+                )
+
+            if response is None:
+                prepared = environment.execute(
+                    (
+                        "git clone --quiet /hermes-runtime/review.bundle "
+                        "/workspace/repository && "
+                        f"git -C /workspace/repository checkout --quiet {source.head_ref}"
+                    ),
+                    cwd=str(_CONTAINER_WORKSPACE),
+                    timeout=min(math.ceil(timeout), _MAX_TIMEOUT_SECONDS),
+                    rewrite_compound_background=False,
+                )
+                if prepared.get("returncode") != 0:
+                    response = _inconclusive(
+                        request,
+                        "sandbox_workspace_unavailable",
+                        "the registered snapshot could not be prepared in the sandbox",
+                    )
+
+            dependency_kind = self._dependency_kind(request, source)
+            if response is None and dependency_kind is not None:
+                # Network stays disabled. Project-specific images may provide
+                # a read-only dependency layer at this fixed trusted path;
+                # otherwise we report availability, not a project test failure.
+                if dependency_kind == "node":
+                    dependency_command = (
+                        "test -d /workspace/repository/node_modules || "
+                        "(test -d /opt/hermes-review-dependencies/node_modules "
+                        "&& ln -s /opt/hermes-review-dependencies/node_modules "
+                        "/workspace/repository/node_modules)"
+                    )
+                else:
+                    dependency_command = (
+                        "test -f /opt/hermes-review-dependencies/python-ready "
+                        "&& python3 -m pytest --version"
+                    )
+                dependency_probe = environment.execute(
+                    dependency_command,
+                    cwd=str(_CONTAINER_WORKSPACE),
+                    timeout=30,
+                    rewrite_compound_background=False,
+                )
+                if dependency_probe.get("returncode") != 0:
+                    response = _inconclusive(
+                        request,
+                        "sandbox_dependency_unavailable",
+                        "project test dependencies are not pre-provisioned in the network-isolated sandbox",
+                    )
+
+            if response is None:
+                result = environment.execute(
+                    "node /hermes-runtime/hermes_cli/engineering_review/"
+                    "hermes-engineering.mjs",
+                    cwd=str(_CONTAINER_REPOSITORY),
+                    timeout=min(math.ceil(timeout), _MAX_TIMEOUT_SECONDS),
+                    stdin_data=payload,
+                    rewrite_compound_background=False,
+                )
+                output = result.get("output")
+                returncode = result.get("returncode")
+                if returncode != 0 or not isinstance(output, str):
+                    raise RuntimeError("sandbox engine did not complete successfully")
+                encoded = output.encode("utf-8")
+                if len(encoded) > MAX_TRANSPORT_BYTES:
+                    raise RuntimeError("sandbox engine output exceeded its limit")
+                value = json.loads(output)
+                response = EngineResponse.from_wire(
+                    value, expected_request_id=request.request_id
+                )
         except (
             EngineProtocolError,
             json.JSONDecodeError,
@@ -542,21 +728,34 @@ class SandboxTerminalExecutor:
             TypeError,
             ValueError,
         ):
-            return _inconclusive(
+            response = _inconclusive(
                 request,
                 "sandbox_execution_failed",
                 "the configured Hermes terminal environment could not complete the check",
             )
         finally:
+            cleanup_failure: str | None = None
             if environment is not None:
-                try:
-                    environment.cleanup()
-                except Exception:
-                    pass
+                cleanup_failure = self._teardown_environment(
+                    environment, environment_identity
+                )
             with self._environment_lock:
                 if self._active_environment is environment:
                     self._active_environment = None
+                    self._active_identity = None
             try:
                 _remove_runtime(runtime, runtime_identity)
             except Exception:
                 pass
+            self._idle.set()
+            if cleanup_failure is not None:
+                response = _inconclusive(
+                    request,
+                    "cleanup_failed",
+                    (
+                        f"{cleanup_failure}; recovery: "
+                        f"hermes review cleanup --run {self._run.run_id}"
+                    ),
+                )
+        assert response is not None
+        return response
