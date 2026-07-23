@@ -47,3 +47,5 @@ export {
   TranscriptsUnavailableError,
 } from "../../../../third_party/qwen-code/packages/cli/src/commands/review/lib/coverage.js";
 export { readTranscripts } from "../../../../third_party/qwen-code/packages/cli/src/commands/review/lib/transcripts.js";
+export { resolveAnchors } from "../../../../third_party/qwen-code/packages/cli/src/commands/review/lib/anchors.js";
+export { composeReview } from "../../../../third_party/qwen-code/packages/cli/src/commands/review/compose-review.js";

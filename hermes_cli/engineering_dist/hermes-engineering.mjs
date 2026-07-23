@@ -1,5 +1,5 @@
 // packages/hermes-engineering/src/main.ts
-import { realpathSync as realpathSync9 } from "node:fs";
+import { realpathSync as realpathSync10 } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 // packages/hermes-engineering/src/handlers/build-prompts.ts
@@ -2425,8 +2425,8 @@ function coverageFromTranscripts(planPath, env = process.env) {
       continue;
     }
     buildableIdx += 1;
-    const pick = assignment.get(buildableIdx);
-    if (pick === void 0) {
+    const pick2 = assignment.get(buildableIdx);
+    if (pick2 === void 0) {
       const anyMatch = candidatesOf[buildableIdx].length > 0;
       missingRoles.push(
         disclose(
@@ -2438,7 +2438,7 @@ function coverageFromTranscripts(planPath, env = process.env) {
       continue;
     }
     const brief = briefPath(planPath, req.key);
-    const opened = pick.successfulCallArgs.some(
+    const opened = pick2.successfulCallArgs.some(
       (a) => a.includes(JSON.stringify(brief))
     );
     if (!opened) {
@@ -2527,6 +2527,589 @@ var VERIFY_GAP = {
     fix: "relaunch with the same printed prompt \u2014 the agent must OPEN the brief file the prompt names; that read is the receipt"
   }
 };
+function verificationGaps(planPath, opts, env = process.env) {
+  const { plan, mtimeMs } = readPlan(planPath);
+  const records = readTranscripts(mtimeMs, env, plan.diffPathAbsolute);
+  const built = readRecordedPrompts(planPath);
+  const gaps = [];
+  const remediation = [];
+  const deliveryOf = (key) => {
+    const b = built.get(key);
+    if (b === void 0 || b.trim() === "") return "not-built";
+    const needle = JSON.stringify(briefPath(planPath, key));
+    const opened = (r) => r.successfulCallArgs.some((a) => a.includes(needle));
+    const gotTheBuiltPrompt = records.filter(
+      (r) => wasDeliveredVerbatim(r.launchPrompt, b)
+    );
+    if (gotTheBuiltPrompt.some(opened)) return "ok";
+    if (gotTheBuiltPrompt.length > 0) return "brief-unread";
+    if (records.some(opened)) return "rewritten";
+    return "not-launched";
+  };
+  const bestDelivery = (keys) => {
+    if (keys.length === 0) return "not-built";
+    const rank = {
+      ok: 0,
+      "brief-unread": 1,
+      rewritten: 2,
+      "not-launched": 3,
+      "not-built": 4
+    };
+    return keys.map(deliveryOf).sort((a, b) => rank[a] - rank[b])[0];
+  };
+  const reverseKeys = [...built.keys()].filter(
+    (k) => k === "reverse-audit" || k.startsWith("reverse-audit--")
+  );
+  const reverse = bestDelivery(reverseKeys);
+  if (reverse !== "ok") {
+    gaps.push(`reverse audit \u2014 ${REVERSE_AUDIT_GAP[reverse].gap}`);
+    remediation.push(
+      `reverse audit: ${REVERSE_AUDIT_GAP[reverse].fix.replace(
+        "--plan <plan>",
+        () => `--plan ${shellQuotePath(planPath)}`
+      )}`
+    );
+  }
+  let unverifiedFindings = false;
+  if (opts.postsFindings) {
+    const verifyKeys = [...built.keys()].filter(
+      (k) => k === "verify" || k.startsWith("verify--")
+    );
+    const verify = bestDelivery(verifyKeys);
+    if (verify !== "ok") {
+      unverifiedFindings = true;
+      gaps.push(`verification \u2014 ${VERIFY_GAP[verify].gap}`);
+      remediation.push(
+        `verification: ${VERIFY_GAP[verify].fix.replace(
+          "--plan <plan>",
+          // A function replacer: a plain string gives `$&`/`$\`` special
+          // meaning, and a path is not a place for replacement patterns.
+          () => `--plan ${shellQuotePath(planPath)}`
+        )}`
+      );
+    }
+  }
+  return { ok: gaps.length === 0, gaps, remediation, unverifiedFindings };
+}
+
+// third_party/qwen-code/packages/cli/src/commands/review/lib/anchors.ts
+function collectNewSideLines(diffText, file) {
+  const lines2 = diffText.split("\n");
+  const out = [];
+  for (const hunk of file.hunks) {
+    if (hunk.newCount === 0) continue;
+    let newCursor = hunk.newStart;
+    for (let n = hunk.diffStart + 1; n <= hunk.diffEnd; n++) {
+      const raw = lines2[n - 1];
+      if (raw === void 0) break;
+      if (raw.startsWith("+")) {
+        out.push({ newLine: newCursor, text: raw.slice(1), added: true });
+        newCursor++;
+      } else if (raw.startsWith("-")) {
+      } else if (raw.startsWith(" ") || raw === "") {
+        out.push({
+          newLine: newCursor,
+          text: raw.startsWith(" ") ? raw.slice(1) : "",
+          added: false
+        });
+        newCursor++;
+      }
+    }
+  }
+  return out;
+}
+function normalizeExact(s) {
+  return s.replace(/\s+$/, "");
+}
+function normalizeLoose(s) {
+  return s.trim();
+}
+function anchorVariants(anchor) {
+  const lines2 = anchor.replace(/\r\n/g, "\n").split("\n");
+  while (lines2.length > 0 && lines2[0].trim() === "") lines2.shift();
+  while (lines2.length > 0 && lines2[lines2.length - 1].trim() === "") lines2.pop();
+  if (lines2.length === 0) return [];
+  const variants = [lines2];
+  const meaningful = lines2.filter((l) => l.trim() !== "");
+  if (meaningful.length > 0 && meaningful.every((l) => /^\+/.test(l))) {
+    variants.push(lines2.map((l) => l.startsWith("+") ? l.slice(1) : l));
+  }
+  const NO_NEWLINE = /^\\ No newline at end of file$/;
+  const marked = lines2.filter((l) => l !== "" && !NO_NEWLINE.test(l));
+  if (marked.length > 0 && marked.every((l) => /^[+\- ]/.test(l)) && marked.some((l) => l.startsWith("+"))) {
+    variants.push(
+      lines2.filter((l) => !l.startsWith("-") && !NO_NEWLINE.test(l)).map((l) => l.slice(1))
+    );
+  }
+  return variants;
+}
+function matchRuns(hay, needle, norm) {
+  const starts = [];
+  if (needle.length === 0 || hay.length < needle.length) return starts;
+  const normNeedle = needle.map(norm);
+  for (let i = 0; i + normNeedle.length <= hay.length; i++) {
+    let ok = true;
+    for (let j = 0; j < normNeedle.length; j++) {
+      const cell = hay[i + j];
+      if (norm(cell.text) !== normNeedle[j]) {
+        ok = false;
+        break;
+      }
+      if (j > 0 && cell.newLine !== hay[i + j - 1].newLine + 1) {
+        ok = false;
+        break;
+      }
+    }
+    if (ok) starts.push(i);
+  }
+  return starts;
+}
+function candidatesFor(hay, needle, norm) {
+  return matchRuns(hay, needle, norm).map((i) => {
+    const run = hay.slice(i, i + needle.length);
+    return {
+      startLine: run[0].newLine,
+      line: run[run.length - 1].newLine,
+      added: run.some((l) => l.added)
+    };
+  });
+}
+function pick(cands, claimedLine) {
+  if (cands.length === 1) return cands[0];
+  if (claimedLine !== void 0) {
+    const dist = (c) => Math.abs(c.startLine - claimedLine);
+    let best = Infinity;
+    for (const c of cands) best = Math.min(best, dist(c));
+    const nearest = cands.filter((c) => dist(c) === best);
+    return nearest.length === 1 ? nearest[0] : null;
+  }
+  const added = cands.filter((c) => c.added);
+  return added.length === 1 ? added[0] : null;
+}
+function resolveAnchor(newSideLines, anchor, claimedLine) {
+  const variants = anchorVariants(anchor);
+  if (variants.length === 0) {
+    return { status: "unmatched", reason: "anchor is empty" };
+  }
+  for (const [vi, needle] of variants.entries()) {
+    const norms = vi === 0 ? [
+      [true, normalizeExact],
+      [false, normalizeLoose]
+    ] : [[true, normalizeExact]];
+    for (const [exact, norm] of norms) {
+      const cands = candidatesFor(newSideLines, needle, norm);
+      if (cands.length === 0) continue;
+      if (!exact && cands.length > 1) {
+        return {
+          status: "unmatched",
+          reason: "the snippet matched in more than one place only after its indentation was normalised \u2014 and in an indentation-significant language the nesting level IS the semantics, so choosing between them would be choosing which block the finding is about. Quote it verbatim."
+        };
+      }
+      const best = pick(cands, claimedLine);
+      if (!best) {
+        return {
+          status: "unmatched",
+          reason: "the snippet appears in more than one place and nothing distinguishes them \u2014 quote more lines so it is unique, or give the line number you mean so the nearest match can be chosen"
+        };
+      }
+      const { startLine, line } = best;
+      return {
+        status: "resolved",
+        line,
+        startLine,
+        matchCount: cands.length,
+        tier: (exact ? "exact" : "loose") + (best.added ? "-added" : "-context"),
+        ambiguous: cands.length > 1,
+        ...claimedLine !== void 0 ? { drift: Math.abs(startLine - claimedLine) } : {}
+      };
+    }
+  }
+  return {
+    status: "unmatched",
+    reason: "snippet does not appear in any hunk of this file \u2014 it may be quoted from unchanged code outside the diff, paraphrased rather than copied, or attributed to the wrong file"
+  };
+}
+function resolveAnchors(diffText, requests) {
+  const { files } = parseDiff(diffText);
+  const byPath = new Map(files.map((f) => [f.path, f]));
+  const lineCache = /* @__PURE__ */ new Map();
+  return requests.map((req) => {
+    const { line: claimedLine, ...rest } = req;
+    const claim = claimedLine !== void 0 ? { claimedLine } : {};
+    const file = byPath.get(req.path);
+    if (!file) {
+      return {
+        ...rest,
+        ...claim,
+        status: "unmatched",
+        reason: `file is not in the diff (${files.length} file(s) changed)`
+      };
+    }
+    let newSide = lineCache.get(req.path);
+    if (!newSide) {
+      newSide = collectNewSideLines(diffText, file);
+      lineCache.set(req.path, newSide);
+    }
+    return {
+      ...rest,
+      ...claim,
+      ...resolveAnchor(newSide, req.anchor, claimedLine)
+    };
+  });
+}
+
+// third_party/qwen-code/packages/cli/src/commands/review/lib/inline-counts.ts
+var CRITICAL_PREFIX = "**[Critical]**";
+
+// third_party/qwen-code/packages/cli/src/commands/review/compose-review.ts
+function withMarker(line) {
+  return line.startsWith(CRITICAL_PREFIX) ? line : `${CRITICAL_PREFIX} ${line}`;
+}
+function toCount(value, field) {
+  if (value === void 0 || value === null) return 0;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+    throw new TypeError(
+      `compose-review: ${field} must be a non-negative integer, got ${JSON.stringify(value)}`
+    );
+  }
+  return value;
+}
+function toStringList(value, field) {
+  if (value === void 0 || value === null) return [];
+  if (!Array.isArray(value) || value.some((v) => typeof v !== "string")) {
+    throw new TypeError(
+      `compose-review: ${field} must be an array of strings, got ${JSON.stringify(value)}`
+    );
+  }
+  return [...value];
+}
+function toBool(value, field) {
+  if (value === void 0 || value === null) return false;
+  if (typeof value !== "boolean") {
+    throw new TypeError(
+      `compose-review: ${field} must be a boolean, got ${JSON.stringify(value)}`
+    );
+  }
+  return value;
+}
+function composeReview(input) {
+  const criticalsInline = toCount(input.criticalsInline, "criticalsInline");
+  const suggestionsInline = toCount(
+    input.suggestionsInline,
+    "suggestionsInline"
+  );
+  const bodyCriticals = toStringList(input.bodyCriticals, "bodyCriticals");
+  const suggestionsDiscarded = toCount(
+    input.suggestionsDiscarded,
+    "suggestionsDiscarded"
+  );
+  const cannotTell = toStringList(
+    input.cannotTellCriticals,
+    "cannotTellCriticals"
+  );
+  const uncoverable = toStringList(
+    input.uncoverableChunks,
+    "uncoverableChunks"
+  );
+  const unreviewed = toStringList(
+    input.unreviewedDimensions,
+    "unreviewedDimensions"
+  );
+  const coverageEntries = [];
+  const remediation = [];
+  const planRef = input.planPath ? shellQuotePath(input.planPath) : "<plan>";
+  const missingReceipts = [];
+  const nonDeterministicBodyCriticals = bodyCriticals.filter(
+    (x) => !/\[(?:build|test)\]/i.test(x)
+  ).length;
+  const criticalsNeedingVerify = criticalsInline + nonDeterministicBodyCriticals;
+  let criticalsUnverified = false;
+  if (!input.planPath) {
+    coverageEntries.push({
+      subject: "coverage",
+      reason: "no plan was given, so this run cannot show that any of the diff was read"
+    });
+    criticalsUnverified = criticalsNeedingVerify >= 1;
+  } else {
+    try {
+      const cov = coverageFromTranscripts(input.planPath, input.env);
+      for (const id of cov.missingChunks) missingReceipts.push(id);
+      for (const id of cov.uncoverableChunks) {
+        const prefix = `chunk ${id}`;
+        const already = uncoverable.some(
+          (e) => e === prefix || e.startsWith(`${prefix} `)
+        );
+        if (!already) uncoverable.push(prefix);
+      }
+      for (const label2 of cov.idleAgents) {
+        coverageEntries.push({
+          subject: label2,
+          reason: "the agent made no tool call: it read nothing"
+        });
+      }
+      if (cov.idleAgents.length > 0) {
+        remediation.push(
+          "idle agents: relaunch each with the same printed prompt \u2014 it already names the brief and the diff reads; an agent that makes no tool call has reviewed nothing, whatever its return says"
+        );
+      }
+      for (const label2 of cov.blindAgents) {
+        coverageEntries.push({
+          subject: label2,
+          reason: "launched with a prompt that never named the diff file, so it could not have read it"
+        });
+      }
+      if (cov.blindAgents.length > 0) {
+        remediation.push(
+          `blind agents: rebuild each prompt with \`"\${QWEN_CODE_CLI:-qwen}" review agent-prompt --plan ${planRef} --chunk <id>\` (or \`--role <r>\`) \`[--rules <rules file>]\` and launch an agent with it verbatim \u2014 do not relaunch the old prompt; a second blind agent reads no more than the first`
+        );
+      }
+      for (const label2 of cov.unopenedAgents) {
+        coverageEntries.push({
+          subject: label2,
+          reason: "pointed at diff lines it never opened: it made tool calls, but none of them read the diff"
+        });
+      }
+      if (cov.unopenedAgents.length > 0) {
+        remediation.push(
+          "agents that never opened the diff: relaunch each with the same printed prompt \u2014 the prompt already names the diff and its ranges; the read is what proves the review happened"
+        );
+      }
+      coverageEntries.push(...cov.disclosures);
+      if (cov.rewrittenPrompts.length > 0) {
+        remediation.push(
+          `rewritten launches: re-run \`"\${QWEN_CODE_CLI:-qwen}" review agent-prompt --plan ${planRef} --chunk <id>\` (or \`--role <r>\`, with \`--file <path>\` for an invariant agent) \`[--rules <rules file>]\` for each named agent and pass its output unedited \u2014 copy it, do not retype it. Pass --rules whenever the review loaded any, or the rebuilt brief silently drops the project rules`
+        );
+      }
+      if (cov.missingRoles.length > 0) {
+        remediation.push(
+          `missing briefs: build every required prompt in one call \u2014 \`"\${QWEN_CODE_CLI:-qwen}" review agent-prompt --plan ${planRef} --roster [--rules <rules file>]\` \u2014 and launch one agent per block it prints, verbatim; \`--role <n>\` or \`--chunk <id>\` rebuilds a single one. Pass --rules whenever the review loaded any`
+        );
+      }
+      if (cov.unreadBriefs.length > 0) {
+        remediation.push(
+          "unread briefs: relaunch each agent with the same printed prompt \u2014 the agent must OPEN the brief file the prompt names; that read is the receipt"
+        );
+      }
+    } catch (err) {
+      const why = err instanceof TranscriptsUnavailableError ? `could not read the agents' transcripts (${err.message})` : `the plan could not be used (${err.message})`;
+      coverageEntries.push({
+        subject: "coverage",
+        reason: `${why}, so this run cannot show that any of the diff was read`
+      });
+    }
+    try {
+      const findingsToVerify = criticalsInline + suggestionsInline + nonDeterministicBodyCriticals;
+      const verification = verificationGaps(
+        input.planPath,
+        { postsFindings: findingsToVerify > 0 },
+        input.env
+      );
+      for (const gap of verification.gaps) {
+        const cut = gap.indexOf(" \u2014 ");
+        coverageEntries.push(
+          cut === -1 ? { subject: gap, reason: "" } : {
+            subject: gap.slice(0, cut),
+            reason: gap.slice(cut + " \u2014 ".length)
+          }
+        );
+      }
+      remediation.push(...verification.remediation);
+      criticalsUnverified = verification.unverifiedFindings && criticalsNeedingVerify >= 1;
+    } catch (err) {
+      coverageEntries.push({
+        subject: "verification",
+        reason: `could not check that Step 4 and Step 5 ran (${err.message})`
+      });
+      criticalsUnverified = criticalsNeedingVerify >= 1;
+    }
+  }
+  const contextUnavailable = toBool(
+    input.contextUnavailable,
+    "contextUnavailable"
+  );
+  const presubmitRaw = input.presubmit ?? {};
+  if (typeof presubmitRaw !== "object" || Array.isArray(presubmitRaw)) {
+    throw new TypeError(
+      `compose-review: presubmit must be an object, got ${JSON.stringify(presubmitRaw)}`
+    );
+  }
+  const presubmitObj = presubmitRaw;
+  const downgradeApprove = toBool(
+    presubmitObj["downgradeApprove"],
+    "presubmit.downgradeApprove"
+  );
+  const downgradeRequestChanges = toBool(
+    presubmitObj["downgradeRequestChanges"],
+    "presubmit.downgradeRequestChanges"
+  );
+  const downgradeReasons = toStringList(
+    presubmitObj["downgradeReasons"],
+    "presubmit.downgradeReasons"
+  );
+  const modelId = input.modelId;
+  if (typeof modelId !== "string" || modelId.trim() === "") {
+    throw new TypeError(
+      "compose-review: modelId is required (the public footer names the reviewing model)"
+    );
+  }
+  const c = criticalsInline + bodyCriticals.length;
+  const s = suggestionsInline + suggestionsDiscarded;
+  const baseEvent = c >= 1 ? "REQUEST_CHANGES" : s >= 1 ? "COMMENT" : "APPROVE";
+  const cappedBy = [];
+  if (cannotTell.length > 0) cappedBy.push("cannot-tell-existing-critical");
+  if (missingReceipts.length > 0) cappedBy.push("chunk-nobody-read");
+  if (uncoverable.length > 0) cappedBy.push("uncoverable-chunk");
+  if (unreviewed.length + coverageEntries.length > 0) {
+    cappedBy.push("unreviewed-dimension");
+  }
+  if (contextUnavailable) cappedBy.push("context-unavailable");
+  if (criticalsUnverified) cappedBy.push("criticals-unverified");
+  let event = baseEvent;
+  if (event === "APPROVE" && cappedBy.length > 0) event = "COMMENT";
+  const deterministicBodyCriticals = bodyCriticals.length - nonDeterministicBodyCriticals;
+  if (event === "REQUEST_CHANGES" && criticalsUnverified && deterministicBodyCriticals === 0) {
+    event = "COMMENT";
+  }
+  let downgraded = false;
+  let downgradedFrom = null;
+  if (event === "APPROVE" && downgradeApprove) {
+    event = "COMMENT";
+    downgraded = true;
+    downgradedFrom = "Approve";
+  } else if ((event === "REQUEST_CHANGES" || baseEvent === "REQUEST_CHANGES" && criticalsUnverified) && downgradeRequestChanges) {
+    event = "COMMENT";
+    downgraded = true;
+    downgradedFrom = "Request changes";
+  }
+  const footer = `_\u2014 ${modelId} via Qwen Code /review_`;
+  const finish = (text) => text === "" ? "" : `${text}
+
+${footer}`;
+  const notReviewedParts = [];
+  if (missingReceipts.length > 0) {
+    remediation.push(
+      `chunks nobody read: build each with \`"\${QWEN_CODE_CLI:-qwen}" review agent-prompt --plan ${planRef} --chunk <id> [--rules <rules file>]\` \u2014 or the whole fan-out with \`--roster\` \u2014 and launch one agent per block, verbatim`
+    );
+    const disclosedSubjects = new Set(coverageEntries.map((e) => e.subject));
+    const unexplainedReceipts = missingReceipts.filter(
+      (id) => !disclosedSubjects.has(`chunk ${id}`)
+    );
+    if (unexplainedReceipts.length > 0) {
+      notReviewedParts.push(
+        `Not reviewed: ${unexplainedReceipts.map((id) => `chunk ${id}`).join(", ")} \u2014 no agent reported covering these; nobody read them.`
+      );
+    }
+  }
+  if (uncoverable.length > 0) {
+    notReviewedParts.push(
+      `Not reviewed: ${uncoverable.join(", ")} \u2014 a line there exceeds the read limit.`
+    );
+  }
+  const covEntries = coverageEntries;
+  const callerLeft = [];
+  const seenCaller = /* @__PURE__ */ new Set();
+  for (const d of unreviewed) {
+    if (seenCaller.has(d)) continue;
+    seenCaller.add(d);
+    const echoesCoverage = covEntries.some(
+      (e) => d === e.subject || d.startsWith(`${e.subject} \u2014 `)
+    );
+    if (!echoesCoverage) callerLeft.push(d);
+  }
+  const whiffedDimensions = callerLeft.filter((d) => !d.includes(" \u2014 "));
+  const explainedCaller = callerLeft.filter((d) => d.includes(" \u2014 "));
+  if (whiffedDimensions.length > 0) {
+    notReviewedParts.push(
+      `Not reviewed: ${whiffedDimensions.join(", ")} \u2014 the agent returned no evidence of its walk twice.`
+    );
+  }
+  for (const d of explainedCaller) {
+    notReviewedParts.push(`Not reviewed: ${d}.`);
+  }
+  const seenSubjects = /* @__PURE__ */ new Set();
+  const byReason = /* @__PURE__ */ new Map();
+  for (const { subject, reason } of covEntries) {
+    if (seenSubjects.has(subject)) continue;
+    seenSubjects.add(subject);
+    const subjects = byReason.get(reason) ?? [];
+    subjects.push(subject);
+    byReason.set(reason, subjects);
+  }
+  for (const [reason, subjects] of byReason) {
+    notReviewedParts.push(
+      reason ? `Not reviewed: ${subjects.join(", ")} \u2014 ${reason}.` : `Not reviewed: ${subjects.join(", ")}.`
+    );
+  }
+  const cannotTellBlock = cannotTell.length === 0 ? [] : [
+    `Unresolved, please confirm: ${cannotTell.map((l) => withMarker(l)).join(" ")}`
+  ];
+  const bodyCriticalBlock = bodyCriticals.map((l) => withMarker(l));
+  const contextUnavailableClause = "Reviewed diff-only \u2014 the PR\u2019s existing discussion could not be fetched, so this is not an approval and not a no-blockers claim.";
+  if (event === "REQUEST_CHANGES") {
+    const parts = [
+      ...contextUnavailable ? [contextUnavailableClause] : [],
+      ...cannotTellBlock,
+      ...notReviewedParts,
+      ...bodyCriticalBlock
+    ];
+    return {
+      event,
+      body: finish(parts.join("\n\n")),
+      baseEvent,
+      cappedBy,
+      downgraded,
+      downgradedFrom,
+      remediation
+    };
+  }
+  if (event === "APPROVE") {
+    return {
+      event,
+      body: finish("No issues found. LGTM! \u2705"),
+      baseEvent,
+      cappedBy,
+      downgraded,
+      downgradedFrom,
+      remediation
+    };
+  }
+  const clauses = [];
+  if (downgraded && downgradedFrom) {
+    const reasons = downgradeReasons.join("; ");
+    clauses.push(
+      `\u26A0\uFE0F Downgraded from ${downgradedFrom} to Comment${reasons ? `: ${reasons}` : ""}.`
+    );
+  }
+  if (contextUnavailable) {
+    clauses.push(contextUnavailableClause);
+  } else {
+    const canCertify = !downgraded && !downgradeApprove && !downgradeRequestChanges && c === 0 && cannotTell.length === 0 && uncoverable.length === 0 && unreviewed.length + coverageEntries.length === 0 && // A missing receipt caps the event but was left out of certification, so a
+    // body could open "Reviewed — no blockers." two lines above "nobody read
+    // them." Nothing nobody read can be certified blocker-free.
+    missingReceipts.length === 0;
+    clauses.push(canCertify ? "Reviewed \u2014 no blockers." : "Reviewed.");
+  }
+  if (suggestionsInline > 0) clauses.push("Suggestions are inline.");
+  if (suggestionsDiscarded > 0) {
+    clauses.push(
+      `${suggestionsDiscarded} Suggestion-level finding(s) could not be anchored to a changed line and were dropped; nothing further to act on here.`
+    );
+  }
+  clauses.push(...cannotTellBlock);
+  clauses.push(...notReviewedParts);
+  if (downgradedFrom === "Request changes" || criticalsUnverified) {
+    clauses.push(...bodyCriticalBlock);
+  }
+  return {
+    event,
+    body: finish(clauses.join(" ")),
+    baseEvent,
+    cappedBy,
+    downgraded,
+    downgradedFrom,
+    remediation
+  };
+}
 
 // packages/hermes-engineering/src/handlers/build-prompts.ts
 var effortLimits = {
@@ -2889,7 +3472,7 @@ var appendBounded = (chunks, chunk, captured) => {
 var NodeProcessRunner = class {
   async run(invocation, timeoutMs) {
     const started = Date.now();
-    return await new Promise((resolve13) => {
+    return await new Promise((resolve14) => {
       const stdout = [];
       const stderr = [];
       const stdoutSize = { bytes: 0 };
@@ -2933,7 +3516,7 @@ var NodeProcessRunner = class {
           durationMs: Date.now() - started
         };
         if (spawnError !== void 0) result.error = spawnError.message;
-        resolve13(result);
+        resolve14(result);
       };
       child.on("close", finish);
     });
@@ -4209,21 +4792,753 @@ async function checkCoverage(request) {
   }
 }
 
+// packages/hermes-engineering/src/handlers/compose-review.ts
+import { createHash as createHash3 } from "node:crypto";
+import { lstatSync as lstatSync8, readFileSync as readFileSync11 } from "node:fs";
+import { join as join11 } from "node:path";
+
+// packages/hermes-engineering/src/reverse-audit.ts
+var validateReverseAuditState = (value) => {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new TypeError("reverseAudit must be an object");
+  }
+  const state = value;
+  const unknown = Object.keys(state).find(
+    (key) => !["round", "consecutiveDryRounds", "complete"].includes(key)
+  );
+  if (unknown !== void 0) {
+    throw new TypeError(`unknown reverseAudit field: ${unknown}`);
+  }
+  if (!Number.isSafeInteger(state.round) || state.round < 0 || state.round > 5) {
+    throw new TypeError(
+      "reverseAudit.round must be an integer between 0 and 5"
+    );
+  }
+  if (!Number.isSafeInteger(state.consecutiveDryRounds) || state.consecutiveDryRounds < 0 || state.consecutiveDryRounds > 2 || state.consecutiveDryRounds > state.round) {
+    throw new TypeError(
+      "reverseAudit.consecutiveDryRounds must be an integer between 0 and 2 and no greater than round"
+    );
+  }
+  if (typeof state.complete !== "boolean") {
+    throw new TypeError("reverseAudit.complete must be a boolean");
+  }
+  const expectedComplete = state.consecutiveDryRounds >= 2 || state.round >= 5;
+  if (state.complete !== expectedComplete) {
+    throw new TypeError(
+      "reverseAudit.complete is inconsistent with its counters"
+    );
+  }
+  return {
+    round: state.round,
+    consecutiveDryRounds: state.consecutiveDryRounds,
+    complete: state.complete
+  };
+};
+
+// packages/hermes-engineering/src/handlers/resolve-anchors.ts
+import { createHash as createHash2, randomBytes as randomBytes3 } from "node:crypto";
+import {
+  chmodSync as chmodSync3,
+  closeSync as closeSync3,
+  fsyncSync as fsyncSync3,
+  lstatSync as lstatSync7,
+  openSync as openSync3,
+  readFileSync as readFileSync10,
+  realpathSync as realpathSync6,
+  renameSync as renameSync3,
+  unlinkSync as unlinkSync3,
+  writeFileSync as writeFileSync5
+} from "node:fs";
+import { isAbsolute as isAbsolute6, join as join10, posix, resolve as resolve10, win32 } from "node:path";
+var ReviewerEvidenceUnavailableError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "ReviewerEvidenceUnavailableError";
+  }
+};
+var FINDINGS_NAME = "findings.json";
+var FINDING_KEYS = [
+  "id",
+  "severity",
+  "title",
+  "body",
+  "path",
+  "quotedCode",
+  "sourceReviewerIds",
+  "verification"
+];
+var FINDING_KEY_SET = new Set(FINDING_KEYS);
+var REVIEWER_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u;
+var MAX_FINDINGS = 256;
+var MAX_TITLE_BYTES = 4096;
+var MAX_BODY_BYTES = 65536;
+var MAX_QUOTE_BYTES = 262144;
+var MAX_PATH_BYTES = 4096;
+var MAX_REVIEWERS_PER_FINDING = 32;
+var asRecord4 = (value, label2) => {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new TypeError(`${label2} must be an object`);
+  }
+  return value;
+};
+var boundedString = (value, label2, maxBytes, options = {}) => {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new TypeError(`${label2} must be a non-empty string`);
+  }
+  if (value.includes("\0") || options.singleLine === true && /[\r\n]/u.test(value)) {
+    throw new TypeError(`${label2} contains forbidden control characters`);
+  }
+  if (Buffer.byteLength(value, "utf8") > maxBytes) {
+    throw new TypeError(`${label2} exceeds ${maxBytes} bytes`);
+  }
+  return value;
+};
+var canonicalPath = (value, label2) => {
+  const raw = boundedString(value, label2, MAX_PATH_BYTES, { singleLine: true });
+  if (isAbsolute6(raw) || win32.isAbsolute(raw) || raw.includes("\\")) {
+    throw new TypeError(`${label2} must be a repository-relative POSIX path`);
+  }
+  const segments = raw.split("/");
+  if (segments.includes("..")) {
+    throw new TypeError(`${label2} must not contain traversal segments`);
+  }
+  const normalized = posix.normalize(raw);
+  if (normalized === "." || normalized.startsWith("../") || normalized === "..") {
+    throw new TypeError(`${label2} must name a repository file`);
+  }
+  return normalized.replace(/^\.\//u, "");
+};
+var realFile = (path, label2) => {
+  const canonical = realpathSync6(path);
+  const stat = lstatSync7(canonical);
+  if (!stat.isFile() || stat.isSymbolicLink()) {
+    throw new TypeError(`${label2} must be a real file`);
+  }
+  if (process.platform !== "win32" && (stat.mode & 63) !== 0) {
+    throw new TypeError(`${label2} must be private to the current user`);
+  }
+  return canonical;
+};
+var validatedReviewArtifacts = (request) => {
+  const suppliedRoot = resolve10(request.artifactRoot);
+  const suppliedStat = lstatSync7(suppliedRoot);
+  if (!suppliedStat.isDirectory() || suppliedStat.isSymbolicLink()) {
+    throw new TypeError("artifactRoot must be a real directory");
+  }
+  const artifactRoot = realpathSync6(suppliedRoot);
+  const rootStat = lstatSync7(artifactRoot);
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
+    throw new TypeError("artifactRoot must be a real directory");
+  }
+  if (process.platform !== "win32" && (rootStat.mode & 63) !== 0) {
+    throw new TypeError("artifactRoot must be private to the current user");
+  }
+  const planPath = realFile(join10(artifactRoot, "plan.json"), "plan.json");
+  if (planPath !== join10(artifactRoot, "plan.json")) {
+    throw new TypeError("plan.json must be the canonical run plan");
+  }
+  const plan = asRecord4(
+    JSON.parse(readFileSync10(planPath, "utf8")),
+    "plan.json"
+  );
+  if (typeof plan.diffPathAbsolute !== "string") {
+    throw new TypeError("plan.diffPathAbsolute must be a string");
+  }
+  const diffPath = realFile(resolve10(plan.diffPathAbsolute), "target.diff");
+  if (diffPath !== join10(artifactRoot, "target.diff")) {
+    throw new TypeError(
+      "plan.diffPathAbsolute must name the run's canonical target.diff"
+    );
+  }
+  const diff = readFileSync10(diffPath, "utf8");
+  const diffSha256 = createHash2("sha256").update(diff).digest("hex");
+  const hermes = asRecord4(plan.hermes, "plan.hermes");
+  if (hermes.diffSha256 !== void 0 && hermes.diffSha256 !== diffSha256) {
+    throw new TypeError("target.diff does not match plan.hermes.diffSha256");
+  }
+  return { artifactRoot, planPath, diffPath, plan, diff, diffSha256 };
+};
+var atomicWrite2 = (artifactRoot, name, content) => {
+  const destination = join10(artifactRoot, name);
+  validatePrivateDestination(artifactRoot, name);
+  const temporary = join10(
+    artifactRoot,
+    `.${name}.${randomBytes3(12).toString("hex")}.tmp`
+  );
+  const descriptor = openSync3(temporary, "wx", 384);
+  try {
+    writeFileSync5(descriptor, content, "utf8");
+    fsyncSync3(descriptor);
+  } finally {
+    closeSync3(descriptor);
+  }
+  try {
+    chmodSync3(temporary, 384);
+    renameSync3(temporary, destination);
+    chmodSync3(destination, 384);
+    if (process.platform !== "win32") {
+      const directory = openSync3(artifactRoot, "r");
+      try {
+        fsyncSync3(directory);
+      } finally {
+        closeSync3(directory);
+      }
+    }
+  } finally {
+    try {
+      unlinkSync3(temporary);
+    } catch {
+    }
+  }
+  return destination;
+};
+var atomicJson = (artifactRoot, name, value) => atomicWrite2(artifactRoot, name, `${JSON.stringify(value, null, 2)}
+`);
+var lstatExists = (path) => {
+  try {
+    lstatSync7(path);
+    return true;
+  } catch (cause) {
+    if (cause.code === "ENOENT") return false;
+    throw cause;
+  }
+};
+var validatePrivateDestination = (artifactRoot, name) => {
+  const destination = join10(artifactRoot, name);
+  if (lstatExists(destination)) {
+    const stat = lstatSync7(destination);
+    if (!stat.isFile() || stat.isSymbolicLink()) {
+      throw new TypeError(
+        `${name} must be a regular file when it already exists`
+      );
+    }
+  }
+  return destination;
+};
+var knownReviewerIds = (artifacts) => {
+  const since = lstatSync7(artifacts.planPath).mtimeMs;
+  try {
+    const records = readTranscripts(
+      since,
+      {
+        ...process.env,
+        QWEN_CODE_PROJECT_DIR: artifacts.artifactRoot,
+        QWEN_CODE_SESSION_ID: "reviewers"
+      },
+      artifacts.diffPath
+    );
+    return new Set(records.map((record) => record.agentId));
+  } catch (cause) {
+    if (cause instanceof TranscriptsUnavailableError) {
+      throw new ReviewerEvidenceUnavailableError(cause.message);
+    }
+    throw cause;
+  }
+};
+var parseFindings = (value, knownReviewers) => {
+  if (!Array.isArray(value) || value.length > MAX_FINDINGS) {
+    throw new TypeError(
+      `findings must be an array of at most ${MAX_FINDINGS} entries`
+    );
+  }
+  const seenIds = /* @__PURE__ */ new Set();
+  return value.map((entry, index) => {
+    const finding = asRecord4(entry, `findings[${index}]`);
+    const unknown = Object.keys(finding).find(
+      (key) => !FINDING_KEY_SET.has(key)
+    );
+    if (unknown !== void 0) {
+      throw new TypeError(`unknown findings[${index}] field: ${unknown}`);
+    }
+    const id = boundedString(finding.id, `findings[${index}].id`, 128, {
+      singleLine: true
+    });
+    if (!REVIEWER_ID.test(id))
+      throw new TypeError(`findings[${index}].id is invalid`);
+    if (seenIds.has(id)) throw new TypeError(`duplicate finding id: ${id}`);
+    seenIds.add(id);
+    if (!(finding.severity === "blocker" || finding.severity === "high" || finding.severity === "medium" || finding.severity === "low")) {
+      throw new TypeError(`findings[${index}].severity is invalid`);
+    }
+    if (!(finding.verification === "confirmed" || finding.verification === "rejected" || finding.verification === "uncertain")) {
+      throw new TypeError(`findings[${index}].verification is invalid`);
+    }
+    if (!Array.isArray(finding.sourceReviewerIds) || finding.sourceReviewerIds.length === 0 || finding.sourceReviewerIds.length > MAX_REVIEWERS_PER_FINDING) {
+      throw new TypeError(
+        `findings[${index}].sourceReviewerIds must contain 1-${MAX_REVIEWERS_PER_FINDING} ids`
+      );
+    }
+    const sourceReviewerIds = finding.sourceReviewerIds.map(
+      (source, sourceIndex) => {
+        const reviewerId = boundedString(
+          source,
+          `findings[${index}].sourceReviewerIds[${sourceIndex}]`,
+          128,
+          { singleLine: true }
+        );
+        if (!REVIEWER_ID.test(reviewerId) || !knownReviewers.has(reviewerId)) {
+          throw new TypeError(`unknown reviewer id: ${reviewerId}`);
+        }
+        return reviewerId;
+      }
+    );
+    if (new Set(sourceReviewerIds).size !== sourceReviewerIds.length) {
+      throw new TypeError(
+        `findings[${index}].sourceReviewerIds contains duplicates`
+      );
+    }
+    return {
+      id,
+      severity: finding.severity,
+      title: boundedString(
+        finding.title,
+        `findings[${index}].title`,
+        MAX_TITLE_BYTES,
+        { singleLine: true }
+      ).trim().replace(/\s+/gu, " "),
+      body: boundedString(
+        finding.body,
+        `findings[${index}].body`,
+        MAX_BODY_BYTES
+      ).trim(),
+      path: canonicalPath(finding.path, `findings[${index}].path`),
+      quotedCode: boundedString(
+        finding.quotedCode,
+        `findings[${index}].quotedCode`,
+        MAX_QUOTE_BYTES
+      ),
+      sourceReviewerIds: sourceReviewerIds.sort(),
+      verification: finding.verification
+    };
+  });
+};
+var severityRank = {
+  blocker: 4,
+  high: 3,
+  medium: 2,
+  low: 1
+};
+var verificationRank = {
+  confirmed: 3,
+  uncertain: 2,
+  rejected: 1
+};
+var normalizedTitle = (title) => title.normalize("NFKC").toLowerCase().trim().replace(/\s+/gu, " ");
+var quoteHash = (quotedCode) => createHash2("sha256").update(quotedCode).digest("hex");
+var deduplicate = (findings) => {
+  const groups = /* @__PURE__ */ new Map();
+  for (const finding of findings) {
+    const key = [
+      finding.path,
+      finding.startLine,
+      finding.line,
+      normalizedTitle(finding.title),
+      finding.quotedCodeSha256
+    ].join("\0");
+    const group2 = groups.get(key) ?? [];
+    group2.push(finding);
+    groups.set(key, group2);
+  }
+  return [...groups.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([, group2]) => {
+    const ranked = [...group2].sort(
+      (left, right) => verificationRank[right.verification] - verificationRank[left.verification] || severityRank[right.severity] - severityRank[left.severity] || left.id.localeCompare(right.id) || left.body.localeCompare(right.body)
+    );
+    const selected = ranked[0];
+    return {
+      ...selected,
+      sourceReviewerIds: [
+        ...new Set(group2.flatMap((entry) => entry.sourceReviewerIds))
+      ].sort()
+    };
+  });
+};
+async function resolveFindingAnchors(request) {
+  const input = asRecord4(request.input, "input");
+  const unknown = Object.keys(input).find((key) => key !== "findings");
+  if (unknown !== void 0)
+    throw new TypeError(`unknown resolve-anchors input field: ${unknown}`);
+  const artifacts = validatedReviewArtifacts(request);
+  const findings = parseFindings(input.findings, knownReviewerIds(artifacts));
+  const resolutions = resolveAnchors(
+    artifacts.diff,
+    findings.map((entry) => ({
+      id: entry.id,
+      path: entry.path,
+      anchor: entry.quotedCode
+    }))
+  );
+  const byId = new Map(findings.map((entry) => [entry.id, entry]));
+  const resolved = [];
+  const unresolved = [];
+  for (const resolution of resolutions) {
+    const source = byId.get(resolution.id);
+    if (resolution.status === "resolved" && resolution.startLine !== void 0 && resolution.line !== void 0) {
+      resolved.push({
+        ...source,
+        startLine: resolution.startLine,
+        line: resolution.line,
+        quotedCodeSha256: quoteHash(source.quotedCode),
+        matchTier: resolution.tier ?? "unknown",
+        ambiguous: resolution.ambiguous ?? false
+      });
+    } else {
+      unresolved.push({
+        ...source,
+        reason: resolution.reason ?? "anchor could not be resolved"
+      });
+    }
+  }
+  const deduplicated = deduplicate(resolved);
+  const findingsPath = join10(artifacts.artifactRoot, FINDINGS_NAME);
+  const output = {
+    schemaVersion: 1,
+    findingsPath,
+    diffSha256: artifacts.diffSha256,
+    findings: deduplicated,
+    unresolvedFindings: unresolved.sort(
+      (left, right) => left.id.localeCompare(right.id)
+    ),
+    stats: {
+      total: findings.length,
+      resolved: deduplicated.length,
+      unresolved: unresolved.length,
+      deduplicated: resolved.length - deduplicated.length
+    }
+  };
+  atomicJson(artifacts.artifactRoot, FINDINGS_NAME, output);
+  return output;
+}
+var writePrivateJson = atomicJson;
+var writePrivateText = atomicWrite2;
+
+// packages/hermes-engineering/src/handlers/compose-review.ts
+var VERDICT_NAME = "verdict.json";
+var REPORT_NAME = "review.md";
+var INPUT_KEYS = /* @__PURE__ */ new Set([
+  "effort",
+  "buildTestStatus",
+  "testEfficacyStatus",
+  "ciStatus",
+  "reverseAudit"
+]);
+var CHECK_STATUSES = /* @__PURE__ */ new Set([
+  "passed",
+  "failed",
+  "inconclusive"
+]);
+var SEVERITIES = /* @__PURE__ */ new Set([
+  "blocker",
+  "high",
+  "medium",
+  "low"
+]);
+var VERIFICATIONS = /* @__PURE__ */ new Set([
+  "confirmed",
+  "rejected",
+  "uncertain"
+]);
+var asRecord5 = (value, label2) => {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new TypeError(`${label2} must be an object`);
+  }
+  return value;
+};
+var checkStatus = (value, label2) => {
+  if (!CHECK_STATUSES.has(value)) {
+    throw new TypeError(`${label2} must be passed, failed, or inconclusive`);
+  }
+  return value;
+};
+var parseInput3 = (request) => {
+  const input = asRecord5(request.input, "input");
+  const unknown = Object.keys(input).find((key) => !INPUT_KEYS.has(key));
+  if (unknown !== void 0) {
+    throw new TypeError(`unknown compose-review input field: ${unknown}`);
+  }
+  if (!(input.effort === "low" || input.effort === "medium" || input.effort === "high")) {
+    throw new TypeError("effort must be low, medium, or high");
+  }
+  const ciStatus = input.ciStatus;
+  if (!(ciStatus === "not_available" || CHECK_STATUSES.has(ciStatus))) {
+    throw new TypeError(
+      "ciStatus must be passed, failed, inconclusive, or not_available"
+    );
+  }
+  if (input.effort === "high" && input.reverseAudit === void 0) {
+    throw new TypeError("reverseAudit is required for high effort");
+  }
+  if (input.effort !== "high" && input.reverseAudit !== void 0) {
+    throw new TypeError("reverseAudit is only valid for high effort");
+  }
+  const reverseAudit = input.reverseAudit === void 0 ? void 0 : validateReverseAuditState(input.reverseAudit);
+  return {
+    effort: input.effort,
+    buildTestStatus: checkStatus(input.buildTestStatus, "buildTestStatus"),
+    testEfficacyStatus: checkStatus(
+      input.testEfficacyStatus,
+      "testEfficacyStatus"
+    ),
+    ciStatus,
+    ...reverseAudit === void 0 ? {} : { reverseAudit }
+  };
+};
+var parseFinding = (value, resolved) => {
+  const finding = asRecord5(value, "stored finding");
+  if (typeof finding.id !== "string" || typeof finding.title !== "string" || typeof finding.body !== "string" || typeof finding.path !== "string" || typeof finding.quotedCode !== "string" || !Array.isArray(finding.sourceReviewerIds) || finding.sourceReviewerIds.some((id) => typeof id !== "string") || !SEVERITIES.has(finding.severity) || !VERIFICATIONS.has(finding.verification)) {
+    throw new TypeError("findings.json contains an invalid finding");
+  }
+  if (resolved && (!Number.isSafeInteger(finding.startLine) || finding.startLine < 1 || !Number.isSafeInteger(finding.line) || finding.line < finding.startLine || typeof finding.quotedCodeSha256 !== "string")) {
+    throw new TypeError("findings.json contains an invalid resolved range");
+  }
+  if (!resolved && typeof finding.reason !== "string") {
+    throw new TypeError("findings.json contains an invalid unresolved finding");
+  }
+  return finding;
+};
+var readFindings = (artifactRoot, expectedDiffSha256, diff) => {
+  const findingsPath = join11(artifactRoot, "findings.json");
+  const stat = lstatSync8(findingsPath);
+  if (!stat.isFile() || stat.isSymbolicLink()) {
+    throw new TypeError("findings.json must be a real file");
+  }
+  const value = asRecord5(
+    JSON.parse(readFileSync11(findingsPath, "utf8")),
+    "findings.json"
+  );
+  if (value.schemaVersion !== 1 || value.findingsPath !== findingsPath || value.diffSha256 !== expectedDiffSha256 || !Array.isArray(value.findings) || !Array.isArray(value.unresolvedFindings)) {
+    throw new TypeError("findings.json does not belong to the captured diff");
+  }
+  const output = {
+    ...value,
+    findings: value.findings.map(
+      (entry) => parseFinding(entry, true)
+    ),
+    unresolvedFindings: value.unresolvedFindings.map(
+      (entry) => parseFinding(entry, false)
+    )
+  };
+  const all = [...output.findings, ...output.unresolvedFindings];
+  const resolvedCount = output.findings.length;
+  const anchors = resolveAnchors(
+    diff,
+    all.map((entry) => ({
+      id: entry.id,
+      path: entry.path,
+      anchor: entry.quotedCode
+    }))
+  );
+  for (const [index, anchor] of anchors.entries()) {
+    const stored = all[index];
+    if (index < resolvedCount) {
+      const resolved = stored;
+      const quoteSha256 = createHash3("sha256").update(resolved.quotedCode).digest("hex");
+      if (anchor.status !== "resolved" || anchor.startLine !== resolved.startLine || anchor.line !== resolved.line || quoteSha256 !== resolved.quotedCodeSha256) {
+        throw new TypeError(
+          "findings.json contains an anchor not derived from target.diff"
+        );
+      }
+    } else if (anchor.status !== "unmatched") {
+      throw new TypeError(
+        "findings.json marks a captured-diff anchor as unresolved"
+      );
+    }
+  }
+  return output;
+};
+var hermesMetadata = (plan) => asRecord5(plan.hermes, "plan.hermes");
+var skippedFileCount = (plan) => {
+  const skipped = hermesMetadata(plan).skippedFiles;
+  if (!Array.isArray(skipped)) {
+    throw new TypeError("plan.hermes.skippedFiles must be an array");
+  }
+  return skipped.length;
+};
+var findingIsBlocking = (severity) => severity === "blocker" || severity === "high";
+var renderFinding = (finding) => {
+  const location = "line" in finding ? `${finding.path}:${finding.startLine}${finding.line === finding.startLine ? "" : `-${finding.line}`}` : `${finding.path} (unresolved anchor)`;
+  const sources = finding.sourceReviewerIds.join(", ");
+  const body = finding.body.replace(/\r\n?/gu, "\n").replace(/\n/gu, "\n  ");
+  return `- [${finding.severity.toUpperCase()}] ${finding.title} \u2014 ${location}
+  ${body}
+  Sources: ${sources}; verification: ${finding.verification}`;
+};
+var renderReport = (verdict, findings) => {
+  const sections = [
+    "# Hermes Engineering Review",
+    "",
+    `Verdict: ${verdict.event}`,
+    "",
+    "## Checks",
+    "",
+    `- Coverage: ${verdict.checks.coverage}`,
+    `- Build/test: ${verdict.checks.buildTest}`,
+    `- Test efficacy: ${verdict.checks.testEfficacy}`,
+    `- CI: ${verdict.checks.ci}`,
+    "",
+    "## Findings",
+    "",
+    ...findings.findings.length + findings.unresolvedFindings.length === 0 ? ["No verified findings."] : [...findings.findings, ...findings.unresolvedFindings].map(
+      renderFinding
+    )
+  ];
+  if (verdict.disclosures.length > 0) {
+    sections.push(
+      "",
+      "## Residual uncertainty",
+      "",
+      ...verdict.disclosures.map((entry) => `- ${entry}`)
+    );
+  }
+  return `${sections.join("\n")}
+`;
+};
+async function composeReview2(request) {
+  const facts = parseInput3(request);
+  const artifacts = validatedReviewArtifacts(request);
+  let coverageStatus;
+  let coverageFailure = null;
+  try {
+    const promptPlan = asRecord5(
+      JSON.parse(
+        readFileSync11(join11(artifacts.artifactRoot, "prompts.json"), "utf8")
+      ),
+      "prompts.json"
+    );
+    if (promptPlan.effort !== facts.effort) {
+      throw new TypeError(
+        "prompts.json effort does not match compose-review effort"
+      );
+    }
+    const coverage = await checkCoverage({
+      ...request,
+      command: "check-coverage",
+      input: { planPath: artifacts.planPath }
+    });
+    coverageStatus = coverage.status;
+  } catch (cause) {
+    coverageStatus = "inconclusive";
+    coverageFailure = cause instanceof Error ? cause.message : String(cause);
+  }
+  const findings = readFindings(
+    artifacts.artifactRoot,
+    artifacts.diffSha256,
+    artifacts.diff
+  );
+  const allFindings = [...findings.findings, ...findings.unresolvedFindings];
+  const relevantUnresolved = findings.unresolvedFindings.filter(
+    (entry) => entry.verification !== "rejected"
+  );
+  const confirmed = allFindings.filter(
+    (entry) => entry.verification === "confirmed"
+  );
+  const confirmedBlocking = confirmed.filter(
+    (entry) => findingIsBlocking(entry.severity)
+  ).length;
+  const confirmedAdvisory = confirmed.length - confirmedBlocking;
+  const failedChecks = [facts.buildTestStatus, facts.testEfficacyStatus].filter(
+    (status) => status === "failed"
+  ).length;
+  const upstream = composeReview({
+    criticalsInline: confirmedBlocking + failedChecks,
+    suggestionsInline: confirmedAdvisory,
+    modelId: "Hermes Engineering Review"
+  });
+  const disclosures = [];
+  if (coverageStatus !== "passed")
+    disclosures.push(`review coverage is ${coverageStatus}`);
+  if (coverageFailure !== null)
+    disclosures.push(
+      `review coverage could not be recomputed: ${coverageFailure}`
+    );
+  if (facts.buildTestStatus === "inconclusive")
+    disclosures.push("build/test check is inconclusive");
+  if (facts.testEfficacyStatus === "inconclusive")
+    disclosures.push("test efficacy is inconclusive");
+  if (facts.ciStatus === "inconclusive")
+    disclosures.push("CI state is inconclusive");
+  if (facts.ciStatus === "failed") disclosures.push("CI is failing");
+  const skipped = skippedFileCount(artifacts.plan);
+  if (skipped > 0) disclosures.push(`captured diff skipped ${skipped} file(s)`);
+  const uncertain = allFindings.filter(
+    (entry) => entry.verification === "uncertain"
+  ).length;
+  if (uncertain > 0)
+    disclosures.push(`${uncertain} finding(s) remain uncertain`);
+  if (relevantUnresolved.length > 0) {
+    disclosures.push(
+      `${relevantUnresolved.length} finding anchor(s) could not be resolved`
+    );
+  }
+  if (facts.reverseAudit !== void 0 && !facts.reverseAudit.complete) {
+    disclosures.push("high-effort reverse audit is incomplete");
+  }
+  const exhaustedReverseAudit = facts.reverseAudit?.round === 5 && facts.reverseAudit.consecutiveDryRounds < 2;
+  if (exhaustedReverseAudit) {
+    disclosures.push(
+      "reverse audit reached five rounds without two consecutive dry rounds; residual uncertainty remains"
+    );
+  }
+  let event = upstream.baseEvent;
+  if (event === "APPROVE" && disclosures.length > 0) event = "COMMENT";
+  if (exhaustedReverseAudit) event = "COMMENT";
+  const verdict = {
+    schemaVersion: 1,
+    event,
+    baseEvent: upstream.baseEvent,
+    counts: {
+      confirmedBlocking,
+      confirmedAdvisory,
+      uncertain,
+      rejected: allFindings.filter((entry) => entry.verification === "rejected").length,
+      unresolved: relevantUnresolved.length
+    },
+    checks: {
+      coverage: coverageStatus,
+      buildTest: facts.buildTestStatus,
+      testEfficacy: facts.testEfficacyStatus,
+      ci: facts.ciStatus
+    },
+    reverseAudit: facts.reverseAudit ?? null,
+    disclosures
+  };
+  const report = renderReport(verdict, findings);
+  validatePrivateDestination(artifacts.artifactRoot, REPORT_NAME);
+  validatePrivateDestination(artifacts.artifactRoot, VERDICT_NAME);
+  const reportPath = writePrivateText(
+    artifacts.artifactRoot,
+    REPORT_NAME,
+    report
+  );
+  const verdictPath = writePrivateJson(
+    artifacts.artifactRoot,
+    VERDICT_NAME,
+    verdict
+  );
+  return {
+    event,
+    findingsPath: findings.findingsPath,
+    verdictPath,
+    reportPath,
+    verdict,
+    report
+  };
+}
+
 // packages/hermes-engineering/src/handlers/test-efficacy.ts
 import { execFileSync as execFileSync3, spawnSync as spawnSync2 } from "node:child_process";
-import { createHash as createHash2 } from "node:crypto";
+import { createHash as createHash4 } from "node:crypto";
 import {
   existsSync as existsSync8,
-  lstatSync as lstatSync7,
-  readFileSync as readFileSync12,
-  realpathSync as realpathSync8,
+  lstatSync as lstatSync9,
+  readFileSync as readFileSync14,
+  realpathSync as realpathSync9,
   rmSync as rmSync2
 } from "node:fs";
-import { isAbsolute as isAbsolute8, join as join10, relative as relative7, resolve as resolve12, sep as sep8 } from "node:path";
+import { isAbsolute as isAbsolute9, join as join12, relative as relative7, resolve as resolve13, sep as sep8 } from "node:path";
 
 // packages/hermes-engineering/src/runners/pytest.ts
-import { existsSync as existsSync6, readFileSync as readFileSync10, realpathSync as realpathSync6 } from "node:fs";
-import { dirname as dirname6, isAbsolute as isAbsolute6, relative as relative5, resolve as resolve10, sep as sep6 } from "node:path";
+import { existsSync as existsSync6, readFileSync as readFileSync12, realpathSync as realpathSync7 } from "node:fs";
+import { dirname as dirname6, isAbsolute as isAbsolute7, relative as relative5, resolve as resolve11, sep as sep6 } from "node:path";
 var CONFIG_NAMES = ["pytest.ini", "pyproject.toml", "setup.cfg", "tox.ini"];
 var ENV_NAMES = /* @__PURE__ */ new Set([
   "PATH",
@@ -4246,18 +5561,18 @@ var ENV_NAMES = /* @__PURE__ */ new Set([
 ]);
 var within3 = (root, candidate) => {
   const rel = relative5(root, candidate);
-  return rel === "" || !rel.startsWith(`..${sep6}`) && rel !== ".." && !isAbsolute6(rel);
+  return rel === "" || !rel.startsWith(`..${sep6}`) && rel !== ".." && !isAbsolute7(rel);
 };
 var findModuleRoot = () => {
-  let cursor = resolve10(import.meta.dirname);
+  let cursor = resolve11(import.meta.dirname);
   for (; ; ) {
     if (existsSync6(
-      resolve10(cursor, "hermes_cli/engineering_review/pytest_probe.py")
+      resolve11(cursor, "hermes_cli/engineering_review/pytest_probe.py")
     )) {
       return cursor;
     }
     const parent = dirname6(cursor);
-    if (parent === cursor) return resolve10(import.meta.dirname);
+    if (parent === cursor) return resolve11(import.meta.dirname);
     cursor = parent;
   }
 };
@@ -4265,12 +5580,12 @@ var defaultPython = () => {
   const root = findModuleRoot();
   const names = process.platform === "win32" ? [".venv/Scripts/python.exe", "venv/Scripts/python.exe"] : [".venv/bin/python", "venv/bin/python"];
   for (const name of names) {
-    const candidate = resolve10(root, name);
+    const candidate = resolve11(root, name);
     if (existsSync6(candidate)) return candidate;
   }
   let cursor = root;
   for (; ; ) {
-    const candidate = resolve10(
+    const candidate = resolve11(
       cursor,
       process.platform === "win32" ? "Scripts/python.exe" : "bin/python"
     );
@@ -4284,7 +5599,7 @@ var defaultPython = () => {
 var workspacePython = (workspace) => {
   const names = process.platform === "win32" ? [".venv/Scripts/python.exe", "venv/Scripts/python.exe"] : [".venv/bin/python", "venv/bin/python"];
   for (const name of names) {
-    const candidate = resolve10(workspace, name);
+    const candidate = resolve11(workspace, name);
     if (existsSync6(candidate)) return candidate;
   }
   return null;
@@ -4306,7 +5621,7 @@ var probeEnvironment = () => {
 var manifestSignalsPytest = (workspace) => {
   for (const name of CONFIG_NAMES) {
     try {
-      const contents = readFileSync10(resolve10(workspace, name), "utf8");
+      const contents = readFileSync12(resolve11(workspace, name), "utf8");
       if (name === "pytest.ini" || /\[tool\.pytest\.ini_options\]/.test(contents) || /(?:^|\n)\[pytest\](?:\n|$)/.test(contents)) {
         return true;
       }
@@ -4316,7 +5631,7 @@ var manifestSignalsPytest = (workspace) => {
   for (const name of ["requirements.txt", "requirements-dev.txt"]) {
     try {
       if (/^\s*pytest(?:\b|[<=>~!])/m.test(
-        readFileSync10(resolve10(workspace, name), "utf8")
+        readFileSync12(resolve11(workspace, name), "utf8")
       )) {
         return true;
       }
@@ -4326,17 +5641,17 @@ var manifestSignalsPytest = (workspace) => {
   return false;
 };
 var safeRelativeFile = (workspace, raw) => {
-  if (raw.length === 0 || raw.includes("\0") || isAbsolute6(raw)) {
+  if (raw.length === 0 || raw.includes("\0") || isAbsolute7(raw)) {
     throw new Error("test path must be repository-relative");
   }
   const normalized = raw.split("\\").join("/");
   if (normalized.split("/").some((part) => part === "." || part === "..")) {
     throw new Error("test path contains an unsafe segment");
   }
-  const root = resolve10(workspace);
-  const target = resolve10(root, normalized);
+  const root = resolve11(workspace);
+  const target = resolve11(root, normalized);
   if (!within3(root, target)) throw new Error("test path escapes the workspace");
-  if (existsSync6(target) && !within3(root, realpathSync6(target))) {
+  if (existsSync6(target) && !within3(root, realpathSync7(target))) {
     throw new Error("test path resolves outside the workspace");
   }
   return normalized;
@@ -4419,7 +5734,7 @@ var PytestRunner = class {
     ) ? "ambiguous" : "no";
   }
   async collectedFiles(workspace) {
-    const root = resolve10(workspace);
+    const root = resolve11(workspace);
     const run = await this.processes.run(
       {
         executable: this.pythonFor(root),
@@ -4463,7 +5778,7 @@ var PytestRunner = class {
     );
   }
   async runFile(workspace, relativePath, timeoutMs) {
-    const root = resolve10(workspace);
+    const root = resolve11(workspace);
     const file = safeRelativeFile(root, relativePath);
     const run = await this.processes.run(
       {
@@ -4513,8 +5828,8 @@ var PytestRunner = class {
 };
 
 // packages/hermes-engineering/src/runners/vitest.ts
-import { existsSync as existsSync7, readFileSync as readFileSync11, realpathSync as realpathSync7 } from "node:fs";
-import { dirname as dirname7, isAbsolute as isAbsolute7, relative as relative6, resolve as resolve11, sep as sep7 } from "node:path";
+import { existsSync as existsSync7, readFileSync as readFileSync13, realpathSync as realpathSync8 } from "node:fs";
+import { dirname as dirname7, isAbsolute as isAbsolute8, relative as relative6, resolve as resolve12, sep as sep7 } from "node:path";
 var CONFIG_NAMES2 = [
   "vitest.config.ts",
   "vitest.config.js",
@@ -4523,12 +5838,12 @@ var CONFIG_NAMES2 = [
 ];
 var within4 = (root, candidate) => {
   const rel = relative6(root, candidate);
-  return rel === "" || !rel.startsWith(`..${sep7}`) && rel !== ".." && !isAbsolute7(rel);
+  return rel === "" || !rel.startsWith(`..${sep7}`) && rel !== ".." && !isAbsolute8(rel);
 };
 var manifestSignalsVitest = (workspace) => {
   try {
     const parsed = JSON.parse(
-      readFileSync11(resolve11(workspace, "package.json"), "utf8")
+      readFileSync13(resolve12(workspace, "package.json"), "utf8")
     );
     if ("vitest" in (parsed.dependencies ?? {})) return true;
     if ("vitest" in (parsed.devDependencies ?? {})) return true;
@@ -4540,14 +5855,14 @@ var manifestSignalsVitest = (workspace) => {
   }
 };
 var planSignalsVitest = (workspace, plan) => {
-  const root = resolve11(workspace);
+  const root = resolve12(workspace);
   for (const file of plan.files) {
-    if (file.kind !== "test" || isAbsolute7(file.path)) continue;
-    const absolute = resolve11(root, file.path);
+    if (file.kind !== "test" || isAbsolute8(file.path)) continue;
+    const absolute = resolve12(root, file.path);
     if (!within4(root, absolute)) continue;
     let cursor = dirname7(absolute);
     for (; ; ) {
-      if (CONFIG_NAMES2.some((name) => existsSync7(resolve11(cursor, name))) || manifestSignalsVitest(cursor)) {
+      if (CONFIG_NAMES2.some((name) => existsSync7(resolve12(cursor, name))) || manifestSignalsVitest(cursor)) {
         return true;
       }
       if (cursor === root) break;
@@ -4559,9 +5874,9 @@ var planSignalsVitest = (workspace, plan) => {
   return false;
 };
 var resolveVitestModule = (workspace) => {
-  let cursor = resolve11(workspace);
+  let cursor = resolve12(workspace);
   for (; ; ) {
-    const candidate = resolve11(cursor, "node_modules/vitest/vitest.mjs");
+    const candidate = resolve12(cursor, "node_modules/vitest/vitest.mjs");
     if (existsSync7(candidate)) return candidate;
     const parent = dirname7(cursor);
     if (parent === cursor) return null;
@@ -4578,9 +5893,9 @@ var parseCollectedFiles = (workspace, stdout) => {
       continue;
     const file = entry.file;
     if (typeof file !== "string") continue;
-    const absolute = resolve11(workspace, file);
-    if (!within4(resolve11(workspace), absolute)) continue;
-    files.add(relative6(resolve11(workspace), absolute).split(sep7).join("/"));
+    const absolute = resolve12(workspace, file);
+    if (!within4(resolve12(workspace), absolute)) continue;
+    files.add(relative6(resolve12(workspace), absolute).split(sep7).join("/"));
   }
   return files;
 };
@@ -4592,7 +5907,7 @@ var VitestRunner = class {
   id = "vitest";
   async detect(workspace, plan) {
     const configured = CONFIG_NAMES2.some(
-      (name) => existsSync7(resolve11(workspace, name))
+      (name) => existsSync7(resolve12(workspace, name))
     );
     return configured || manifestSignalsVitest(workspace) || planSignalsVitest(workspace, plan) ? "yes" : "no";
   }
@@ -4625,13 +5940,13 @@ var VitestRunner = class {
     return parseCollectedFiles(workspace, run.stdout);
   }
   async runFile(workspace, relativePath, timeoutMs) {
-    if (isAbsolute7(relativePath))
+    if (isAbsolute8(relativePath))
       throw new Error("test path must be repository-relative");
-    const target = resolve11(workspace, relativePath);
-    if (!within4(resolve11(workspace), target)) {
+    const target = resolve12(workspace, relativePath);
+    if (!within4(resolve12(workspace), target)) {
       throw new Error("test path escapes the workspace");
     }
-    if (existsSync7(target) && !within4(resolve11(workspace), realpathSync7(target))) {
+    if (existsSync7(target) && !within4(resolve12(workspace), realpathSync8(target))) {
       throw new Error("test path resolves outside the workspace");
     }
     const modulePath = resolveVitestModule(workspace);
@@ -4665,7 +5980,7 @@ var VitestRunner = class {
 };
 
 // packages/hermes-engineering/src/handlers/test-efficacy.ts
-var asRecord4 = (value) => {
+var asRecord6 = (value) => {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new TypeError("input must be an object");
   }
@@ -4673,22 +5988,22 @@ var asRecord4 = (value) => {
 };
 var within5 = (root, candidate) => {
   const rel = relative7(root, candidate);
-  return rel === "" || !rel.startsWith(`..${sep8}`) && rel !== ".." && !isAbsolute8(rel);
+  return rel === "" || !rel.startsWith(`..${sep8}`) && rel !== ".." && !isAbsolute9(rel);
 };
 var validatedPlanPath2 = (request, raw) => {
   if (typeof raw !== "string" || raw.length === 0) {
     throw new TypeError("planPath must be a non-empty string");
   }
-  const artifactRoot = realpathSync8(request.artifactRoot);
-  const path = realpathSync8(resolve12(raw));
+  const artifactRoot = realpathSync9(request.artifactRoot);
+  const path = realpathSync9(resolve13(raw));
   if (!within5(artifactRoot, path)) {
     throw new TypeError("planPath must be inside artifactRoot");
   }
-  if (!lstatSync7(path).isFile()) throw new TypeError("planPath must be a file");
+  if (!lstatSync9(path).isFile()) throw new TypeError("planPath must be a file");
   return path;
 };
-var parseInput3 = (request) => {
-  const input = asRecord4(request.input);
+var parseInput4 = (request) => {
+  const input = asRecord6(request.input);
   const unknown = Object.keys(input).find(
     (key) => !["planPath", "baseRef", "runner", "timeoutMs"].includes(key)
   );
@@ -4713,12 +6028,12 @@ var parseInput3 = (request) => {
   };
 };
 var parsePlan = (path) => {
-  const parsed = JSON.parse(readFileSync12(path, "utf8"));
-  const record = asRecord4(parsed);
+  const parsed = JSON.parse(readFileSync14(path, "utf8"));
+  const record = asRecord6(parsed);
   if (!Array.isArray(record.files))
     throw new TypeError("plan.files must be an array");
   const files = record.files.map((entry) => {
-    const file = asRecord4(entry);
+    const file = asRecord6(entry);
     if (typeof file.path !== "string" || typeof file.kind !== "string") {
       throw new TypeError(
         "every plan file requires string path and kind fields"
@@ -4781,15 +6096,15 @@ var existsAtBase = (cwd, baseRef, path) => {
   return result.status === 0;
 };
 var safeRelativePath = (workspace, path) => {
-  if (path.length === 0 || path.includes("\0") || isAbsolute8(path)) {
+  if (path.length === 0 || path.includes("\0") || isAbsolute9(path)) {
     throw new Error(`unsafe plan path: ${JSON.stringify(path)}`);
   }
   const normalized = path.split("\\").join("/");
   if (normalized.split("/").some((segment) => segment === ".." || segment === ".")) {
     throw new Error(`unsafe plan path segment: ${JSON.stringify(path)}`);
   }
-  const target = resolve12(workspace, normalized);
-  if (!within5(resolve12(workspace), target)) {
+  const target = resolve13(workspace, normalized);
+  if (!within5(resolve13(workspace), target)) {
     throw new Error(
       `plan path escapes the probe worktree: ${JSON.stringify(path)}`
     );
@@ -4797,8 +6112,8 @@ var safeRelativePath = (workspace, path) => {
   return normalized;
 };
 var probeTreePath = (workspace, requestId) => {
-  const suffix = createHash2("sha256").update(`${requestId}\0${Date.now()}\0${Math.random()}`).digest("hex").slice(0, 16);
-  return join10(workspace, `.hermes-efficacy-${suffix}`);
+  const suffix = createHash4("sha256").update(`${requestId}\0${Date.now()}\0${Math.random()}`).digest("hex").slice(0, 16);
+  return join12(workspace, `.hermes-efficacy-${suffix}`);
 };
 var createProbeTree = (workspace, probeTree) => {
   const head = git2(workspace, ["rev-parse", "HEAD"]);
@@ -4820,7 +6135,7 @@ var revertProduction = (probeTree, baseRef, revert) => {
   for (const path of added) safeRmWithin(probeTree, path);
 };
 var cleanupProbeTree = (workspace, probeTree) => {
-  if (!within5(resolve12(workspace), resolve12(probeTree)) || !probeTree.includes(".hermes-efficacy-")) {
+  if (!within5(resolve13(workspace), resolve13(probeTree)) || !probeTree.includes(".hermes-efficacy-")) {
     return "refusing to clean an unrecognized probe worktree";
   }
   let failure = null;
@@ -4845,8 +6160,8 @@ var inconclusiveForRun = (file, run, phase) => ({
 });
 var group = (tests, verdict) => tests.filter((test) => test.verdict === verdict).map((test) => test.path);
 async function runTestEfficacy(request, runners = [new VitestRunner(), new PytestRunner()]) {
-  const input = parseInput3(request);
-  const workspace = realpathSync8(request.workspace);
+  const input = parseInput4(request);
+  const workspace = realpathSync9(request.workspace);
   const plan = parsePlan(input.planPath);
   const choice = await selectRunner(input.runner, workspace, plan, runners);
   if ("code" in choice) {
@@ -5031,6 +6346,71 @@ async function runTestEfficacy(request, runners = [new VitestRunner(), new Pytes
 
 // packages/hermes-engineering/src/handlers/index.ts
 async function dispatch(request) {
+  if (request.command === "resolve-anchors") {
+    try {
+      const output = await resolveFindingAnchors(request);
+      const incomplete = output.unresolvedFindings.length > 0;
+      return {
+        protocolVersion: 1,
+        requestId: request.requestId,
+        status: incomplete ? "inconclusive" : "passed",
+        output: { ...output },
+        diagnostics: incomplete ? [
+          {
+            code: "unresolved_anchors",
+            message: `${output.unresolvedFindings.length} finding anchor(s) could not be resolved`
+          }
+        ] : []
+      };
+    } catch (cause) {
+      if (cause instanceof ReviewerEvidenceUnavailableError) {
+        return {
+          protocolVersion: 1,
+          requestId: request.requestId,
+          status: "inconclusive",
+          output: {},
+          diagnostics: [
+            { code: "reviewer_evidence_unavailable", message: cause.message }
+          ]
+        };
+      }
+      if (cause instanceof TypeError) {
+        return {
+          protocolVersion: 1,
+          requestId: request.requestId,
+          status: "failed",
+          output: {},
+          diagnostics: [{ code: "invalid_findings", message: cause.message }]
+        };
+      }
+      throw cause;
+    }
+  }
+  if (request.command === "compose-review") {
+    try {
+      const output = await composeReview2(request);
+      return {
+        protocolVersion: 1,
+        requestId: request.requestId,
+        status: output.event === "APPROVE" ? "passed" : output.event === "REQUEST_CHANGES" ? "failed" : "inconclusive",
+        output: { ...output },
+        diagnostics: []
+      };
+    } catch (cause) {
+      if (cause instanceof TypeError) {
+        return {
+          protocolVersion: 1,
+          requestId: request.requestId,
+          status: "failed",
+          output: {},
+          diagnostics: [
+            { code: "invalid_review_facts", message: cause.message }
+          ]
+        };
+      }
+      throw cause;
+    }
+  }
   if (request.command === "build-prompts") {
     try {
       const output = await buildPrompts(request);
@@ -5298,7 +6678,7 @@ async function main(options = {}) {
   process.exitCode = result.exitCode;
 }
 var entrypoint = process.argv[1];
-if (entrypoint && realpathSync9(fileURLToPath(import.meta.url)) === realpathSync9(entrypoint)) {
+if (entrypoint && realpathSync10(fileURLToPath(import.meta.url)) === realpathSync10(entrypoint)) {
   await main();
 }
 export {

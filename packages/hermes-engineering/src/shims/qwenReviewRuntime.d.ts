@@ -264,3 +264,28 @@ export function readTranscripts(
   env?: NodeJS.ProcessEnv,
   diffPath?: string,
 ): AgentRecord[];
+
+export interface AnchorResult {
+  id: string;
+  path: string;
+  anchor: string;
+  status: "resolved" | "unmatched";
+  line?: number;
+  startLine?: number;
+  matchCount?: number;
+  tier?: string;
+  ambiguous?: boolean;
+  reason?: string;
+}
+
+export function resolveAnchors(
+  diffText: string,
+  requests: Array<{ id: string; path: string; anchor: string }>,
+): AnchorResult[];
+
+export type ReviewEvent = "APPROVE" | "REQUEST_CHANGES" | "COMMENT";
+export function composeReview(input: {
+  criticalsInline?: number;
+  suggestionsInline?: number;
+  modelId: string;
+}): { event: ReviewEvent; baseEvent: ReviewEvent; body: string };
