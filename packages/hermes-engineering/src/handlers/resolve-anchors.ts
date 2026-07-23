@@ -1,8 +1,8 @@
 import { createHash, randomBytes } from "node:crypto";
 import {
-  chmodSync,
   closeSync,
   constants,
+  fchmodSync,
   fstatSync,
   fsyncSync,
   lstatSync,
@@ -223,12 +223,12 @@ const atomicWrite = (
   const descriptor = openSync(temporary, "wx", 0o600);
   try {
     writeFileSync(descriptor, content, "utf8");
+    fchmodSync(descriptor, 0o600);
     fsyncSync(descriptor);
   } finally {
     closeSync(descriptor);
   }
   try {
-    chmodSync(temporary, 0o600);
     renameSync(temporary, destination);
     if (process.platform !== "win32") {
       const directory = openSync(artifactRoot, "r");

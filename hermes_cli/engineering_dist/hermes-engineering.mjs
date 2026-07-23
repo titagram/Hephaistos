@@ -4837,9 +4837,9 @@ var validateReverseAuditState = (value) => {
 // packages/hermes-engineering/src/handlers/resolve-anchors.ts
 import { createHash as createHash2, randomBytes as randomBytes3 } from "node:crypto";
 import {
-  chmodSync as chmodSync3,
   closeSync as closeSync3,
   constants,
+  fchmodSync,
   fstatSync,
   fsyncSync as fsyncSync3,
   lstatSync as lstatSync7,
@@ -4973,12 +4973,12 @@ var atomicWrite2 = (artifactRoot, name, content) => {
   const descriptor = openSync3(temporary, "wx", 384);
   try {
     writeFileSync5(descriptor, content, "utf8");
+    fchmodSync(descriptor, 384);
     fsyncSync3(descriptor);
   } finally {
     closeSync3(descriptor);
   }
   try {
-    chmodSync3(temporary, 384);
     renameSync3(temporary, destination);
     if (process.platform !== "win32") {
       const directory = openSync3(artifactRoot, "r");
