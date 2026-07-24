@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import sys
 
+import pytest
+
 from hermes_cli.subcommands.evolution import build_evolution_parser
 
 
@@ -17,3 +19,17 @@ def test_evolution_parser_has_typed_read_surface_without_importing_heavy_modules
         "evolution", "show", "generation", "a" * 64, True,
     )
     assert "hermes_cli.evolution.command" not in sys.modules
+
+
+@pytest.mark.parametrize("argv", [
+    ["evolution", "history", "--limit", "0"],
+    ["evolution", "history", "--after", "-1"],
+    ["evolution", "show", "generation", "nope"],
+    ["evolution", "show", "suggestion", "/etc/passwd"],
+])
+def test_evolution_parser_rejects_malformed_contract_arguments(argv: list[str]) -> None:
+    parser = __import__("argparse").ArgumentParser()
+    build_evolution_parser(parser.add_subparsers(dest="command", required=True), cmd_evolution=lambda args: 0)
+    with pytest.raises(SystemExit) as error:
+        parser.parse_args(argv)
+    assert error.value.code == 2

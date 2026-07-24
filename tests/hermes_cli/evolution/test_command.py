@@ -100,3 +100,16 @@ def test_history_is_bounded_and_show_missing_is_nonzero(
     assert json.loads(capsys.readouterr().out) == {
         "schema_version": 1, "status": "missing", "kind": "suggestion", "record": None,
     }
+
+
+def test_lock_only_root_is_uninitialized_and_malformed_arguments_are_parser_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    home = tmp_path / "home"
+    root = home / "evolution"
+    root.mkdir(parents=True, mode=0o700)
+    (root / ".lifecycle.lock").write_bytes(b"")
+    (root / ".lifecycle.lock").chmod(0o600)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    assert evolution_command(_args()) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "uninitialized"

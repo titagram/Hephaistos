@@ -1774,7 +1774,10 @@ def _apply_managed(cfg: dict) -> dict:
     try:
         from hermes_cli import managed_scope
 
-        return managed_scope.apply_managed_overlay(cfg if isinstance(cfg, dict) else {})
+        from hermes_cli.config import _normalize_evolution_config
+        return _normalize_evolution_config(
+            managed_scope.apply_managed_overlay(cfg if isinstance(cfg, dict) else {})
+        )
     except Exception:
         return cfg
 

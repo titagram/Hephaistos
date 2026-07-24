@@ -8,13 +8,14 @@ from typing import Any
 
 from hermes_constants import get_hermes_home
 
-from .bootstrap import EvolutionBootstrapError, ensure_evolution_initialized
+from .bootstrap import EvolutionBootstrapError, ensure_evolution_initialized, evolution_state_kind
 from .ledger import EvolutionLedger, EvolutionLedgerError, StoredEvent
 from .reconcile import reconcile_evolution_state, read_evolution_snapshot
 
 _SYMBOL = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,63}\Z", re.ASCII)
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z", re.ASCII)
 _PUBLIC = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}\Z", re.ASCII)
+_TIMESTAMP = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z\Z", re.ASCII)
 
 
 def _emit(value: dict[str, Any]) -> None:
@@ -23,7 +24,7 @@ def _emit(value: dict[str, Any]) -> None:
 
 def _status() -> dict[str, Any]:
     root = get_hermes_home() / "evolution"
-    if not root.exists():
+    if evolution_state_kind(root) == "uninitialized":
         return {"schema_version": 1, "status": "uninitialized", "initialized": False,
                 "overlay_enabled": False, "active_generation_id": None,
                 "last_known_good_generation_id": None, "diagnostics": []}
@@ -37,7 +38,11 @@ def _status() -> dict[str, Any]:
 
 def _event(event: StoredEvent) -> dict[str, Any]:
     def public(value: str | None) -> str | None:
-        return value if value is None or _PUBLIC.fullmatch(value) else None
+        if value is None:
+            return None
+        if "/" in value or "\\" in value or re.search(r"(?:sk|pk|ghp|xox)[_-]", value, re.I):
+            return None
+        return value if _PUBLIC.fullmatch(value) else None
 
     summary = " ".join(event.reason_summary.split())[:512]
     if "/" in summary or "\\" in summary or re.search(r"(?:sk|pk|ghp|xox)[_-]", summary, re.I):
@@ -46,10 +51,12 @@ def _event(event: StoredEvent) -> dict[str, Any]:
             "attempt_id": public(event.attempt_id), "generation_id": public(event.generation_id),
             "event_type": public(event.event_type), "prior_state": public(event.prior_state),
             "next_state": public(event.next_state), "actor": public(event.actor),
-            "input_digests": list(event.input_digests), "authorization_id": event.authorization_id,
+            "input_digests": [digest for digest in event.input_digests if _DIGEST.fullmatch(digest)],
+            "authorization_id": public(event.authorization_id),
             "reason_code": public(event.reason_code),
             "reason_summary": summary,
-            "timestamp": event.created_at, "event_digest": event.event_digest}
+            "timestamp": event.created_at if _TIMESTAMP.fullmatch(event.created_at) else None,
+            "event_digest": event.event_digest if _DIGEST.fullmatch(event.event_digest) else None}
 
 
 def _history(limit: int, after: int) -> dict[str, Any]:
@@ -58,7 +65,11 @@ def _history(limit: int, after: int) -> dict[str, Any]:
     root = get_hermes_home() / "evolution"
     if not root.exists() or not (root / "evolution.db").exists():
         return {"schema_version": 1, "status": "uninitialized", "items": [], "next_after": None}
-    items = read_evolution_snapshot(lambda ledger: ledger.history(limit=limit, after=after))
+    def query(ledger: EvolutionLedger):
+        if ledger.verify_chain():
+            raise EvolutionLedgerError("invalid_event_chain")
+        return ledger.history(limit=limit, after=after)
+    items = read_evolution_snapshot(query)
     return {"schema_version": 1, "status": "ok", "items": [_event(item) for item in items],
             "next_after": items[-1].event_sequence if len(items) == limit else None}
 
@@ -68,7 +79,7 @@ def _show(kind: str, record_id: str) -> dict[str, Any]:
     if not valid:
         return {"schema_version": 1, "status": "missing", "kind": kind, "record": None}
     root = get_hermes_home() / "evolution"
-    if not root.exists() or not (root / "evolution.db").exists():
+    if evolution_state_kind(root) == "uninitialized" or not (root / "evolution.db").exists():
         return {"schema_version": 1, "status": "missing", "kind": kind, "record": None}
     queries = {
         "suggestion": ("SELECT suggestion_id, canonical_digest, state, created_at FROM suggestions WHERE suggestion_id = ?", (record_id,), ("suggestion_id", "canonical_digest", "state", "created_at")),
@@ -77,9 +88,24 @@ def _show(kind: str, record_id: str) -> dict[str, Any]:
         "report": ("SELECT promotion_report_id, generation_id, report_digest, state, created_at FROM promotion_reports WHERE report_digest = ?", (record_id,), ("promotion_report_id", "generation_id", "report_digest", "state", "created_at")),
     }
     sql, parameters, fields = queries[kind]
-    row = read_evolution_snapshot(lambda ledger: ledger.connection.execute(sql, parameters).fetchone())
+    def query(ledger: EvolutionLedger):
+        if ledger.verify_chain():
+            raise EvolutionLedgerError("invalid_event_chain")
+        return ledger.connection.execute(sql, parameters).fetchone()
+    row = read_evolution_snapshot(query)
     if row is not None:
         record = {field: row[field] for field in fields}
+        for field, value in record.items():
+            if value is None:
+                continue
+            if field.endswith("digest") or field == "generation_id":
+                if not isinstance(value, str) or _DIGEST.fullmatch(value) is None:
+                    return {"schema_version": 1, "status": "missing", "kind": kind, "record": None}
+            elif field == "created_at":
+                if not isinstance(value, str) or _TIMESTAMP.fullmatch(value) is None:
+                    return {"schema_version": 1, "status": "missing", "kind": kind, "record": None}
+            elif not isinstance(value, str) or _PUBLIC.fullmatch(value) is None or "/" in value or "\\" in value or re.search(r"(?:sk|pk|ghp|xox)[_-]", value, re.I):
+                return {"schema_version": 1, "status": "missing", "kind": kind, "record": None}
         return {"schema_version": 1, "status": "found", "kind": kind, "record": record}
     return {"schema_version": 1, "status": "missing", "kind": kind, "record": None}
 
