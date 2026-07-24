@@ -95,12 +95,9 @@ def evolution_state_kind(root: Path) -> str:
     return "uninitialized"
 
 
-def ensure_evolution_initialized(global_root: Path | None = None) -> PublishedGeneration:
+def ensure_evolution_initialized() -> PublishedGeneration:
     """Initialize exactly once, refusing all non-empty/non-coherent state."""
-    if global_root is not None:
-        root = global_root / "evolution"
-    else:
-        root = Path(get_hermes_home()) / "evolution"
+    root = Path(get_hermes_home()) / "evolution"
     with lifecycle_lock():
         if evolution_state_kind(root) != "uninitialized":
             result = reconcile_evolution_state(repair=False)

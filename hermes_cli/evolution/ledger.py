@@ -606,7 +606,7 @@ _SCHEMA_V3_ADDITIVE_STATEMENTS = (
     f"""
     CREATE TABLE opportunity_suggestions (
         suggestion_id TEXT NOT NULL PRIMARY KEY,
-        opportunity_key TEXT UNIQUE NOT NULL,
+        opportunity_key TEXT NOT NULL,
         state TEXT NOT NULL,
         active_telos_digest TEXT,
         score REAL DEFAULT 0.0,

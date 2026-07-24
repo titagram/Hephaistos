@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
+import stat as stat_module
 
 import uuid
 from dataclasses import dataclass
@@ -12,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
 
+from .ledger import EvolutionLedgerError, _same_file, _validate_schema
 from .observation_contract import ObservationEnvelope, observation_envelope_from_dict, validate_observation_envelope
 from .observer_policy import OpportunityScore
 from .organism_home import ensure_organism_directories, secure_file_permissions
@@ -27,6 +30,113 @@ SUGGESTION_STATES = frozenset({
     "addressed",
     "draft",
 })
+
+
+_PROJECT_B_TABLES = frozenset({
+    "observation_envelopes",
+    "opportunity_suggestions",
+    "opportunity_suggestion_events",
+})
+
+
+class SuggestionRepositoryError(RuntimeError):
+    """A precondition for SuggestionRepository failed; details are bounded."""
+
+
+def _connect_existing(db_path: Path) -> sqlite3.Connection:
+    """Open an existing SQLite database in read-write mode without creating it.
+
+    Performs pre-open lstat, URI-safe connect, PRAGMA database_list identity
+    verification, and post-open lstat to detect symlink substitution races.
+
+    A single ownership point manages the connection: it is closed exactly once
+    on any failure and returned open to the caller on success. All filesystem
+    and sqlite3 errors are converted to bounded SuggestionRepositoryError
+    codes with ``from None`` to suppress path-leaking context.
+    """
+    connection: sqlite3.Connection | None = None
+    transfer_ownership = False
+
+    try:
+        # 1. Pre-open lstat — reject missing, symlink, non-regular
+        try:
+            pre_stat = db_path.lstat()
+        except FileNotFoundError:
+            raise SuggestionRepositoryError("observer_database_missing") from None
+        except OSError:
+            raise SuggestionRepositoryError("observer_database_unsafe") from None
+
+        if stat_module.S_ISLNK(pre_stat.st_mode):
+            raise SuggestionRepositoryError("observer_database_unsafe") from None
+        if not stat_module.S_ISREG(pre_stat.st_mode):
+            raise SuggestionRepositoryError("observer_database_unsafe") from None
+
+        # 2. Open with safely-encoded URI, mode=rw (existing-only)
+        try:
+            uri = f"{db_path.absolute().as_uri()}?mode=rw"
+            connection = sqlite3.connect(uri, uri=True)
+        except sqlite3.OperationalError:
+            raise SuggestionRepositoryError("observer_database_missing") from None
+        except sqlite3.Error:
+            raise SuggestionRepositoryError("observer_database_unsafe") from None
+
+        # 3. PRAGMA database_list — get the filename SQLite actually opened
+        db_rows = connection.execute("PRAGMA database_list").fetchall()
+        if not db_rows:
+            raise SuggestionRepositoryError("observer_database_missing") from None
+
+        main_row = db_rows[0]
+        actual_filename = main_row[2]  # column 2 is 'file'
+
+        # stat() the filename SQLite reports (follows symlinks, but we already rejected them)
+        try:
+            db_stat = os.stat(actual_filename)
+        except OSError:
+            raise SuggestionRepositoryError("observer_database_unsafe") from None
+        except TypeError:
+            raise SuggestionRepositoryError("observer_database_missing") from None
+
+        # 4. Post-open lstat on the declared path
+        try:
+            post_stat = db_path.lstat()
+        except FileNotFoundError:
+            raise SuggestionRepositoryError("observer_database_missing") from None
+        except OSError:
+            raise SuggestionRepositoryError("observer_database_unsafe") from None
+
+        if stat_module.S_ISLNK(post_stat.st_mode):
+            raise SuggestionRepositoryError("observer_database_unsafe") from None
+        if not stat_module.S_ISREG(post_stat.st_mode):
+            raise SuggestionRepositoryError("observer_database_unsafe") from None
+
+        # 5. All three identity sources must agree on (st_dev, st_ino)
+        if not _same_file(pre_stat, db_stat):
+            raise SuggestionRepositoryError("observer_database_unsafe") from None
+        if not _same_file(post_stat, db_stat):
+            raise SuggestionRepositoryError("observer_database_unsafe") from None
+        if not _same_file(pre_stat, post_stat):
+            raise SuggestionRepositoryError("observer_database_unsafe") from None
+
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys=ON")
+
+        transfer_ownership = True
+        return connection
+
+    except SuggestionRepositoryError:
+        raise
+    except FileNotFoundError:
+        raise SuggestionRepositoryError("observer_database_missing") from None
+    except OSError:
+        raise SuggestionRepositoryError("observer_database_unsafe") from None
+    except sqlite3.Error:
+        raise SuggestionRepositoryError("observer_database_unsafe") from None
+    finally:
+        if connection is not None and not transfer_ownership:
+            try:
+                connection.close()
+            except sqlite3.Error:
+                pass
 
 
 @dataclass(frozen=True)
@@ -79,16 +189,54 @@ class SuggestionRecord:
         }
 
 
-
-
-
 class SuggestionRepository:
     def __init__(self, db_path: Path) -> None:
+        db_path = Path(db_path)
+
+        connection = _connect_existing(db_path)
+        try:
+            # Verify schema_version singleton
+            cursor = connection.execute("SELECT singleton, version FROM schema_version")
+            row = cursor.fetchone()
+            if row is None:
+                raise SuggestionRepositoryError("observer_schema_unavailable")
+            s_version = int(row["version"])
+            if s_version != 3:
+                raise SuggestionRepositoryError("observer_schema_unsupported")
+
+            # Verify Project B tables exist (fast pre-check)
+            cursor.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name IN (?, ?, ?)",
+                ("observation_envelopes", "opportunity_suggestions", "opportunity_suggestion_events"),
+            )
+            found = {r[0] for r in cursor.fetchall()}
+            missing = _PROJECT_B_TABLES - found
+            if missing:
+                raise SuggestionRepositoryError("observer_tables_missing")
+
+            # Full canonical schema validation via ledger
+            try:
+                _validate_schema(connection)
+            except EvolutionLedgerError:
+                raise SuggestionRepositoryError("observer_schema_invalid") from None
+        except SuggestionRepositoryError:
+            connection.close()
+            raise
+        except Exception:
+            connection.close()
+            raise SuggestionRepositoryError("observer_schema_unavailable") from None
+
+        # Connection used only for validation; close it explicitly
+        connection.close()
         self.db_path = db_path
 
     def _get_connection(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.db_path))
-        conn.row_factory = sqlite3.Row
+        try:
+            conn = _connect_existing(self.db_path)
+        except SuggestionRepositoryError:
+            raise
+        except Exception:
+            raise SuggestionRepositoryError("observer_database_missing") from None
         return conn
 
     def insert_observation_envelope(self, envelope: ObservationEnvelope) -> bool:
