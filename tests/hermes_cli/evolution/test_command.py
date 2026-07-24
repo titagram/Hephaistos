@@ -11,6 +11,8 @@ import pytest
 from hermes_cli.config import DEFAULT_CONFIG, _normalize_evolution_config
 from hermes_cli.evolution.bootstrap import ensure_evolution_initialized
 from hermes_cli.evolution.command import evolution_command
+from hermes_cli.evolution.ledger import StoredEvent
+from hermes_cli.evolution.ledger import EvolutionLedger
 
 
 def _args(**values):
@@ -127,3 +129,67 @@ def test_foreign_root_keeps_history_and_show_failure_envelopes(
     assert set(json.loads(capsys.readouterr().out)) == {"schema_version", "status", "items", "next_after"}
     assert evolution_command(_args(action="show", kind="generation", record_id="a" * 64)) == 1
     assert set(json.loads(capsys.readouterr().out)) == {"schema_version", "status", "kind", "record"}
+
+
+def test_dangling_evolution_root_symlink_is_fail_closed(tmp_path: Path) -> None:
+    from hermes_cli.evolution.bootstrap import evolution_state_kind
+    root = tmp_path / "evolution"
+    root.symlink_to(tmp_path / "missing-target")
+    assert evolution_state_kind(root) == "blocked"
+
+
+def test_authorization_history_projection_preserves_safe_a3_fields() -> None:
+    from hermes_cli.evolution.command import _event
+    event = StoredEvent(
+        event_id="authorization-event", attempt_id="attempt-alpha", generation_id=None,
+        event_type="authorization_requested", prior_state="draft", next_state="draft",
+        actor="local-operator", input_digests=("a" * 64,), authorization_id="authorization-alpha",
+        reason_code="authorization_requested", reason_summary="authorization requested",
+        created_at="2026-07-24T00:00:00.000000Z", event_sequence=1,
+        previous_event_digest=None, event_digest="b" * 64,
+    )
+    projected = _event(event)
+    assert projected["event_type"] == "authorization_requested"
+    assert projected["attempt_id"] == "attempt-alpha"
+    assert projected["actor"] == "local-operator"
+    assert projected["authorization_id"] == "authorization-alpha"
+
+
+def test_all_show_kinds_found_and_missing_use_closed_records(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    baseline = ensure_evolution_initialized()
+    ledger = EvolutionLedger(home / "evolution" / "evolution.db")
+    try:
+        now = "2026-07-24T00:00:00.000000Z"
+        ledger.connection.execute("INSERT INTO attempts VALUES (?,?,?,?,?)", ("attempt-alpha", "local", "alpha", "draft", now))
+        ledger.connection.execute("INSERT INTO generations VALUES (?,?,?,?,?)", (baseline.generation_id, "attempt-alpha", baseline.generation_id, "draft", now))
+        ledger.connection.execute("INSERT INTO suggestions VALUES (?,?,?,?,?)", ("suggestion-alpha", "attempt-alpha", "a" * 64, "draft", now))
+        ledger.connection.execute("INSERT INTO blueprints VALUES (?,?,?,?,?)", ("blueprint-alpha", "attempt-alpha", "b" * 64, "draft", now))
+        ledger.connection.execute("INSERT INTO promotion_reports VALUES (?,?,?,?,?)", ("report-alpha", baseline.generation_id, "c" * 64, "draft", now))
+    finally:
+        ledger.connection.close()
+    from hermes_cli.evolution.command import _show
+    for kind, identifier in (("suggestion", "suggestion-alpha"), ("blueprint", "b" * 64), ("generation", baseline.generation_id), ("report", "c" * 64)):
+        found = _show(kind, identifier)
+        assert set(found) == {"schema_version", "status", "kind", "record"}
+        assert found["status"] == "found"
+        assert _show(kind, ("missing-alpha" if kind == "suggestion" else "d" * 64))["status"] == "missing"
+
+
+def test_invalid_semantic_timestamp_is_not_a_found_show_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    ensure_evolution_initialized()
+    ledger = EvolutionLedger(home / "evolution" / "evolution.db")
+    try:
+        ledger.connection.execute("INSERT INTO attempts VALUES (?,?,?,?,?)", ("attempt-alpha", "local", "alpha", "draft", "2026-07-24T00:00:00.000000Z"))
+        ledger.connection.execute("INSERT INTO blueprints VALUES (?,?,?,?,?)", ("blueprint-alpha", "attempt-alpha", "e" * 64, "draft", "9999-99-99T99:99:99.999999Z"))
+    finally:
+        ledger.connection.close()
+    from hermes_cli.evolution.command import _show
+    assert _show("blueprint", "e" * 64)["status"] == "missing"
