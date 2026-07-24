@@ -51,7 +51,14 @@ building→quarantined/build_failed; quarantined→canary_running;
 canary_running→promotion_ready/canary_failed; promotion_ready→active/rejected;
 active→stable/rolled_back; stable→rolled_back/retired; and rolled_back→retired.
 Research, build, and promotion approval-bound edges require their respective
-authorization; actors are closed by the transition table.
+authorization. Actors are exact: `operator` owns draft→research_authorized,
+blueprint_ready→build_approved, and draft/research_authorized/blueprint_ready/
+build_approved/promotion_ready→rejected; `workshop` owns
+research_authorized→blueprint_ready/research_expired; `builder` owns
+build_approved→building and building→quarantined/build_failed; `supervisor`
+owns quarantined→canary_running, canary_running→promotion_ready/canary_failed,
+promotion_ready→active, active→stable/rolled_back, stable→rolled_back/retired,
+and rolled_back→retired.
 
 `authorization.create_authorization_request`, `issue_grant`,
 `deny_authorization_request`, and `consume_grant` are host-owned, append-only
@@ -90,10 +97,14 @@ $HERMES_HOME/evolution/                 0700
       manifest.json                     0444
 ```
 
-`lifecycle_lock()` serializes all mutation. `reconcile_evolution_state` and
-`read_evolution_snapshot` verify chain, manifest, pointer, schema, ownership,
-and modes before returning data. Read commands take immutable snapshots and do
-not mutate the live evolution tree. Bootstrap can fill a missing baseline
+`lifecycle_lock()` serializes bootstrap and mutating reconciliation compound
+filesystem/ledger operations. Ordinary ledger/authorization writes use SQLite
+write transactions plus append-only and coherence constraints; generation-store
+publication and pointers use their own publication/atomic-replace mechanics.
+`reconcile_evolution_state` and `read_evolution_snapshot` verify chain,
+manifest, pointer, schema, ownership, and modes before returning data. Read
+commands take immutable snapshots and do not mutate the live evolution tree.
+Bootstrap can fill a missing baseline
 pointer only when the existing committed baseline proof is coherent; it never
 silently repairs foreign or arbitrary partial state.
 
@@ -114,12 +125,17 @@ Defaults are `evolution.enabled=true`, observer enabled with threshold 3,
 
 ## Project B boundary
 
-Project B calls `import_new_events(ledger, max_events, max_bytes)`,
-`evaluate_suggestions(ledger, policy, now)`, `list_suggestions(ledger, states,
-limit, after)`, and `mark_surfaced(ledger, suggestion_id)`. Its repository
-uses only the named Project A event append/history/chain-read surface needed by
-those calls, plus public generation/event identities and operator reads; it
-does not receive a general transaction surface. It must not issue or consume
+Project B plans future repository functions `import_new_events(ledger,
+max_events, max_bytes)`, `evaluate_suggestions(ledger, policy, now)`,
+`list_suggestions(ledger, states, limit, after)`, and `mark_surfaced(ledger,
+suggestion_id)`. The host owns ledger construction and connection lifetime.
+Its current Project A allowlist is public `append_event`, `history`,
+`verify_chain`, and `LifecycleEvent`; repository-internal `transaction()` and
+`_append(connection, LifecycleEvent)` are permitted only together for planned
+atomic import/projection plus observer-event updates. `_append` is intentional
+repository coupling, not authority or general orchestration. No transition,
+authorization, pointer, or store calls are
+allowed. It must not issue or consume
 grants, write pointers, publish a
 generation, create a candidate workspace, invoke adapters, open the web, or
 change active/LKG state.

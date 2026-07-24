@@ -8,11 +8,14 @@ import sqlite3
 import stat
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
 
 from hermes_cli.evolution.ledger import EvolutionLedger
+from hermes_cli.evolution.pointers import validate_pointer
+from hermes_cli.evolution.store import GenerationStore
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -93,6 +96,21 @@ def _assert_a4_mode_contract(root: Path, generation_id: str) -> None:
     assert actual == expected
 
 
+def _assert_interrupted_inventory(root: Path, generation_id: str, pointers: set[str]) -> None:
+    expected = {
+        ".": (stat.S_IFDIR, 0o700),
+        ".lifecycle.lock": (stat.S_IFREG, 0o600),
+        "evolution.db": (stat.S_IFREG, 0o600),
+        "generations": (stat.S_IFDIR, 0o700),
+        "generations/.publish.lock": (stat.S_IFREG, 0o600),
+        f"generations/{generation_id}": (stat.S_IFDIR, 0o555),
+        f"generations/{generation_id}/manifest.json": (stat.S_IFREG, 0o444),
+    }
+    expected.update({name: (stat.S_IFREG, 0o600) for name in pointers})
+    actual = {relative: (kind, mode) for relative, kind, mode, *_ in _inventory(root)}
+    assert actual == expected
+
+
 def _event_count(database: Path) -> int:
     connection = sqlite3.connect(database)
     try:
@@ -107,6 +125,29 @@ def _assert_valid_event_chain(database: Path) -> None:
         assert ledger.verify_chain() == []
     finally:
         ledger.connection.close()
+
+
+def _assert_retained_baseline(root: Path, generation_id: str, pointers: set[str]) -> None:
+    prior_home, prior_hades = os.environ.get("HERMES_HOME"), os.environ.get("HADES_HOME")
+    os.environ["HERMES_HOME"] = str(root.parent)
+    os.environ["HADES_HOME"] = str(root.parent)
+    ledger = EvolutionLedger(root / "evolution.db")
+    try:
+        store = GenerationStore(root / "generations")
+        assert store.verify(generation_id).generation_id == generation_id
+        for name in pointers:
+            document = json.loads((root / name).read_bytes())
+            assert validate_pointer(document, ledger, store).generation_id == generation_id
+    finally:
+        ledger.connection.close()
+        if prior_home is None:
+            os.environ.pop("HERMES_HOME", None)
+        else:
+            os.environ["HERMES_HOME"] = prior_home
+        if prior_hades is None:
+            os.environ.pop("HADES_HOME", None)
+        else:
+            os.environ["HADES_HOME"] = prior_hades
 
 
 def _safe_show_records(home: Path, generation_id: str) -> dict[str, str]:
@@ -199,20 +240,50 @@ def test_real_cli_baseline_is_reopenable_private_and_read_only(tmp_path: Path) -
 
 def test_real_cli_concurrent_initialization_converges_to_one_baseline(tmp_path: Path) -> None:
     home = tmp_path / "home"
+    ready = [tmp_path / f"ready-{index}" for index in range(2)]
+    start = tmp_path / "start"
+    child = '''
+import os, pathlib, sys, time
+pathlib.Path(os.environ["A8_READY"]).touch()
+deadline = time.monotonic() + 15
+while not pathlib.Path(os.environ["A8_START"]).exists():
+    if time.monotonic() > deadline:
+        raise SystemExit(75)
+    time.sleep(.01)
+sys.argv = ["hermes", "evolution", "init", "--json"]
+from hermes_cli.main import main
+main()
+'''
     commands = [
         subprocess.Popen(
-            [str(PYTHON), "-m", "hermes_cli.main", "evolution", "init", "--json"],
-            cwd=ROOT, env=_environment(home), text=True,
+            [str(PYTHON), "-c", child], cwd=ROOT,
+            env={**_environment(home), "A8_READY": str(ready[index]), "A8_START": str(start)}, text=True,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
-        for _ in range(2)
+        for index in range(2)
     ]
-    results = [process.communicate(timeout=30) for process in commands]
-    values = []
-    for process, (stdout, stderr) in zip(commands, results, strict=True):
-        assert process.returncode == 0, stderr
-        assert stderr == ""
-        values.append(json.loads(stdout))
+    try:
+        deadline = time.monotonic() + 15
+        while not all(path.exists() for path in ready):
+            assert time.monotonic() < deadline
+            time.sleep(.01)
+        start.touch()
+        results = [process.communicate(timeout=30) for process in commands]
+        values = []
+        for process, (stdout, stderr) in zip(commands, results, strict=True):
+            result = subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
+            assert process.returncode == 0, stderr
+            values.append(_json(result))
+    finally:
+        for process in commands:
+            if process.poll() is None:
+                process.terminate()
+        for process in commands:
+            try:
+                process.communicate(timeout=3)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.communicate(timeout=3)
     generation_ids = {value["active_generation_id"] for value in values}
     assert len(generation_ids) == 1
     root = home / "evolution"
@@ -266,11 +337,13 @@ def test_durable_foundation_excludes_forbidden_fixture_material(tmp_path: Path) 
 
 
 @pytest.mark.parametrize(
-    ("boundary", "expected_exit"),
-    (("before-first", 1), ("after-first", 1), ("before-second", 1), ("after-second", 0)),
+    ("boundary", "expected_exit", "pointers"),
+    (("before-first", 1, set()), ("after-first", 1, {"active.json"}),
+     ("before-second", 1, {"active.json"}),
+     ("after-second", 0, {"active.json", "last-known-good.json"})),
 )
 def test_real_cli_pointer_interruption_recovers_one_baseline(
-    tmp_path: Path, boundary: str, expected_exit: int
+    tmp_path: Path, boundary: str, expected_exit: int, pointers: set[str]
 ) -> None:
     """Exercise the established pointer-write seam in a controlled CLI child."""
     home = tmp_path / "home"
@@ -302,7 +375,13 @@ main()
         capture_output=True, check=False, timeout=30,
     )
     assert interrupted.returncode == 1
-    assert "injected" not in interrupted.stdout + interrupted.stderr
+    interrupted_value = _json(interrupted)
+    assert interrupted_value == {
+        "schema_version": 1, "status": "blocked", "initialized": False,
+        "overlay_enabled": False, "active_generation_id": None,
+        "last_known_good_generation_id": None, "diagnostics": ["evolution_unavailable"],
+    }
+    assert not any(value in interrupted.stdout + interrupted.stderr for value in (str(home), str(ROOT), "Traceback", "injected"))
     recovered = _cli(home, "init", "--json")
     assert recovered.returncode == expected_exit
     recovered_value = _json(recovered)
@@ -312,6 +391,8 @@ main()
     generations = [entry for entry in (root / "generations").iterdir() if entry.name != ".publish.lock"]
     assert len(generations) == 1
     generation_id = generations[0].name
+    _assert_interrupted_inventory(root, generation_id, pointers)
+    _assert_retained_baseline(root, generation_id, pointers)
     assert stat.S_IMODE(root.stat().st_mode) == 0o700
     assert stat.S_IMODE((root / "evolution.db").stat().st_mode) == 0o600
     assert stat.S_IMODE((root / "generations").stat().st_mode) == 0o700
@@ -322,4 +403,4 @@ main()
         assert (root / "active.json").read_bytes() == (root / "last-known-good.json").read_bytes()
         _assert_a4_mode_contract(root, generation_id)
     else:
-        assert recovered_value["status"] == "blocked"
+        assert recovered_value == interrupted_value
