@@ -33,3 +33,46 @@ def test_evolution_parser_rejects_malformed_contract_arguments(argv: list[str]) 
     with pytest.raises(SystemExit) as error:
         parser.parse_args(argv)
     assert error.value.code == 2
+
+
+def test_symbolic_non_uuid_suggestion_id_is_a_valid_parser_contract() -> None:
+    parser = __import__("argparse").ArgumentParser()
+    build_evolution_parser(
+        parser.add_subparsers(dest="command", required=True),
+        cmd_evolution=lambda args: 0,
+    )
+
+    parsed = parser.parse_args(
+        ["evolution", "show", "suggestion", "suggestion-alpha", "--json"]
+    )
+
+    assert parsed.kind == "suggestion"
+    assert parsed.record_id == "suggestion-alpha"
+    assert parsed.json is True
+
+
+@pytest.mark.parametrize("kind", ["blueprint", "generation", "report"])
+@pytest.mark.parametrize(
+    "record_id",
+    [
+        "a" * 63,
+        "a" * 65,
+        "A" * 64,
+        "g" * 64,
+        "0x" + "a" * 62,
+    ],
+)
+def test_digest_show_kinds_require_exact_lowercase_hex(
+    kind: str,
+    record_id: str,
+) -> None:
+    parser = __import__("argparse").ArgumentParser()
+    build_evolution_parser(
+        parser.add_subparsers(dest="command", required=True),
+        cmd_evolution=lambda args: 0,
+    )
+
+    with pytest.raises(SystemExit) as error:
+        parser.parse_args(["evolution", "show", kind, record_id, "--json"])
+
+    assert error.value.code == 2

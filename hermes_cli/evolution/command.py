@@ -18,11 +18,19 @@ _DIGEST = re.compile(r"[0-9a-f]{64}\Z", re.ASCII)
 _PUBLIC = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}\Z", re.ASCII)
 _TIMESTAMP = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z\Z", re.ASCII)
 _UUID = re.compile(r"[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\Z", re.ASCII)
+_AWS_ACCESS_KEY = re.compile(r"(?:AKIA|ASIA)[A-Z0-9]{16}", re.ASCII)
 _EVENT_TYPES = frozenset({"baseline_designated", "state_transition", "supervisor_recovery", "authorization_requested", "authorization_granted", "authorization_denied", "authorization_consumed"})
 _ACTORS = frozenset({"system", "supervisor", "operator", "host"})
 _REASON_CODES = frozenset({"baseline", "transition", "active_restored_from_lkg", "stable_base_only", "authorization_requested", "authorization_granted", "authorization_denied", "authorization_consumed"})
 _PUBLIC_SUMMARIES = frozenset({"baseline designation", "restored active pointer from proven last known good", "evolution overlays disabled because no pointer was proven"})
 _STATES = frozenset({"draft", "research_authorized", "blueprint_ready", "build_approved", "building", "quarantined", "canary_running", "promotion_ready", "active", "stable", "rejected", "research_expired", "build_failed", "canary_failed", "rolled_back", "retired"})
+
+
+def _is_public_safe(value: str) -> bool:
+    return (
+        _AWS_ACCESS_KEY.search(value) is None
+        and redact_sensitive_text(value, force=True) == value
+    )
 
 
 def _emit(value: dict[str, Any]) -> None:
@@ -47,7 +55,7 @@ def _event(event: StoredEvent) -> dict[str, Any]:
     def identity(value: str | None) -> str | None:
         if not isinstance(value, str) or not (_UUID.fullmatch(value) or _PUBLIC.fullmatch(value)):
             return None
-        return value if redact_sensitive_text(value, force=True) == value else None
+        return value if _is_public_safe(value) else None
     def timestamp(value: object) -> str | None:
         try:
             return _require_timestamp(value)
@@ -125,12 +133,12 @@ def _show(kind: str, record_id: str) -> dict[str, Any]:
                 if value not in _STATES:
                     return {"schema_version": 1, "status": "missing", "kind": kind, "record": None}
             elif field == "suggestion_id":
-                if not isinstance(value, str) or _SYMBOL.fullmatch(value) is None or redact_sensitive_text(value, force=True) != value:
+                if not isinstance(value, str) or _SYMBOL.fullmatch(value) is None or not _is_public_safe(value):
                     return {"schema_version": 1, "status": "missing", "kind": kind, "record": None}
             elif field in {"blueprint_id", "promotion_report_id"}:
-                if not isinstance(value, str) or _PUBLIC.fullmatch(value) is None or redact_sensitive_text(value, force=True) != value:
+                if not isinstance(value, str) or _PUBLIC.fullmatch(value) is None or not _is_public_safe(value):
                     return {"schema_version": 1, "status": "missing", "kind": kind, "record": None}
-            elif not isinstance(value, str) or _PUBLIC.fullmatch(value) is None or redact_sensitive_text(value, force=True) != value:
+            elif not isinstance(value, str) or _PUBLIC.fullmatch(value) is None or not _is_public_safe(value):
                 return {"schema_version": 1, "status": "missing", "kind": kind, "record": None}
         return {"schema_version": 1, "status": "found", "kind": kind, "record": record}
     return {"schema_version": 1, "status": "missing", "kind": kind, "record": None}
