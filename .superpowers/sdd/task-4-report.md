@@ -1,69 +1,61 @@
-# Task 4 report — Source-scoped graph repository
+# Task 4 — Typed graph configuration and source snapshot identity
 
-## Status
+## Scope delivered
 
-Complete on remote branch `feature/canonical-graph-foundation-20260712`.
+- Added `hermes_cli.hades_graph_config` as the only typed, immutable reader for
+  the closed `hades.graph_index` subsection.
+- Added exact defaults and closed range/type validation, including strict
+  booleans, unknown-key rejection at the explicit index boundary, and the
+  chunk-at-most-bundle invariant.
+- Added compiled dependency/build and compulsory-secret exclusions that are
+  always unioned with user `excluded_paths`; user configuration is additive and
+  cannot put secret files back in source scope.
+- Added deterministic source inventory hashing in `hades_index.inventory`:
+  sorted NFC source-relative paths, streaming whole-file hashes, exact
+  `path_utf8 + NUL + lowercase_file_sha256_ascii + LF` tree preimage, NFC
+  collision failure, safe in-root file symlinks, and opaque invalid-symlink
+  markers.
+- Added Git/non-Git metadata, dirty-worktree detection, unavailable gitlink
+  submodule marker hashing, and a pre/post extraction check in the backend AST
+  job that raises `source_changed_during_index` on digest drift.
 
-## Commit
+Committed as `c24586766 feat(hades): add graph v2 source identity and config`.
 
-`b002f657 feat(graph): resolve source-scoped graph artifacts`
+## Configuration source
 
-The commit contains only `backend/app/Services/Graph/CanonicalGraphRepository.php` and `backend/tests/Feature/CanonicalGraphRepositoryTest.php`. The pre-existing `backend/vendor/pestphp/pest/.temp/test-results` modification remains unstaged and untouched by the commit.
+`cli-config.yaml` is not versioned in this repository. The canonical runtime
+defaults are `hermes_cli.config.DEFAULT_CONFIG`; the tracked user-facing
+template is `cli-config.yaml.example`, which was updated instead of creating a
+second, ad-hoc source of truth.
 
-## Implementation
+## TDD evidence
 
-- Added strict source-scoped latest, exact-identity, and scope-listing repository APIs.
-- Enforced linked-binding/project and repository/project ownership checks with no cross-scope fallback.
-- Adapted only trusted selected legacy payloads in memory and exposed canonical identity without display paths.
-- Did not touch runtime database state, migrations, stored payloads, or Neo4j.
+1. RED: `pytest tests/hermes_cli/test_hades_graph_config.py tests/hermes_cli/test_hades_backend_jobs.py -k 'source_identity or graph_index_config' -q`
+   initially failed 13 tests with the expected missing
+   `hermes_cli.hades_graph_config` module.
+2. RED: the backend-job mutation test initially failed with `DID NOT RAISE`,
+   proving the pre/post source check was not yet wired.
+3. GREEN:
+   - `pytest tests/hermes_cli/test_hades_graph_config.py tests/hermes_cli/test_hades_backend_jobs.py -k 'source_identity or graph_index_config' -q` → 16 passed
+   - `pytest tests/hermes_cli/test_hades_graph_config.py tests/hermes_cli/test_hades_backend_jobs.py::test_populate_backend_ast_rejects_source_change_during_extraction -q` → 26 passed
+   - `pytest tests/hermes_cli/test_hades_backend_jobs.py -k 'sync_git_tree_returns_bounded_manifest or workspace_file_iteration_prioritizes_source_dirs_before_assets or populate_backend_ast_rejects_source_change_during_extraction' -q` → 3 passed
+   - `pytest tests/hermes_cli/test_config.py -q` → 131 passed
+   - `pytest tests/hermes_cli/test_config_validation.py tests/hermes_cli/test_config_drift.py -q` → 22 passed
+   - Ruff check, compileall, and `git diff --check` pass.
 
-## Verification
+## Security/identity checks
 
-- RED observed: 3 expected failures because the repository class did not exist.
-- Focused GREEN: 3 tests, 17 assertions.
-- Pint completed for both Task 4 files.
-- Fresh requested regression run: 644 assertions, 0 failures across the repository, Hades privacy, and project lifecycle suites.
-- Commit scope and whitespace checks passed.
+- Invalid symlink preimages use `SHA256(SYMLINK_INVALID + NUL + exact link
+  target bytes)` only. Link targets do not appear in public `SourceIdentity`,
+  partial-reason values, or error messages.
+- Git dirty and non-Git metadata are covered; unavailable submodules use their
+  gitlink commit in a non-source marker digest and record
+  `submodule_unavailable` privately for later completeness accounting.
 
-## Concern
+## Residual limitations intentionally deferred
 
-The container reports its existing missing `/workspace/backend/.env` warning for every test (57 warnings in the full run). There were no test failures; no environment file was created because runtime/environment changes were out of scope.
-
-## Review follow-up — exact identity isolation
-
-Commit: `3f740587 test(graph): enforce source identity isolation`
-
-Files committed:
-
-- `backend/tests/Feature/CanonicalGraphRepositoryTest.php`
-
-Added table-driven negative coverage for wrong projects, wrong binding/repository scope IDs, unlinked bindings, and mismatched snapshot artifact ownership. Added explicit no-fallback coverage in both directions and recursive privacy checks for both `latestForScope()` and `findByIdentity()` across both source types.
-
-RED was verified through an uncommitted mutation that removed the Hades project constraints, since the reviewed production implementation was already correct:
-
-```bash
-APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= \
-  php artisan test tests/Feature/CanonicalGraphRepositoryTest.php
-```
-
-Result with mutation: 1 failed, 5 warnings, 30 assertions. The exact-identity isolation test caught the wrong-project graph leak. The committed production source was then restored byte-for-byte.
-
-Focused GREEN after restoration and Pint:
-
-```bash
-APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= \
-  php artisan test tests/Feature/CanonicalGraphRepositoryTest.php
-```
-
-Result: 0 failures, 6 warnings, 35 assertions.
-
-Full requested regression command:
-
-```bash
-APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test \
-  tests/Feature/CanonicalGraphRepositoryTest.php \
-  tests/Feature/Hades/HadesM3SharedMemoryTest.php \
-  tests/Feature/Dashboard/ProjectLifecycleDashboardApiTest.php
-```
-
-Result: 0 failures, 60 warnings, 662 assertions. The warnings remain exclusively the known missing `/workspace/backend/.env` warning. No production file changed; the pre-existing vendor Pest temp result remains unstaged.
+- The current legacy graph producer still cannot publish a v2 artifact; the
+  v2 lifecycle producer/mapping is handled by later plan tasks. This task
+  supplies the pre/post snapshot boundary it will use.
+- `SourceSnapshot.partial_reasons` is private inventory data. Later lifecycle
+  tasks must map those reasons into the v2 coverage/capability ledger.
