@@ -466,6 +466,162 @@ def test_hostile_schema_valid_history_and_show_strings_never_serialize(
             assert hostile not in serialized
 
 
+def test_lower_hex_public_identities_are_redacted_or_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    baseline = ensure_evolution_initialized()
+    secret = "d" * 64
+    blueprint_digest = "e" * 64
+    report_digest = "f" * 64
+    input_digest = "9" * 64
+    ledger = EvolutionLedger(home / "evolution" / "evolution.db")
+    try:
+        _insert_attempt(ledger, secret)
+        ledger.connection.execute(
+            "INSERT INTO generations VALUES (?, ?, ?, ?, ?)",
+            (
+                baseline.generation_id,
+                secret,
+                baseline.generation_id,
+                "draft",
+                NOW,
+            ),
+        )
+        ledger.connection.execute(
+            "INSERT INTO suggestions VALUES (?, ?, ?, ?, ?)",
+            (secret, secret, "a" * 64, "draft", NOW),
+        )
+        ledger.connection.execute(
+            "INSERT INTO blueprints VALUES (?, ?, ?, ?, ?)",
+            (secret, secret, blueprint_digest, "draft", NOW),
+        )
+        ledger.connection.execute(
+            "INSERT INTO promotion_reports VALUES (?, ?, ?, ?, ?)",
+            (
+                secret,
+                baseline.generation_id,
+                report_digest,
+                "draft",
+                NOW,
+            ),
+        )
+        ledger.append_event(
+            LifecycleEvent(
+                event_id=secret,
+                attempt_id=secret,
+                generation_id=baseline.generation_id,
+                event_type="state_transition",
+                prior_state="draft",
+                next_state="research_authorized",
+                actor=secret,
+                input_digests=(input_digest,),
+                authorization_id=secret,
+                reason_code="transition",
+                reason_summary="private",
+                created_at=NOW,
+            )
+        )
+    finally:
+        ledger.connection.close()
+
+    exit_code, history, serialized = _run(
+        action="history",
+        limit=100,
+        after=0,
+    )
+    assert exit_code == 0
+    event = history["items"][-1]
+    for field in ("event_id", "attempt_id", "actor", "authorization_id"):
+        assert event[field] is None
+    assert event["generation_id"] == baseline.generation_id
+    assert event["input_digests"] == [input_digest]
+    assert isinstance(event["event_digest"], str)
+    assert len(event["event_digest"]) == 64
+    assert secret not in serialized
+
+    for kind, record_id in (
+        ("suggestion", secret),
+        ("blueprint", blueprint_digest),
+        ("report", report_digest),
+    ):
+        show_exit, show, show_serialized = _run(
+            action="show",
+            kind=kind,
+            record_id=record_id,
+        )
+        assert show_exit == 1
+        assert show == {
+            "schema_version": 1,
+            "status": "missing",
+            "kind": kind,
+            "record": None,
+        }
+        assert secret not in show_serialized
+
+
+def test_uuid_identities_and_declared_digest_fields_remain_visible(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    baseline = ensure_evolution_initialized()
+    identity = "123e4567-e89b-12d3-a456-426614174000"
+    input_digest = "9" * 64
+    ledger = EvolutionLedger(home / "evolution" / "evolution.db")
+    try:
+        _insert_attempt(ledger, identity)
+        rows = _seed_safe_show_records(ledger, baseline.generation_id)
+        ledger.append_event(
+            LifecycleEvent(
+                event_id=identity,
+                attempt_id=identity,
+                generation_id=baseline.generation_id,
+                event_type="state_transition",
+                prior_state="draft",
+                next_state="research_authorized",
+                actor=identity,
+                input_digests=(input_digest,),
+                authorization_id=identity,
+                reason_code="transition",
+                reason_summary="private",
+                created_at=NOW,
+            )
+        )
+    finally:
+        ledger.connection.close()
+
+    exit_code, history, _ = _run(
+        action="history",
+        limit=100,
+        after=0,
+    )
+    assert exit_code == 0
+    event = history["items"][-1]
+    for field in ("event_id", "attempt_id", "actor", "authorization_id"):
+        assert event[field] == identity
+    assert event["generation_id"] == baseline.generation_id
+    assert event["input_digests"] == [input_digest]
+    assert isinstance(event["event_digest"], str)
+    assert len(event["event_digest"]) == 64
+
+    for kind, (record_id, expected_record) in rows.items():
+        show_exit, show, _ = _run(
+            action="show",
+            kind=kind,
+            record_id=record_id,
+        )
+        assert show_exit == 0
+        assert show["record"] == expected_record
+        if kind == "report":
+            assert show["record"]["report_digest"] == "c" * 64
+        else:
+            assert show["record"]["canonical_digest"]
+
+
 def test_generation_and_projected_digests_are_strict_lowercase_hex(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

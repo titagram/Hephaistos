@@ -29,7 +29,7 @@ _STATES = frozenset({"draft", "research_authorized", "blueprint_ready", "build_a
 def _is_public_identity(value: object) -> bool:
     if not isinstance(value, str):
         return False
-    if _UUID.fullmatch(value) is not None or _DIGEST.fullmatch(value) is not None:
+    if _UUID.fullmatch(value) is not None:
         return True
     try:
         _privacy_safe_symbolic(
