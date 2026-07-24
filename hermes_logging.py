@@ -298,7 +298,17 @@ def setup_logging(
     global _logging_initialized
     home = hermes_home or get_hermes_home()
     log_dir = home / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
+    # Keep the first logging touch compatible with the ordinary profile-home
+    # contract.  In managed installs the service manager owns the shared
+    # hierarchy; elsewhere reuse config's established home-mode policy.
+    from hermes_cli.config import _secure_dir, is_managed
+    if is_managed():
+        log_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        home.mkdir(mode=0o700, parents=True, exist_ok=True)
+        log_dir.mkdir(mode=0o700, exist_ok=True)
+        _secure_dir(home)
+        _secure_dir(log_dir)
 
     # Read config defaults (best-effort — config may not be loaded yet).
     cfg_level, cfg_max_size, cfg_backup = _read_logging_config()
@@ -434,8 +444,9 @@ class _ManagedRotatingFileHandler(RotatingFileHandler):
     """
 
     def __init__(self, *args, **kwargs):
-        from hermes_cli.config import is_managed
+        from hermes_cli.config import _secure_file, is_managed
         self._managed = is_managed()
+        self._secure_file = _secure_file
         super().__init__(*args, **kwargs)
         # Snapshot the inode of the currently open stream so emit() can
         # detect external rotation without an extra fstat per write.
@@ -443,12 +454,14 @@ class _ManagedRotatingFileHandler(RotatingFileHandler):
         self._stat_ino: Optional[int] = None
         self._record_stream_stat()
 
-    def _chmod_if_managed(self):
+    def _set_file_permissions(self):
         if self._managed:
             try:
                 os.chmod(self.baseFilename, 0o660)
             except OSError:
                 pass
+        else:
+            self._secure_file(Path(self.baseFilename))
 
     def _record_stream_stat(self) -> None:
         """Snapshot dev/ino of ``baseFilename`` so we can detect external rotation."""
@@ -532,12 +545,12 @@ class _ManagedRotatingFileHandler(RotatingFileHandler):
 
     def _open(self):
         stream = super()._open()
-        self._chmod_if_managed()
+        self._set_file_permissions()
         return stream
 
     def doRollover(self):
         super().doRollover()
-        self._chmod_if_managed()
+        self._set_file_permissions()
         # Our own rollover writes a new baseFilename; refresh the snapshot
         # so the next emit doesn't mistake it for external rotation.
         self._record_stream_stat()

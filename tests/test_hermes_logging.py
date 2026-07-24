@@ -76,6 +76,22 @@ class TestSetupLogging:
         assert log_dir == hermes_home / "logs"
         assert log_dir.is_dir()
 
+    def test_non_managed_first_use_creates_a_private_log_hierarchy(self, tmp_path):
+        """Logging must not make a new profile fail the lifecycle lock."""
+        home = tmp_path / "absent-home"
+        old_umask = os.umask(0)
+        try:
+            with patch("hermes_cli.config.is_managed", return_value=False), \
+                 patch("hermes_cli.config._is_container", return_value=False):
+                hermes_logging.setup_logging(hermes_home=home)
+        finally:
+            os.umask(old_umask)
+
+        assert stat.S_IMODE(home.stat().st_mode) == 0o700
+        assert stat.S_IMODE((home / "logs").stat().st_mode) == 0o700
+        assert stat.S_IMODE((home / "logs" / "agent.log").stat().st_mode) == 0o600
+        assert stat.S_IMODE((home / "logs" / "errors.log").stat().st_mode) == 0o600
+
     def test_creates_agent_log_handler(self, hermes_home):
         hermes_logging.setup_logging(hermes_home=hermes_home)
         root = logging.getLogger()
@@ -816,6 +832,37 @@ class TestAddRotatingHandler:
             if isinstance(h, RotatingFileHandler):
                 logger.removeHandler(h)
                 h.close()
+
+    def test_non_managed_reopen_and_rollover_keep_logs_private(self, tmp_path):
+        log_path = tmp_path / "private.log"
+        handler = None
+        old_umask = os.umask(0)
+        try:
+            with patch("hermes_cli.config.is_managed", return_value=False), \
+                 patch("hermes_cli.config._is_container", return_value=False):
+                handler = hermes_logging._ManagedRotatingFileHandler(
+                    str(log_path), maxBytes=1, backupCount=1, encoding="utf-8",
+                )
+                handler.setFormatter(logging.Formatter("%(message)s"))
+                assert stat.S_IMODE(log_path.stat().st_mode) == 0o600
+
+                record = logging.LogRecord(
+                    name="test", level=logging.INFO, pathname="", lineno=0,
+                    msg="first", args=(), exc_info=None,
+                )
+                record.session_tag = ""
+                handler.emit(record)
+                handler.flush()
+                assert stat.S_IMODE(log_path.stat().st_mode) == 0o600
+
+                os.rename(log_path, tmp_path / "private.log.external")
+                handler.emit(record)
+                handler.flush()
+                assert stat.S_IMODE(log_path.stat().st_mode) == 0o600
+        finally:
+            if handler is not None:
+                handler.close()
+            os.umask(old_umask)
 
 
 class TestWindowsConcurrentLogLockTimeout:
