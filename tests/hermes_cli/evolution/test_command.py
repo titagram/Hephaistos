@@ -113,3 +113,17 @@ def test_lock_only_root_is_uninitialized_and_malformed_arguments_are_parser_erro
     monkeypatch.setenv("HERMES_HOME", str(home))
     assert evolution_command(_args()) == 0
     assert json.loads(capsys.readouterr().out)["status"] == "uninitialized"
+
+
+def test_foreign_root_keeps_history_and_show_failure_envelopes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    home = tmp_path / "home"
+    root = home / "evolution"
+    root.mkdir(parents=True, mode=0o700)
+    (root / "foreign.marker").write_text("foreign")
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    assert evolution_command(_args(action="history", limit=1, after=0)) == 1
+    assert set(json.loads(capsys.readouterr().out)) == {"schema_version", "status", "items", "next_after"}
+    assert evolution_command(_args(action="show", kind="generation", record_id="a" * 64)) == 1
+    assert set(json.loads(capsys.readouterr().out)) == {"schema_version", "status", "kind", "record"}

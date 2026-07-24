@@ -16,6 +16,12 @@ _SYMBOL = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,63}\Z", re.ASCII)
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z", re.ASCII)
 _PUBLIC = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}\Z", re.ASCII)
 _TIMESTAMP = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z\Z", re.ASCII)
+_UUID = re.compile(r"[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\Z", re.ASCII)
+_EVENT_TYPES = frozenset({"baseline_designated", "state_transition", "supervisor_recovery"})
+_ACTORS = frozenset({"system", "supervisor"})
+_REASON_CODES = frozenset({"baseline", "transition", "active_restored_from_lkg", "stable_base_only"})
+_PUBLIC_SUMMARIES = frozenset({"baseline designation", "restored active pointer from proven last known good", "evolution overlays disabled because no pointer was proven"})
+_STATES = frozenset({"draft", "research_authorized", "blueprint_ready", "build_approved", "building", "quarantined", "canary_running", "promotion_ready", "active", "stable", "rejected", "research_expired", "build_failed", "canary_failed", "rolled_back", "retired"})
 
 
 def _emit(value: dict[str, Any]) -> None:
@@ -37,24 +43,17 @@ def _status() -> dict[str, Any]:
 
 
 def _event(event: StoredEvent) -> dict[str, Any]:
-    def public(value: str | None) -> str | None:
-        if value is None:
-            return None
-        if "/" in value or "\\" in value or re.search(r"(?:sk|pk|ghp|xox)[_-]", value, re.I):
-            return None
-        return value if _PUBLIC.fullmatch(value) else None
-
-    summary = " ".join(event.reason_summary.split())[:512]
-    if "/" in summary or "\\" in summary or re.search(r"(?:sk|pk|ghp|xox)[_-]", summary, re.I):
-        summary = "redacted"
-    return {"sequence": event.event_sequence, "event_id": public(event.event_id),
-            "attempt_id": public(event.attempt_id), "generation_id": public(event.generation_id),
-            "event_type": public(event.event_type), "prior_state": public(event.prior_state),
-            "next_state": public(event.next_state), "actor": public(event.actor),
+    state = lambda value: value if value in _STATES else None
+    return {"sequence": event.event_sequence, "event_id": event.event_id if _UUID.fullmatch(event.event_id) else None,
+            "attempt_id": event.attempt_id if event.attempt_id and _UUID.fullmatch(event.attempt_id) else None,
+            "generation_id": event.generation_id if event.generation_id and _DIGEST.fullmatch(event.generation_id) else None,
+            "event_type": event.event_type if event.event_type in _EVENT_TYPES else None,
+            "prior_state": state(event.prior_state), "next_state": state(event.next_state),
+            "actor": event.actor if event.actor in _ACTORS else None,
             "input_digests": [digest for digest in event.input_digests if _DIGEST.fullmatch(digest)],
-            "authorization_id": public(event.authorization_id),
-            "reason_code": public(event.reason_code),
-            "reason_summary": summary,
+            "authorization_id": event.authorization_id if event.authorization_id and _UUID.fullmatch(event.authorization_id) else None,
+            "reason_code": event.reason_code if event.reason_code in _REASON_CODES else None,
+            "reason_summary": event.reason_summary if event.reason_summary in _PUBLIC_SUMMARIES else "redacted",
             "timestamp": event.created_at if _TIMESTAMP.fullmatch(event.created_at) else None,
             "event_digest": event.event_digest if _DIGEST.fullmatch(event.event_digest) else None}
 
@@ -63,8 +62,11 @@ def _history(limit: int, after: int) -> dict[str, Any]:
     if type(limit) is not int or not 1 <= limit <= 1000 or type(after) is not int or after < 0:
         raise EvolutionLedgerError("invalid_history_limit")
     root = get_hermes_home() / "evolution"
-    if not root.exists() or not (root / "evolution.db").exists():
+    kind = evolution_state_kind(root)
+    if kind == "uninitialized":
         return {"schema_version": 1, "status": "uninitialized", "items": [], "next_after": None}
+    if not (root / "evolution.db").exists():
+        raise EvolutionLedgerError("evolution_unavailable")
     def query(ledger: EvolutionLedger):
         if ledger.verify_chain():
             raise EvolutionLedgerError("invalid_event_chain")
@@ -79,8 +81,11 @@ def _show(kind: str, record_id: str) -> dict[str, Any]:
     if not valid:
         return {"schema_version": 1, "status": "missing", "kind": kind, "record": None}
     root = get_hermes_home() / "evolution"
-    if evolution_state_kind(root) == "uninitialized" or not (root / "evolution.db").exists():
+    state_kind = evolution_state_kind(root)
+    if state_kind == "uninitialized":
         return {"schema_version": 1, "status": "missing", "kind": kind, "record": None}
+    if not (root / "evolution.db").exists():
+        raise EvolutionLedgerError("evolution_unavailable")
     queries = {
         "suggestion": ("SELECT suggestion_id, canonical_digest, state, created_at FROM suggestions WHERE suggestion_id = ?", (record_id,), ("suggestion_id", "canonical_digest", "state", "created_at")),
         "blueprint": ("SELECT blueprint_id, canonical_digest, state, created_at FROM blueprints WHERE canonical_digest = ?", (record_id,), ("blueprint_id", "canonical_digest", "state", "created_at")),
@@ -104,7 +109,13 @@ def _show(kind: str, record_id: str) -> dict[str, Any]:
             elif field == "created_at":
                 if not isinstance(value, str) or _TIMESTAMP.fullmatch(value) is None:
                     return {"schema_version": 1, "status": "missing", "kind": kind, "record": None}
-            elif not isinstance(value, str) or _PUBLIC.fullmatch(value) is None or "/" in value or "\\" in value or re.search(r"(?:sk|pk|ghp|xox)[_-]", value, re.I):
+            elif field == "state":
+                if value not in _STATES:
+                    return {"schema_version": 1, "status": "missing", "kind": kind, "record": None}
+            elif field.endswith("_id"):
+                if not isinstance(value, str) or _UUID.fullmatch(value) is None:
+                    return {"schema_version": 1, "status": "missing", "kind": kind, "record": None}
+            elif not isinstance(value, str) or _PUBLIC.fullmatch(value) is None:
                 return {"schema_version": 1, "status": "missing", "kind": kind, "record": None}
         return {"schema_version": 1, "status": "found", "kind": kind, "record": record}
     return {"schema_version": 1, "status": "missing", "kind": kind, "record": None}
@@ -128,6 +139,13 @@ def evolution_command(args: Any) -> int:
             _emit(value)
             return 0 if value["status"] == "found" else 1
     except (EvolutionBootstrapError, EvolutionLedgerError, OSError, ValueError):
-        _emit({"schema_version": 1, "status": "blocked", "diagnostics": ["evolution_unavailable"]})
+        if getattr(args, "action", None) == "history":
+            _emit({"schema_version": 1, "status": "blocked", "items": [], "next_after": None})
+        elif getattr(args, "action", None) == "show":
+            _emit({"schema_version": 1, "status": "missing", "kind": getattr(args, "kind", None), "record": None})
+        else:
+            _emit({"schema_version": 1, "status": "blocked", "initialized": False,
+                   "overlay_enabled": False, "active_generation_id": None,
+                   "last_known_good_generation_id": None, "diagnostics": ["evolution_unavailable"]})
         return 1
     return 2
