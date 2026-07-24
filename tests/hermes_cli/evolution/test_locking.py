@@ -80,6 +80,25 @@ def test_two_processes_cannot_hold_the_lifecycle_lease_concurrently(
     assert result.get(timeout=5) == ("released",)
 
 
+def test_private_directory_revalidates_benign_concurrent_creation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "concurrent-home"
+    original_mkdir = Path.mkdir
+
+    def racing_mkdir(self: Path, *args, **kwargs) -> None:
+        if self == path:
+            original_mkdir(self, *args, **kwargs)
+            raise FileExistsError
+        return original_mkdir(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", racing_mkdir)
+    info = locking_module._private_directory(path)
+
+    assert stat.S_ISDIR(info.st_mode)
+    assert stat.S_IMODE(info.st_mode) == 0o700
+
+
 def test_exception_releases_the_kernel_lease(evolution_home: Path) -> None:
     with pytest.raises(RuntimeError, match="injected"):
         with lifecycle_lock():

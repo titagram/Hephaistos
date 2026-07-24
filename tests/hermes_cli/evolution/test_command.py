@@ -21,7 +21,7 @@ def _bootstrap_child(queue) -> None:
     try:
         queue.put(("ok", ensure_evolution_initialized().generation_id))
     except BaseException as exc:
-        queue.put(("error", type(exc).__name__))
+        queue.put(("error", type(exc).__name__, str(exc)))
 
 
 def test_evolution_defaults_and_normalization_are_strict_and_local() -> None:
@@ -83,7 +83,7 @@ def test_bootstrap_concurrent_processes_converge_on_one_baseline(
         process.join(timeout=15)
         assert process.exitcode == 0
     results = [queue.get(timeout=3) for _ in processes]
-    assert {result[0] for result in results} == {"ok"}
+    assert {result[0] for result in results} == {"ok"}, results
     assert len({result[1] for result in results}) == 1
 
 

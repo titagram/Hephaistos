@@ -102,11 +102,18 @@ def _private_directory(path: Path) -> os.stat_result:
         try:
             path.mkdir(mode=0o700, parents=True, exist_ok=False)
             path.chmod(0o700)
-            info = path.lstat()
+        except FileExistsError:
+            # Another same-UID lifecycle process won the creation race.  It is
+            # safe only after the normal strict lstat validation below.
+            pass
         except (OSError, TypeError, NotImplementedError) as exc:
             raise LifecycleLockError(
                 "unsafe_lifecycle_lock_path"
             ) from exc
+        try:
+            info = path.lstat()
+        except (OSError, TypeError, NotImplementedError) as exc:
+            raise LifecycleLockError("unsafe_lifecycle_lock_path") from exc
     except (OSError, TypeError, NotImplementedError) as exc:
         raise LifecycleLockError("unsafe_lifecycle_lock_path") from exc
     _validate_directory(info)
