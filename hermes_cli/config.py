@@ -15,6 +15,7 @@ This module provides:
 import copy
 import json
 import logging
+import math
 import os
 import platform
 import re
@@ -893,6 +894,14 @@ def _ensure_hermes_home_managed(home: Path):
 # =============================================================================
 
 DEFAULT_CONFIG = {
+    "evolution": {
+        "enabled": True,
+        "observer": {"enabled": True, "recurrence_threshold": 3,
+                     "scan_interval_seconds": 300, "notice_min_score": 0.65},
+        "authorization": {"research_ttl_seconds": 1800, "build_ttl_seconds": 1800,
+                          "promotion_ttl_seconds": 900},
+        "retention": {"workspaces": 10, "evidence_days": 30},
+    },
     "model": "",
     "providers": {},
     "fallback_providers": [],
@@ -6061,6 +6070,48 @@ def _normalize_review_config(config: Dict[str, Any]) -> Dict[str, Any]:
     return config
 
 
+def _normalize_evolution_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Apply the closed, type-strict evolution configuration contract."""
+    defaults = DEFAULT_CONFIG["evolution"]
+    raw = config.get("evolution")
+    raw = raw if isinstance(raw, dict) else {}
+
+    def boolean(section: dict[str, Any], name: str, default: bool) -> bool:
+        value = section.get(name, default)
+        return value if type(value) is bool else default
+
+    def integer(section: dict[str, Any], name: str, default: int, low: int, high: int) -> int:
+        value = section.get(name, default)
+        return value if type(value) is int and low <= value <= high else default
+
+    observer_raw = raw.get("observer") if isinstance(raw.get("observer"), dict) else {}
+    authorization_raw = raw.get("authorization") if isinstance(raw.get("authorization"), dict) else {}
+    retention_raw = raw.get("retention") if isinstance(raw.get("retention"), dict) else {}
+    score = observer_raw.get("notice_min_score", defaults["observer"]["notice_min_score"])
+    if type(score) not in {int, float} or not math.isfinite(score) or not 0 <= score <= 1:
+        score = defaults["observer"]["notice_min_score"]
+    evolution = {
+        "enabled": boolean(raw, "enabled", defaults["enabled"]),
+        "observer": {
+            "enabled": boolean(observer_raw, "enabled", defaults["observer"]["enabled"]),
+            "recurrence_threshold": integer(observer_raw, "recurrence_threshold", defaults["observer"]["recurrence_threshold"], 1, 1000),
+            "scan_interval_seconds": integer(observer_raw, "scan_interval_seconds", defaults["observer"]["scan_interval_seconds"], 1, 86400),
+            "notice_min_score": score,
+        },
+        "authorization": {
+            key: integer(authorization_raw, key, defaults["authorization"][key], 1, 2_592_000)
+            for key in ("research_ttl_seconds", "build_ttl_seconds", "promotion_ttl_seconds")
+        },
+        "retention": {
+            "workspaces": integer(retention_raw, "workspaces", defaults["retention"]["workspaces"], 0, 1000),
+            "evidence_days": integer(retention_raw, "evidence_days", defaults["retention"]["evidence_days"], 0, 3650),
+        },
+    }
+    result = dict(config)
+    result["evolution"] = evolution
+    return result
+
+
 def cfg_get(cfg: Optional[Dict[str, Any]], *keys: str, default: Any = None) -> Any:
     """Traverse nested dict keys safely, returning ``default`` on any miss.
 
@@ -6363,9 +6414,9 @@ def _load_config_impl(*, want_deepcopy: bool) -> Dict[str, Any]:
             except Exception as e:
                 _warn_config_parse_failure(config_path, e)
 
-        normalized = _normalize_review_config(
+        normalized = _normalize_evolution_config(_normalize_review_config(
             _normalize_root_model_keys(_normalize_max_turns_config(config))
-        )
+        ))
         expanded = _expand_env_vars(normalized)
         # Managed scope wins at the leaf. Applied AFTER user expansion so a user
         # ${VAR} cannot shadow a managed literal: managed values are expanded only
@@ -6378,7 +6429,7 @@ def _load_config_impl(*, want_deepcopy: bool) -> Dict[str, Any]:
             expanded = _deep_merge(expanded, managed_expanded)
         # Managed settings are part of the effective configuration too. Keep
         # retention safe after their final leaf-level overlay, not only before.
-        expanded = _normalize_review_config(expanded)
+        expanded = _normalize_evolution_config(_normalize_review_config(expanded))
         _LAST_EXPANDED_CONFIG_BY_PATH[path_key] = copy.deepcopy(expanded)
         if cache_sig is not None:
             # Cache stores a separate deepcopy so subsequent ``load_config()``
@@ -6526,13 +6577,13 @@ def save_config(
         )
         # ----------------------------------------------------------------
 
-        current_normalized = _normalize_review_config(
+        current_normalized = _normalize_evolution_config(_normalize_review_config(
             _normalize_root_model_keys(_normalize_max_turns_config(config))
-        )
+        ))
         normalized = current_normalized
-        raw_existing = _normalize_review_config(
+        raw_existing = _normalize_evolution_config(_normalize_review_config(
             _normalize_root_model_keys(_normalize_max_turns_config(read_raw_config()))
-        )
+        ))
         if raw_existing:
             normalized = _preserve_env_ref_templates(
                 normalized,

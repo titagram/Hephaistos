@@ -4298,6 +4298,13 @@ def cmd_gnothi(args):
     raise SystemExit(gnothi_command(args))
 
 
+def cmd_evolution(args):
+    """Dispatch evolution lazily so help startup never imports lifecycle code."""
+    from hermes_cli.evolution.command import evolution_command
+
+    raise SystemExit(evolution_command(args))
+
+
 def cmd_org(args):
     """Validate and materialize local Hades OrgRuns."""
     from hermes_cli.hades_org_cmd import org_command
@@ -12762,6 +12769,9 @@ def main():
     from hermes_cli.hades_gnothi_cmd import build_gnothi_parser
 
     build_gnothi_parser(subparsers, cmd_gnothi=cmd_gnothi)
+    from hermes_cli.subcommands.evolution import build_evolution_parser
+
+    build_evolution_parser(subparsers, cmd_evolution=cmd_evolution)
 
     # =========================================================================
     # hooks command — shell-hook inspection and management

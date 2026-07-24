@@ -15,7 +15,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Iterator, Literal
+from typing import Callable, Iterator, Literal, TypeVar
 
 from hermes_constants import get_hermes_home
 
@@ -81,6 +81,7 @@ _MAX_SNAPSHOT_ATTEMPTS = 3
 _MAX_SNAPSHOT_FILE_BYTES = 512 * 1024 * 1024
 _MAX_SNAPSHOT_TOTAL_BYTES = 2 * 1024 * 1024 * 1024
 _MAX_SNAPSHOT_SECONDS = 10.0
+_QueryResult = TypeVar("_QueryResult")
 
 
 def _all_events(ledger: EvolutionLedger) -> list[StoredEvent]:
@@ -720,6 +721,29 @@ def _evaluate_read_only(
                 continue
             return result
         raise EvolutionLedgerError("unstable_ledger_snapshot")
+
+
+def read_evolution_snapshot(query: Callable[[EvolutionLedger], _QueryResult]) -> _QueryResult:
+    """Run one bounded query against A6's immutable/WAL-safe ledger snapshot."""
+    root = Path(get_hermes_home()) / "evolution"
+    path = root / "evolution.db"
+    budget = _SnapshotBudget.start()
+    with tempfile.TemporaryDirectory(prefix="hermes-evolution-read-") as temporary:
+        snapshot_root = Path(temporary)
+        snapshot_root.chmod(0o700)
+        for _ in range(_MAX_SNAPSHOT_ATTEMPTS):
+            budget.check_time()
+            _clean_snapshot_root(snapshot_root)
+            try:
+                with _read_only_ledger_attempt(path, snapshot_root, budget) as ledger:
+                    value = query(ledger)
+                    budget.check_time()
+                    return value
+            except EvolutionLedgerError:
+                raise
+            except (_RetryableSnapshotError, FileNotFoundError, OSError, sqlite3.DatabaseError):
+                continue
+    raise EvolutionLedgerError("unstable_ledger_snapshot")
 
 
 class _ExistingGenerationStore(GenerationStore):
