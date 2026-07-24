@@ -28,6 +28,9 @@ REQUIRED_TABLES = {
     "canary_runs",
     "promotion_reports",
     "lifecycle_events",
+    "observation_envelopes",
+    "opportunity_suggestions",
+    "opportunity_suggestion_events",
 }
 
 
@@ -78,11 +81,7 @@ def test_valid_v1_database_migrates_atomically_and_preserves_a2_rows(
         "SELECT source_ref FROM attempts WHERE attempt_id = 'attempt-v1'"
     ).fetchone()[0] == "ticket-v1"
     assert ledger.connection.execute(
-        """
-        SELECT canonical_digest
-        FROM suggestions
-        WHERE suggestion_id = 'suggestion-v1'
-        """
+        "SELECT canonical_digest FROM suggestions WHERE suggestion_id = 'suggestion-v1'"
     ).fetchone()[0] == "a" * 64
     assert {
         row[0]
@@ -690,3 +689,194 @@ def test_schema_initialization_is_atomic_on_failure(tmp_path, monkeypatch) -> No
     assert path.stat().st_size == 0
     assert not Path(f"{path}-wal").exists()
     assert not Path(f"{path}-shm").exists()
+
+
+def _create_valid_v2_database(path: Path) -> None:
+    """Create a v2 database with complete Project A rows."""
+    connection = sqlite3.connect(path)
+    connection.execute("PRAGMA foreign_keys=ON")
+    for statement in ledger_module._SCHEMA_V2_STATEMENTS:
+        connection.execute(statement)
+    connection.execute(
+        "INSERT INTO schema_version(singleton, version) VALUES (1, 2)"
+    )
+    now = "2026-07-24T00:00:00.000000Z"
+    connection.execute(
+        "INSERT INTO attempts VALUES (?,?,?,?,?)",
+        ("attempt-1", "manual", "ticket-1", "draft", now),
+    )
+    connection.execute(
+        "INSERT INTO attempts VALUES (?,?,?,?,?)",
+        ("attempt-2", "manual", "ticket-2", "draft", now),
+    )
+    connection.execute(
+        "INSERT INTO suggestions VALUES (?,?,?,?,?)",
+        ("sug-1", "attempt-1", "a" * 64, "draft", now),
+    )
+    connection.execute(
+        "INSERT INTO suggestions VALUES (?,?,?,?,?)",
+        ("sug-2", "attempt-2", "b" * 64, "draft", now),
+    )
+    connection.execute(
+        "INSERT INTO suggestion_evidence VALUES (?,?,?,?,?)",
+        ("evidence-1", "sug-1", "c" * 64, "ref-1", now),
+    )
+    connection.execute(
+        "INSERT INTO suggestion_evidence VALUES (?,?,?,?,?)",
+        ("evidence-2", "sug-2", "d" * 64, "ref-2", now),
+    )
+    connection.execute(
+        "INSERT INTO blueprints VALUES (?,?,?,?,?)",
+        ("blueprint-1", "attempt-1", "e" * 64, "draft", now),
+    )
+    connection.execute(
+        "INSERT INTO candidates VALUES (?,?,?,?,?)",
+        ("candidate-1", "attempt-1", "draft", "f" * 64, now),
+    )
+    connection.execute(
+        "INSERT INTO generations VALUES (?,?,?,?,?)",
+        ("g" * 64, "attempt-1", "g" * 64, "draft", now),
+    )
+    connection.commit()
+    connection.close()
+    os.chmod(path, 0o600)
+
+
+def test_v2_to_v3_migration_preserves_all_project_a_rows(tmp_path) -> None:
+    path = tmp_path / "evolution.db"
+    _create_valid_v2_database(path)
+
+    before = {}
+    for table in (
+        "attempts", "suggestions", "suggestion_evidence", "blueprints",
+        "candidates", "generations",
+    ):
+        conn = sqlite3.connect(path)
+        rows = conn.execute(
+            f'SELECT * FROM "{table}" ORDER BY 1'
+        ).fetchall()
+        conn.close()
+        before[table] = rows
+
+    ledger = EvolutionLedger(path)
+    assert ledger.schema_version == ledger_module.SCHEMA_VERSION
+
+    for table, expected_rows in before.items():
+        after = [
+            tuple(row)
+            for row in ledger.connection.execute(
+                f'SELECT * FROM "{table}" ORDER BY 1'
+            )
+        ]
+        assert after == [tuple(r) for r in expected_rows], f"table {table} changed during v2->v3 migration"
+
+
+def test_v2_to_v3_adds_project_b_tables(tmp_path) -> None:
+    path = tmp_path / "evolution.db"
+    _create_valid_v2_database(path)
+
+    ledger = EvolutionLedger(path)
+
+    for table in ("observation_envelopes", "opportunity_suggestions", "opportunity_suggestion_events"):
+        assert ledger.connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
+        ).fetchone() is not None
+
+    columns = {
+        row["name"]
+        for row in ledger.connection.execute('PRAGMA table_info("suggestions")')
+    }
+    assert columns == {"suggestion_id", "attempt_id", "canonical_digest", "state", "created_at"}
+
+
+def test_v3_reopen_is_idempotent(tmp_path) -> None:
+    path = tmp_path / "evolution.db"
+    EvolutionLedger(path).connection.close()
+
+    for _ in range(3):
+        ledger = EvolutionLedger(path)
+        assert ledger.schema_version == ledger_module.SCHEMA_VERSION
+        tables = {
+            row[0]
+            for row in ledger.connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        assert tables >= REQUIRED_TABLES
+        ledger.connection.close()
+
+
+def test_v2_to_v3_rollback_on_failure(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "evolution.db"
+    _create_valid_v2_database(path)
+
+    original = ledger_module._execute_migration_statement
+    calls = [0]
+
+    def fail_after_first_additive(connection, statement):
+        calls[0] += 1
+        if calls[0] == 2:
+            raise sqlite3.OperationalError("injected rollback")
+        return original(connection, statement)
+
+    monkeypatch.setattr(
+        ledger_module, "_execute_migration_statement", fail_after_first_additive
+    )
+
+    with pytest.raises(EvolutionLedgerError):
+        EvolutionLedger(path)
+
+    check = sqlite3.connect(path)
+    assert check.execute("SELECT version FROM schema_version").fetchone()[0] == 2
+    assert check.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'observation_envelopes'"
+    ).fetchone() is None
+    assert check.execute(
+        "SELECT canonical_digest FROM suggestions WHERE suggestion_id = 'sug-1'"
+    ).fetchone()[0] == "a" * 64
+    check.close()
+
+
+def test_suggestions_and_opportunity_suggestions_coexist(tmp_path) -> None:
+    path = tmp_path / "evolution.db"
+    ledger = EvolutionLedger(path)
+
+    now = "2026-07-24T00:00:00.000000Z"
+    with ledger.transaction() as conn:
+        conn.execute(
+            "INSERT INTO attempts VALUES (?, ?, ?, ?, ?)",
+            ("attempt-1", "manual", "ticket-1", "draft", now),
+        )
+        conn.execute(
+            "INSERT INTO suggestions VALUES (?, ?, ?, ?, ?)",
+            ("pa-sug", "attempt-1", "z" * 64, "draft", now),
+        )
+        conn.execute(
+            "INSERT INTO opportunity_suggestions(suggestion_id, opportunity_key, state, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("pb-sug", "y" * 64, "observing", now, now),
+        )
+
+    assert ledger.connection.execute(
+        "SELECT canonical_digest FROM suggestions WHERE suggestion_id = ?", ("pa-sug",)
+    ).fetchone()[0] == "z" * 64
+
+    assert ledger.connection.execute(
+        "SELECT opportunity_key FROM opportunity_suggestions WHERE suggestion_id = ?", ("pb-sug",)
+    ).fetchone()[0] == "y" * 64
+
+
+def test_future_schema_v4_fails_closed(tmp_path) -> None:
+    path = tmp_path / "evolution.db"
+    connection = sqlite3.connect(path)
+    connection.execute("CREATE TABLE schema_version (version INTEGER NOT NULL)")
+    connection.execute(
+        "INSERT INTO schema_version VALUES (?)",
+        (ledger_module.SCHEMA_VERSION + 1,),
+    )
+    connection.commit()
+    connection.close()
+    os.chmod(path, 0o600)
+
+    with pytest.raises(EvolutionLedgerError, match="unsupported_schema_version"):
+        EvolutionLedger(path)

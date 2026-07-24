@@ -618,6 +618,8 @@ def test_uuid_identities_and_declared_digest_fields_remain_visible(
         assert show["record"] == expected_record
         if kind == "report":
             assert show["record"]["report_digest"] == "c" * 64
+        elif kind == "suggestion":
+            assert show["record"]["canonical_digest"]
         else:
             assert show["record"]["canonical_digest"]
 
@@ -921,7 +923,7 @@ def test_init_lock_timeout_uses_the_canonical_status_envelope(
 ) -> None:
     from hermes_cli.evolution.locking import LifecycleLockTimeout
 
-    def fail_initialization() -> None:
+    def fail_initialization(**kwargs) -> None:
         raise LifecycleLockTimeout("lifecycle_lock_timeout")
 
     monkeypatch.setattr(

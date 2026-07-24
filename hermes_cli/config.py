@@ -1404,6 +1404,23 @@ DEFAULT_CONFIG = {
         "auto_subscribe_on_create": True,
     },
 
+    "autopoiesis": {
+        "enabled": False,
+        "observer": {
+            "enabled": True,
+            "scan_interval_seconds": 300,
+            "notice_min_score": 0.65,
+            "max_events_per_scan": 1000,
+        },
+        "evidence": {
+            "retention_days": 30,
+        },
+        "telos": {
+            "require_interactive_approval": True,
+        },
+    },
+
+
     # Anthropic prompt caching (Claude via OpenRouter or native Anthropic API).
     # cache_ttl must be "5m" or "1h" (Anthropic-supported tiers); other values are ignored.
     "prompt_caching": {

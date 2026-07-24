@@ -166,7 +166,10 @@ def test_all_show_kinds_found_and_missing_use_closed_records(
         now = "2026-07-24T00:00:00.000000Z"
         ledger.connection.execute("INSERT INTO attempts VALUES (?,?,?,?,?)", ("attempt-alpha", "local", "alpha", "draft", now))
         ledger.connection.execute("INSERT INTO generations VALUES (?,?,?,?,?)", (baseline.generation_id, "attempt-alpha", baseline.generation_id, "draft", now))
-        ledger.connection.execute("INSERT INTO suggestions VALUES (?,?,?,?,?)", ("suggestion-alpha", "attempt-alpha", "a" * 64, "draft", now))
+        ledger.connection.execute(
+            "INSERT INTO suggestions VALUES (?, ?, ?, ?, ?)",
+            ("suggestion-alpha", "attempt-alpha", "a" * 64, "draft", now)
+        )
         ledger.connection.execute("INSERT INTO blueprints VALUES (?,?,?,?,?)", ("blueprint-alpha", "attempt-alpha", "b" * 64, "draft", now))
         ledger.connection.execute("INSERT INTO promotion_reports VALUES (?,?,?,?,?)", ("report-alpha", baseline.generation_id, "c" * 64, "draft", now))
     finally:
@@ -176,6 +179,12 @@ def test_all_show_kinds_found_and_missing_use_closed_records(
         found = _show(kind, identifier)
         assert set(found) == {"schema_version", "status", "kind", "record"}
         assert found["status"] == "found"
+        if kind == "suggestion":
+            assert found["record"]["canonical_digest"] == "a" * 64
+        elif kind == "report":
+            assert found["record"]["report_digest"] == identifier
+        else:
+            assert found["record"]["canonical_digest"] == identifier
         assert _show(kind, ("missing-alpha" if kind == "suggestion" else "d" * 64))["status"] == "missing"
 
 

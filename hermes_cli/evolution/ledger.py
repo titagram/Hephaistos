@@ -23,7 +23,7 @@ from .contract import canonical_json_bytes, content_digest, require_digest
 from .state_machine import TransitionRequest, validate_transition
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 _MAX_DIGESTS = 64
 _VERIFY_BATCH_SIZE = 256
 _PATH_SCHEME_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*:")
@@ -522,6 +522,7 @@ _V2_AUTH_SCHEMA_STATEMENTS = (
     """,
 )
 
+
 _V1_AUTH_OBJECT_PREFIXES = (
     "CREATE TABLE authorization_requests ",
     "CREATE TABLE authorization_grants ",
@@ -537,7 +538,7 @@ def _statement_starts_with(statement: str, prefixes: tuple[str, ...]) -> bool:
     return any(normalized.startswith(prefix) for prefix in prefixes)
 
 
-_SCHEMA_STATEMENTS = (
+_SCHEMA_V2_STATEMENTS = (
     """
     CREATE TABLE schema_version (
         singleton INTEGER NOT NULL PRIMARY KEY CHECK(singleton = 1),
@@ -555,7 +556,7 @@ _SCHEMA_STATEMENTS = (
     *_V2_AUTH_SCHEMA_STATEMENTS,
 )
 
-_TABLES = (
+_TABLES_V2 = (
     "schema_version",
     "attempts",
     "suggestions",
@@ -572,6 +573,127 @@ _TABLES = (
     "promotion_reports",
     "lifecycle_events",
 )
+
+_SCHEMA_V3_ADDITIVE_STATEMENTS = (
+    """
+    CREATE TABLE observation_envelopes (
+        event_id TEXT NOT NULL PRIMARY KEY,
+        organism_id TEXT NOT NULL,
+        occurred_at TEXT NOT NULL,
+        signal_type TEXT NOT NULL,
+        provenance TEXT NOT NULL,
+        source_profile_ref TEXT NOT NULL,
+        source_project_ref TEXT,
+        source_session_ref TEXT,
+        generation_id TEXT NOT NULL,
+        gnothi_revision_digest TEXT,
+        telos_digest TEXT,
+        capability_key TEXT NOT NULL,
+        operation_key TEXT NOT NULL,
+        outcome_key TEXT NOT NULL,
+        constraint_key TEXT NOT NULL,
+        severity TEXT NOT NULL,
+        task_impact TEXT NOT NULL,
+        retry_count INTEGER NOT NULL,
+        latency_bucket TEXT,
+        explicit_user_intent INTEGER NOT NULL,
+        recovered INTEGER NOT NULL,
+        evidence_refs_json TEXT NOT NULL,
+        redaction_status TEXT NOT NULL,
+        canonical_envelope_json TEXT NOT NULL
+    )
+    """,
+    f"""
+    CREATE TABLE opportunity_suggestions (
+        suggestion_id TEXT NOT NULL PRIMARY KEY,
+        opportunity_key TEXT UNIQUE NOT NULL,
+        state TEXT NOT NULL,
+        active_telos_digest TEXT,
+        score REAL DEFAULT 0.0,
+        user_intent REAL DEFAULT 0.0,
+        telos_alignment REAL DEFAULT 0.0,
+        impact REAL DEFAULT 0.0,
+        recurrence REAL DEFAULT 0.0,
+        confidence REAL DEFAULT 0.0,
+        reuse REAL DEFAULT 0.0,
+        risk REAL DEFAULT 0.0,
+        expected_cost REAL DEFAULT 0.0,
+        score_policy_version TEXT DEFAULT 'v2',
+        first_observed_at TEXT,
+        last_observed_at TEXT,
+        observation_count INTEGER DEFAULT 0,
+        distinct_session_count INTEGER DEFAULT 0,
+        summary_reason TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    f"""
+    CREATE TABLE opportunity_suggestion_events (
+        event_id TEXT NOT NULL PRIMARY KEY,
+        suggestion_id TEXT NOT NULL,
+        prior_state TEXT NOT NULL,
+        next_state TEXT NOT NULL,
+        reason_code TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(suggestion_id) REFERENCES opportunity_suggestions(suggestion_id)
+    )
+    """,
+    """
+    CREATE INDEX observation_envelopes_opportunity_idx
+    ON observation_envelopes(capability_key, operation_key, outcome_key, constraint_key)
+    """,
+    """
+    CREATE UNIQUE INDEX opportunity_suggestions_opportunity_key_idx
+    ON opportunity_suggestions(opportunity_key)
+    """,
+    """
+    CREATE INDEX opportunity_suggestion_events_suggestion_idx
+    ON opportunity_suggestion_events(suggestion_id)
+    """,
+)
+
+_TABLES_V3 = (
+    "schema_version",
+    "attempts",
+    "suggestions",
+    "suggestion_evidence",
+    "blueprints",
+    "authorization_requests",
+    "authorization_decisions",
+    "authorization_grants",
+    "authorization_consumptions",
+    "candidates",
+    "generations",
+    "generation_components",
+    "canary_runs",
+    "promotion_reports",
+    "lifecycle_events",
+    "observation_envelopes",
+    "opportunity_suggestions",
+    "opportunity_suggestion_events",
+)
+
+
+_SCHEMA_STATEMENTS = (
+    """
+    CREATE TABLE schema_version (
+        singleton INTEGER NOT NULL PRIMARY KEY CHECK(singleton = 1),
+        version INTEGER NOT NULL CHECK(version = 3)
+    ) WITHOUT ROWID
+    """,
+    *(
+        statement
+        for statement in _SCHEMA_V2_STATEMENTS
+        if not _statement_starts_with(
+            statement,
+            ("CREATE TABLE schema_version ",),
+        )
+    ),
+    *_SCHEMA_V3_ADDITIVE_STATEMENTS,
+)
+
+_TABLES = _TABLES_V3
 
 
 def _execute_schema_statement(
@@ -1038,6 +1160,13 @@ def _validate_preflight_schema(connection: sqlite3.Connection) -> int:
             statements=_SCHEMA_V1_STATEMENTS,
             tables=_TABLES_V1,
         )
+    elif version == 2:
+        _validate_schema_version(
+            connection,
+            version=2,
+            statements=_SCHEMA_V2_STATEMENTS,
+            tables=_TABLES_V2,
+        )
     elif version == SCHEMA_VERSION:
         _validate_schema(connection)
     elif version > SCHEMA_VERSION:
@@ -1147,6 +1276,9 @@ class EvolutionLedger:
             else:
                 if existing_version == 1:
                     self._migrate_v1_to_v2(connection)
+                    existing_version = _declared_version(connection)
+                if existing_version == 2:
+                    self._migrate_v2_to_v3(connection)
                 _validate_schema(connection)
             _verify_retained_identity(
                 self.path,
@@ -1245,7 +1377,7 @@ class EvolutionLedger:
                 "DROP TABLE authorization_grants",
                 "DROP TABLE authorization_requests",
                 "DROP TABLE schema_version",
-                _SCHEMA_STATEMENTS[0],
+                _SCHEMA_V2_STATEMENTS[0],
                 *_V2_AUTH_SCHEMA_STATEMENTS,
             ):
                 _execute_migration_statement(connection, statement)
@@ -1254,8 +1386,73 @@ class EvolutionLedger:
                 INSERT INTO schema_version(singleton, version)
                 VALUES (1, ?)
                 """,
+                (2,),
+            )
+            _validate_schema_version(
+                connection,
+                version=2,
+                statements=_SCHEMA_V2_STATEMENTS,
+                tables=_TABLES_V2,
+            )
+            connection.commit()
+        except BaseException:
+            if began and connection.in_transaction:
+                try:
+                    connection.rollback()
+                except BaseException:
+                    connection.close()
+            raise
+
+    @staticmethod
+    def _migrate_v2_to_v3(connection: sqlite3.Connection) -> None:
+        began = False
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            began = True
+            locked_version = _declared_version(connection)
+            if locked_version == SCHEMA_VERSION:
+                _validate_schema(connection)
+                connection.commit()
+                return
+            if locked_version != 2:
+                if locked_version > SCHEMA_VERSION:
+                    raise EvolutionLedgerError(
+                        "unsupported_schema_version"
+                    )
+                raise EvolutionLedgerError("invalid_ledger_database")
+            _validate_schema_version(
+                connection,
+                version=2,
+                statements=_SCHEMA_V2_STATEMENTS,
+                tables=_TABLES_V2,
+            )
+            before_counts = {}
+            for table in _TABLES_V2:
+                if table == "schema_version":
+                    continue
+                count = connection.execute(
+                    f'SELECT COUNT(*) FROM "{table}"'
+                ).fetchone()[0]
+                before_counts[table] = count
+            for statement in _SCHEMA_V3_ADDITIVE_STATEMENTS:
+                _execute_migration_statement(connection, statement)
+            _execute_migration_statement(connection, "DROP TABLE schema_version")
+            _execute_migration_statement(connection, _SCHEMA_STATEMENTS[0])
+            connection.execute(
+                """
+                INSERT INTO schema_version(singleton, version)
+                VALUES (1, ?)
+                """,
                 (SCHEMA_VERSION,),
             )
+            for table, before in before_counts.items():
+                after = connection.execute(
+                    f'SELECT COUNT(*) FROM "{table}"'
+                ).fetchone()[0]
+                if after != before:
+                    raise EvolutionLedgerError(
+                        "migration_data_mismatch"
+                    )
             _validate_schema(connection)
             connection.commit()
         except BaseException:
