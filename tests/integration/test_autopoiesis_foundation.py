@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from hermes_cli.evolution.ledger import EvolutionLedger
-from hermes_cli.evolution.pointers import validate_pointer
+from hermes_cli.evolution.pointers import _active_profile, _event_input_digests, validate_pointer
 from hermes_cli.evolution.store import GenerationStore
 
 
@@ -131,15 +131,26 @@ def _assert_retained_baseline(root: Path, generation_id: str, pointers: set[str]
     prior_home, prior_hades = os.environ.get("HERMES_HOME"), os.environ.get("HADES_HOME")
     os.environ["HERMES_HOME"] = str(root.parent)
     os.environ["HADES_HOME"] = str(root.parent)
-    ledger = EvolutionLedger(root / "evolution.db")
+    ledger: EvolutionLedger | None = None
     try:
+        ledger = EvolutionLedger(root / "evolution.db")
         store = GenerationStore(root / "generations")
-        assert store.verify(generation_id).generation_id == generation_id
+        descriptor = store.verified_manifest_descriptor(generation_id)
+        event = ledger.history(limit=2, after=0)
+        assert len(event) == 1
+        baseline = event[0]
+        assert baseline.event_type == "baseline_designated"
+        assert baseline.reason_code == "baseline"
+        assert ledger.prove_committed_event(baseline) == baseline
+        assert baseline.input_digests == _event_input_digests(
+            generation_id, descriptor.manifest_digest, _active_profile()
+        )
         for name in pointers:
             document = json.loads((root / name).read_bytes())
             assert validate_pointer(document, ledger, store).generation_id == generation_id
     finally:
-        ledger.connection.close()
+        if ledger is not None:
+            ledger.connection.close()
         if prior_home is None:
             os.environ.pop("HERMES_HOME", None)
         else:
@@ -254,15 +265,14 @@ sys.argv = ["hermes", "evolution", "init", "--json"]
 from hermes_cli.main import main
 main()
 '''
-    commands = [
-        subprocess.Popen(
-            [str(PYTHON), "-c", child], cwd=ROOT,
-            env={**_environment(home), "A8_READY": str(ready[index]), "A8_START": str(start)}, text=True,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        )
-        for index in range(2)
-    ]
+    commands: list[subprocess.Popen[str]] = []
     try:
+        for index in range(2):
+            commands.append(subprocess.Popen(
+                [str(PYTHON), "-c", child], cwd=ROOT,
+                env={**_environment(home), "A8_READY": str(ready[index]), "A8_START": str(start)}, text=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            ))
         deadline = time.monotonic() + 15
         while not all(path.exists() for path in ready):
             assert time.monotonic() < deadline
