@@ -35,8 +35,12 @@ HOSTILE_STRINGS = (
     r"C:\Users\alice\.ssh\id_ed25519",
     "../private/id_ed25519",
     "file:///Users/alice/.ssh/id_ed25519",
+    "file:private-record",
+    "C:private-record",
     "github_pat_" + "A" * 30,
     "ghp_" + "A" * 36,
+    "glpat-ABCDEFGHIJKLMNOPQRSTUVWXYZ123456",
+    "ya29.ABCDEFGHIJKLMNOPQRSTUVWXYZ123456",
     "AKIA" + "A" * 16,
     "ASIA" + "A" * 16,
     "AIza" + "A" * 35,
@@ -584,10 +588,15 @@ def test_broken_event_chain_keeps_action_specific_envelopes(
         ("empty", "uninitialized", "uninitialized"),
         ("lock-only", "uninitialized", "uninitialized"),
         ("foreign", "base_only", "blocked"),
-        ("dangling-symlink", "base_only", "blocked"),
-        ("file-root", "base_only", "blocked"),
-        ("symlink-root", "base_only", "blocked"),
-        ("unsafe-mode", "base_only", "blocked"),
+        ("dangling-symlink", "blocked", "blocked"),
+        ("file-root", "blocked", "blocked"),
+        ("symlink-root", "blocked", "blocked"),
+        ("unsafe-mode", "blocked", "blocked"),
+        ("unsafe-empty-mode", "blocked", "blocked"),
+        ("lock-symlink", "blocked", "blocked"),
+        ("lock-directory", "blocked", "blocked"),
+        ("lock-mode", "blocked", "blocked"),
+        ("lock-hardlink", "blocked", "blocked"),
     ],
 )
 def test_status_history_show_never_mutate_any_root_shape(
@@ -621,6 +630,24 @@ def test_status_history_show_never_mutate_any_root_shape(
     elif state == "unsafe-mode":
         root.mkdir(mode=0o755)
         (root / "foreign.marker").write_bytes(b"foreign")
+    elif state == "unsafe-empty-mode":
+        root.mkdir(mode=0o755)
+    elif state == "lock-symlink":
+        root.mkdir(mode=0o700)
+        (root / ".lifecycle.lock").symlink_to(root / "missing-lock")
+    elif state == "lock-directory":
+        root.mkdir(mode=0o700)
+        (root / ".lifecycle.lock").mkdir(mode=0o700)
+    elif state == "lock-mode":
+        root.mkdir(mode=0o700)
+        (root / ".lifecycle.lock").write_bytes(b"lock")
+        (root / ".lifecycle.lock").chmod(0o644)
+    elif state == "lock-hardlink":
+        root.mkdir(mode=0o700)
+        source = home / "retained-lock-link"
+        source.write_bytes(b"lock")
+        source.chmod(0o600)
+        os.link(source, root / ".lifecycle.lock")
 
     monkeypatch.setenv("HERMES_HOME", str(home))
     before = _inventory(home)
@@ -662,3 +689,100 @@ def test_status_history_show_never_mutate_any_root_shape(
         "record": None,
     }
     assert _inventory(home) == before
+
+
+def test_wrong_owner_empty_root_is_blocked_without_mutation_when_portable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if not hasattr(os, "geteuid") or not hasattr(os, "chown"):
+        pytest.skip("owner validation is not exposed on this platform")
+    home = tmp_path / "home"
+    root = home / "evolution"
+    root.mkdir(parents=True, mode=0o700)
+    try:
+        os.chown(root, os.geteuid() + 1, -1)
+    except PermissionError:
+        pytest.skip("the current process cannot create a foreign-owned fixture")
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    before = _inventory(home)
+
+    status_exit, status, _ = _run(action="status")
+    assert status_exit == 0
+    assert status["status"] == "blocked"
+    assert _inventory(home) == before
+
+    history_exit, history, _ = _run(action="history", limit=1, after=0)
+    assert history_exit == 1
+    assert history["status"] == "blocked"
+    assert _inventory(home) == before
+
+    show_exit, show, _ = _run(
+        action="show",
+        kind="generation",
+        record_id="a" * 64,
+    )
+    assert show_exit == 1
+    assert show["status"] == "missing"
+    assert _inventory(home) == before
+
+
+@pytest.mark.parametrize("state", ["unsafe-empty-mode", "lock-symlink"])
+def test_init_lock_failures_use_the_canonical_status_envelope(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    state: str,
+) -> None:
+    home = tmp_path / "home"
+    root = home / "evolution"
+    root.mkdir(parents=True, mode=0o700)
+    home.chmod(0o700)
+    root.chmod(0o700)
+    if state == "unsafe-empty-mode":
+        root.chmod(0o755)
+    else:
+        (root / ".lifecycle.lock").symlink_to(root / "missing-lock")
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    before = _inventory(home)
+
+    exit_code, value, _ = _run(action="init")
+
+    assert exit_code == 1
+    assert value == {
+        "schema_version": 1,
+        "status": "blocked",
+        "initialized": False,
+        "overlay_enabled": False,
+        "active_generation_id": None,
+        "last_known_good_generation_id": None,
+        "diagnostics": ["evolution_unavailable"],
+    }
+    assert _inventory(home) == before
+
+
+def test_init_lock_timeout_uses_the_canonical_status_envelope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hermes_cli.evolution.locking import LifecycleLockTimeout
+
+    def fail_initialization() -> None:
+        raise LifecycleLockTimeout("lifecycle_lock_timeout")
+
+    monkeypatch.setattr(
+        command_module,
+        "ensure_evolution_initialized",
+        fail_initialization,
+    )
+
+    exit_code, value, _ = _run(action="init")
+
+    assert exit_code == 1
+    assert value == {
+        "schema_version": 1,
+        "status": "blocked",
+        "initialized": False,
+        "overlay_enabled": False,
+        "active_generation_id": None,
+        "last_known_good_generation_id": None,
+        "diagnostics": ["evolution_unavailable"],
+    }

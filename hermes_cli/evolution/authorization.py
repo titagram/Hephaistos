@@ -29,6 +29,7 @@ _HOST_PATTERN = re.compile(
     re.ASCII,
 )
 _HEX_SECRET_PATTERN = re.compile(r"[0-9a-f]{24,}\Z", re.ASCII)
+_AWS_ACCESS_KEY_PATTERN = re.compile(r"(?:AKIA|ASIA)[A-Z0-9]{16}\Z", re.ASCII)
 _OPAQUE_ALTERNATING_MIN_LENGTH = 16
 _OPAQUE_ALTERNATING_MIN_TRANSITIONS = 8
 _OPAQUE_DIVERSE_MIN_LENGTH = 32
@@ -207,7 +208,10 @@ def _looks_like_opaque_segment(segment: str) -> bool:
 
 def _looks_like_credential_material(value: str) -> bool:
     compact = _compact_material(value)
-    if _HEX_SECRET_PATTERN.fullmatch(compact) is not None:
+    if (
+        _HEX_SECRET_PATTERN.fullmatch(compact) is not None
+        or _AWS_ACCESS_KEY_PATTERN.fullmatch(value) is not None
+    ):
         return True
 
     if any(

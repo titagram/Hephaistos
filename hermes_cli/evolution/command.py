@@ -9,16 +9,16 @@ from typing import Any
 from hermes_constants import get_hermes_home
 from agent.redact import redact_sensitive_text
 
+from .authorization import AuthorizationError, _privacy_safe_symbolic
 from .bootstrap import EvolutionBootstrapError, ensure_evolution_initialized, evolution_state_kind
 from .ledger import EvolutionLedger, EvolutionLedgerError, StoredEvent, _require_timestamp
+from .locking import LifecycleLockError
 from .reconcile import reconcile_evolution_state, read_evolution_snapshot
 
 _SYMBOL = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,63}\Z", re.ASCII)
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z", re.ASCII)
-_PUBLIC = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}\Z", re.ASCII)
 _TIMESTAMP = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z\Z", re.ASCII)
 _UUID = re.compile(r"[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\Z", re.ASCII)
-_AWS_ACCESS_KEY = re.compile(r"(?:AKIA|ASIA)[A-Z0-9]{16}", re.ASCII)
 _EVENT_TYPES = frozenset({"baseline_designated", "state_transition", "supervisor_recovery", "authorization_requested", "authorization_granted", "authorization_denied", "authorization_consumed"})
 _ACTORS = frozenset({"system", "supervisor", "operator", "host"})
 _REASON_CODES = frozenset({"baseline", "transition", "active_restored_from_lkg", "stable_base_only", "authorization_requested", "authorization_granted", "authorization_denied", "authorization_consumed"})
@@ -26,11 +26,20 @@ _PUBLIC_SUMMARIES = frozenset({"baseline designation", "restored active pointer 
 _STATES = frozenset({"draft", "research_authorized", "blueprint_ready", "build_approved", "building", "quarantined", "canary_running", "promotion_ready", "active", "stable", "rejected", "research_expired", "build_failed", "canary_failed", "rolled_back", "retired"})
 
 
-def _is_public_safe(value: str) -> bool:
-    return (
-        _AWS_ACCESS_KEY.search(value) is None
-        and redact_sensitive_text(value, force=True) == value
-    )
+def _is_public_identity(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    if _UUID.fullmatch(value) is not None or _DIGEST.fullmatch(value) is not None:
+        return True
+    try:
+        _privacy_safe_symbolic(
+            value,
+            code="invalid_public_identity",
+            limit=64,
+        )
+    except AuthorizationError:
+        return False
+    return redact_sensitive_text(value, force=True) == value
 
 
 def _emit(value: dict[str, Any]) -> None:
@@ -39,10 +48,16 @@ def _emit(value: dict[str, Any]) -> None:
 
 def _status() -> dict[str, Any]:
     root = get_hermes_home() / "evolution"
-    if evolution_state_kind(root) == "uninitialized":
+    state_kind = evolution_state_kind(root)
+    if state_kind == "uninitialized":
         return {"schema_version": 1, "status": "uninitialized", "initialized": False,
                 "overlay_enabled": False, "active_generation_id": None,
                 "last_known_good_generation_id": None, "diagnostics": []}
+    if state_kind == "blocked":
+        return {"schema_version": 1, "status": "blocked", "initialized": False,
+                "overlay_enabled": False, "active_generation_id": None,
+                "last_known_good_generation_id": None,
+                "diagnostics": ["evolution_unavailable"]}
     result = reconcile_evolution_state(repair=False)
     return {"schema_version": 1, "status": result.status, "initialized": True,
             "overlay_enabled": result.overlay_enabled,
@@ -53,9 +68,7 @@ def _status() -> dict[str, Any]:
 
 def _event(event: StoredEvent) -> dict[str, Any]:
     def identity(value: str | None) -> str | None:
-        if not isinstance(value, str) or not (_UUID.fullmatch(value) or _PUBLIC.fullmatch(value)):
-            return None
-        return value if _is_public_safe(value) else None
+        return value if _is_public_identity(value) else None
     def timestamp(value: object) -> str | None:
         try:
             return _require_timestamp(value)
@@ -83,6 +96,8 @@ def _history(limit: int, after: int) -> dict[str, Any]:
     kind = evolution_state_kind(root)
     if kind == "uninitialized":
         return {"schema_version": 1, "status": "uninitialized", "items": [], "next_after": None}
+    if kind == "blocked":
+        raise EvolutionLedgerError("evolution_unavailable")
     if not (root / "evolution.db").exists():
         raise EvolutionLedgerError("evolution_unavailable")
     def query(ledger: EvolutionLedger):
@@ -102,6 +117,8 @@ def _show(kind: str, record_id: str) -> dict[str, Any]:
     state_kind = evolution_state_kind(root)
     if state_kind == "uninitialized":
         return {"schema_version": 1, "status": "missing", "kind": kind, "record": None}
+    if state_kind == "blocked":
+        raise EvolutionLedgerError("evolution_unavailable")
     if not (root / "evolution.db").exists():
         raise EvolutionLedgerError("evolution_unavailable")
     queries = {
@@ -133,12 +150,12 @@ def _show(kind: str, record_id: str) -> dict[str, Any]:
                 if value not in _STATES:
                     return {"schema_version": 1, "status": "missing", "kind": kind, "record": None}
             elif field == "suggestion_id":
-                if not isinstance(value, str) or _SYMBOL.fullmatch(value) is None or not _is_public_safe(value):
+                if not isinstance(value, str) or _SYMBOL.fullmatch(value) is None or not _is_public_identity(value):
                     return {"schema_version": 1, "status": "missing", "kind": kind, "record": None}
             elif field in {"blueprint_id", "promotion_report_id"}:
-                if not isinstance(value, str) or _PUBLIC.fullmatch(value) is None or not _is_public_safe(value):
+                if not _is_public_identity(value):
                     return {"schema_version": 1, "status": "missing", "kind": kind, "record": None}
-            elif not isinstance(value, str) or _PUBLIC.fullmatch(value) is None or not _is_public_safe(value):
+            elif not _is_public_identity(value):
                 return {"schema_version": 1, "status": "missing", "kind": kind, "record": None}
         return {"schema_version": 1, "status": "found", "kind": kind, "record": record}
     return {"schema_version": 1, "status": "missing", "kind": kind, "record": None}
@@ -161,7 +178,13 @@ def evolution_command(args: Any) -> int:
             value = _show(args.kind, args.record_id)
             _emit(value)
             return 0 if value["status"] == "found" else 1
-    except (EvolutionBootstrapError, EvolutionLedgerError, OSError, ValueError):
+    except (
+        EvolutionBootstrapError,
+        EvolutionLedgerError,
+        LifecycleLockError,
+        OSError,
+        ValueError,
+    ):
         if getattr(args, "action", None) == "history":
             _emit({"schema_version": 1, "status": "blocked", "items": [], "next_after": None})
         elif getattr(args, "action", None) == "show":

@@ -111,6 +111,38 @@ def test_actual_main_help_and_every_action_dispatch_contract(
     )
 
 
+@pytest.mark.parametrize("state", ["unsafe-root", "hostile-lock"])
+def test_actual_main_init_lock_failures_are_bounded_without_path_disclosure(
+    tmp_path: Path,
+    state: str,
+) -> None:
+    home = tmp_path / "home"
+    root = home / "evolution"
+    root.mkdir(parents=True, mode=0o700)
+    home.chmod(0o700)
+    root.chmod(0o700)
+    if state == "unsafe-root":
+        root.chmod(0o755)
+    else:
+        (root / ".lifecycle.lock").symlink_to(root / "missing-lock")
+
+    result = _main_process(home, "evolution", "init", "--json")
+
+    assert result.returncode == 1
+    assert json.loads(result.stdout) == {
+        "schema_version": 1,
+        "status": "blocked",
+        "initialized": False,
+        "overlay_enabled": False,
+        "active_generation_id": None,
+        "last_known_good_generation_id": None,
+        "diagnostics": ["evolution_unavailable"],
+    }
+    assert "Traceback" not in result.stderr
+    assert str(home) not in result.stderr
+    assert str(REPOSITORY_ROOT) not in result.stderr
+
+
 def test_actual_main_evolution_help_keeps_handler_import_lazy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -12,7 +12,12 @@ from hermes_cli.config import _normalize_evolution_config, load_config
 
 from .contract import content_digest
 from .ledger import EvolutionLedger
-from .locking import lifecycle_lock
+from .locking import (
+    LifecycleLockError,
+    _validate_directory,
+    _validate_lock_file,
+    lifecycle_lock,
+)
 from .pointers import initialize_baseline_pointers
 from .reconcile import reconcile_evolution_state
 from .store import GenerationStore, PublishedGeneration, StableBaseIdentity
@@ -59,15 +64,35 @@ def _stable_base() -> StableBaseIdentity:
 def evolution_state_kind(root: Path) -> str:
     """Classify state without creating paths: empty/lock-only is uninitialized."""
     try:
-        root.lstat()
+        root_info = root.lstat()
     except FileNotFoundError:
         return "uninitialized"
-    except OSError:
+    except (OSError, TypeError, NotImplementedError):
         return "blocked"
-    if root.is_symlink() or not root.is_dir():
+    try:
+        _validate_directory(root_info)
+        members = list(root.iterdir())
+    except (
+        LifecycleLockError,
+        OSError,
+        TypeError,
+        NotImplementedError,
+    ):
         return "blocked"
-    members = {member.name for member in root.iterdir() if member.name != ".lifecycle.lock"}
-    return "uninitialized" if not members else "existing"
+    if not members:
+        return "uninitialized"
+    if len(members) != 1 or members[0].name != ".lifecycle.lock":
+        return "existing"
+    try:
+        _validate_lock_file(members[0].lstat())
+    except (
+        LifecycleLockError,
+        OSError,
+        TypeError,
+        NotImplementedError,
+    ):
+        return "blocked"
+    return "uninitialized"
 
 
 def ensure_evolution_initialized() -> PublishedGeneration:
