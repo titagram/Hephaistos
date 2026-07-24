@@ -58,12 +58,8 @@ def _stable_base() -> StableBaseIdentity:
 
 def evolution_state_kind(root: Path) -> str:
     """Classify state without creating paths: empty/lock-only is uninitialized."""
-    try:
-        info = root.lstat()
-    except FileNotFoundError:
+    if not root.exists():
         return "uninitialized"
-    except OSError:
-        return "blocked"
     if root.is_symlink() or not root.is_dir():
         return "blocked"
     members = {member.name for member in root.iterdir() if member.name != ".lifecycle.lock"}

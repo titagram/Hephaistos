@@ -7,19 +7,19 @@ import re
 from typing import Any
 
 from hermes_constants import get_hermes_home
-from agent.redact import redact_sensitive_text
 
 from .bootstrap import EvolutionBootstrapError, ensure_evolution_initialized, evolution_state_kind
-from .ledger import EvolutionLedger, EvolutionLedgerError, StoredEvent, _require_timestamp
+from .ledger import EvolutionLedger, EvolutionLedgerError, StoredEvent
 from .reconcile import reconcile_evolution_state, read_evolution_snapshot
 
 _SYMBOL = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,63}\Z", re.ASCII)
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z", re.ASCII)
-_PUBLIC = re.compile(r"[A-Za-z][A-Za-z0-9_.:-]{0,127}\Z", re.ASCII)
+_PUBLIC = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}\Z", re.ASCII)
+_TIMESTAMP = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z\Z", re.ASCII)
 _UUID = re.compile(r"[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\Z", re.ASCII)
-_EVENT_TYPES = frozenset({"baseline_designated", "state_transition", "supervisor_recovery", "authorization_requested", "authorization_granted", "authorization_denied", "authorization_consumed"})
-_ACTORS = frozenset({"system", "supervisor", "operator", "host"})
-_REASON_CODES = frozenset({"baseline", "transition", "active_restored_from_lkg", "stable_base_only", "authorization_requested", "authorization_granted", "authorization_denied", "authorization_consumed"})
+_EVENT_TYPES = frozenset({"baseline_designated", "state_transition", "supervisor_recovery"})
+_ACTORS = frozenset({"system", "supervisor"})
+_REASON_CODES = frozenset({"baseline", "transition", "active_restored_from_lkg", "stable_base_only"})
 _PUBLIC_SUMMARIES = frozenset({"baseline designation", "restored active pointer from proven last known good", "evolution overlays disabled because no pointer was proven"})
 _STATES = frozenset({"draft", "research_authorized", "blueprint_ready", "build_approved", "building", "quarantined", "canary_running", "promotion_ready", "active", "stable", "rejected", "research_expired", "build_failed", "canary_failed", "rolled_back", "retired"})
 
@@ -43,29 +43,18 @@ def _status() -> dict[str, Any]:
 
 
 def _event(event: StoredEvent) -> dict[str, Any]:
-    def identity(value: str | None, *, symbolic: bool = True) -> str | None:
-        if value is None or not isinstance(value, str):
-            return None
-        if not (_UUID.fullmatch(value) or (symbolic and _PUBLIC.fullmatch(value))):
-            return None
-        return value if redact_sensitive_text(value, force=True) == value else None
-    def timestamp(value: object) -> str | None:
-        try:
-            return _require_timestamp(value)
-        except EvolutionLedgerError:
-            return None
     state = lambda value: value if value in _STATES else None
-    return {"sequence": event.event_sequence, "event_id": identity(event.event_id),
-            "attempt_id": identity(event.attempt_id),
+    return {"sequence": event.event_sequence, "event_id": event.event_id if _UUID.fullmatch(event.event_id) else None,
+            "attempt_id": event.attempt_id if event.attempt_id and _UUID.fullmatch(event.attempt_id) else None,
             "generation_id": event.generation_id if event.generation_id and _DIGEST.fullmatch(event.generation_id) else None,
             "event_type": event.event_type if event.event_type in _EVENT_TYPES else None,
             "prior_state": state(event.prior_state), "next_state": state(event.next_state),
-            "actor": event.actor if event.actor in _ACTORS else identity(event.actor),
+            "actor": event.actor if event.actor in _ACTORS else None,
             "input_digests": [digest for digest in event.input_digests if _DIGEST.fullmatch(digest)],
-            "authorization_id": identity(event.authorization_id),
+            "authorization_id": event.authorization_id if event.authorization_id and _UUID.fullmatch(event.authorization_id) else None,
             "reason_code": event.reason_code if event.reason_code in _REASON_CODES else None,
             "reason_summary": event.reason_summary if event.reason_summary in _PUBLIC_SUMMARIES else "redacted",
-            "timestamp": timestamp(event.created_at),
+            "timestamp": event.created_at if _TIMESTAMP.fullmatch(event.created_at) else None,
             "event_digest": event.event_digest if _DIGEST.fullmatch(event.event_digest) else None}
 
 
@@ -118,20 +107,15 @@ def _show(kind: str, record_id: str) -> dict[str, Any]:
                 if not isinstance(value, str) or _DIGEST.fullmatch(value) is None:
                     return {"schema_version": 1, "status": "missing", "kind": kind, "record": None}
             elif field == "created_at":
-                try:
-                    _require_timestamp(value)
-                except EvolutionLedgerError:
+                if not isinstance(value, str) or _TIMESTAMP.fullmatch(value) is None:
                     return {"schema_version": 1, "status": "missing", "kind": kind, "record": None}
             elif field == "state":
                 if value not in _STATES:
                     return {"schema_version": 1, "status": "missing", "kind": kind, "record": None}
-            elif field == "suggestion_id":
-                if not isinstance(value, str) or _SYMBOL.fullmatch(value) is None or redact_sensitive_text(value, force=True) != value:
+            elif field.endswith("_id"):
+                if not isinstance(value, str) or _UUID.fullmatch(value) is None:
                     return {"schema_version": 1, "status": "missing", "kind": kind, "record": None}
-            elif field in {"blueprint_id", "promotion_report_id"}:
-                if not isinstance(value, str) or _PUBLIC.fullmatch(value) is None or redact_sensitive_text(value, force=True) != value:
-                    return {"schema_version": 1, "status": "missing", "kind": kind, "record": None}
-            elif not isinstance(value, str) or _PUBLIC.fullmatch(value) is None or redact_sensitive_text(value, force=True) != value:
+            elif not isinstance(value, str) or _PUBLIC.fullmatch(value) is None:
                 return {"schema_version": 1, "status": "missing", "kind": kind, "record": None}
         return {"schema_version": 1, "status": "found", "kind": kind, "record": record}
     return {"schema_version": 1, "status": "missing", "kind": kind, "record": None}
