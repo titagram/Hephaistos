@@ -30,6 +30,7 @@ Session context:
 import io
 import logging
 import os
+import stat
 import sys
 import threading
 from pathlib import Path
@@ -114,6 +115,26 @@ def _safe_stderr():  # type: ignore[return]
         pass
     # Best-effort: if wrapping fails, return the original stream.
     return stream
+
+
+def _has_symlinked_path_component(path: Path) -> bool:
+    """Return whether *path* or one of its ancestors is a symlink.
+
+    Permission tightening must not follow a configured symlink out of the
+    Hermes hierarchy. Treat an uninspectable component as unsafe as well:
+    logging can still use the path, but it must not chmod its referent.
+    """
+    current = path.absolute()
+    while True:
+        try:
+            if stat.S_ISLNK(current.lstat().st_mode):
+                return True
+        except OSError:
+            return True
+        parent = current.parent
+        if parent == current:
+            return False
+        current = parent
 
 
 _CONCURRENT_LOG_LOCK_TIMEOUT = "Cannot acquire lock after 20 attempts"
@@ -307,8 +328,10 @@ def setup_logging(
     else:
         home.mkdir(mode=0o700, parents=True, exist_ok=True)
         log_dir.mkdir(mode=0o700, exist_ok=True)
-        _secure_dir(home)
-        _secure_dir(log_dir)
+        if not _has_symlinked_path_component(home):
+            _secure_dir(home)
+        if not _has_symlinked_path_component(log_dir):
+            _secure_dir(log_dir)
 
     # Read config defaults (best-effort — config may not be loaded yet).
     cfg_level, cfg_max_size, cfg_backup = _read_logging_config()
@@ -455,6 +478,8 @@ class _ManagedRotatingFileHandler(RotatingFileHandler):
         self._record_stream_stat()
 
     def _set_file_permissions(self):
+        if _has_symlinked_path_component(Path(self.baseFilename)):
+            return
         if self._managed:
             try:
                 os.chmod(self.baseFilename, 0o660)

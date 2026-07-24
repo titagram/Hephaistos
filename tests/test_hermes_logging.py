@@ -92,6 +92,66 @@ class TestSetupLogging:
         assert stat.S_IMODE((home / "logs" / "agent.log").stat().st_mode) == 0o600
         assert stat.S_IMODE((home / "logs" / "errors.log").stat().st_mode) == 0o600
 
+    def test_does_not_chmod_target_of_symlinked_home(self, tmp_path):
+        shared_home = tmp_path / "shared-home"
+        shared_logs = shared_home / "logs"
+        shared_home.mkdir()
+        shared_logs.mkdir()
+        for path, mode in ((shared_home, 0o770), (shared_logs, 0o770)):
+            path.chmod(mode)
+        for name in ("agent.log", "errors.log"):
+            (shared_logs / name).touch()
+            (shared_logs / name).chmod(0o660)
+
+        home = tmp_path / "home"
+        home.symlink_to(shared_home, target_is_directory=True)
+        with patch("hermes_cli.config.is_managed", return_value=False), \
+             patch("hermes_cli.config._is_container", return_value=False):
+            hermes_logging.setup_logging(hermes_home=home)
+
+        assert home.is_symlink()
+        assert stat.S_IMODE(shared_home.stat().st_mode) == 0o770
+        assert stat.S_IMODE(shared_logs.stat().st_mode) == 0o770
+        assert stat.S_IMODE((shared_logs / "agent.log").stat().st_mode) == 0o660
+        assert stat.S_IMODE((shared_logs / "errors.log").stat().st_mode) == 0o660
+
+    def test_does_not_chmod_target_of_symlinked_logs_directory(self, tmp_path):
+        home = tmp_path / "home"
+        shared_logs = tmp_path / "shared-logs"
+        home.mkdir(mode=0o700)
+        shared_logs.mkdir()
+        shared_logs.chmod(0o770)
+        for name in ("agent.log", "errors.log"):
+            (shared_logs / name).touch()
+            (shared_logs / name).chmod(0o660)
+        (home / "logs").symlink_to(shared_logs, target_is_directory=True)
+
+        with patch("hermes_cli.config.is_managed", return_value=False), \
+             patch("hermes_cli.config._is_container", return_value=False):
+            hermes_logging.setup_logging(hermes_home=home)
+
+        assert (home / "logs").is_symlink()
+        assert stat.S_IMODE(shared_logs.stat().st_mode) == 0o770
+        assert stat.S_IMODE((shared_logs / "agent.log").stat().st_mode) == 0o660
+        assert stat.S_IMODE((shared_logs / "errors.log").stat().st_mode) == 0o660
+
+    def test_does_not_chmod_target_of_symlinked_log_file(self, tmp_path):
+        home = tmp_path / "home"
+        log_dir = home / "logs"
+        shared_agent_log = tmp_path / "shared-agent.log"
+        home.mkdir(mode=0o700)
+        log_dir.mkdir(mode=0o700)
+        shared_agent_log.touch()
+        shared_agent_log.chmod(0o660)
+        (log_dir / "agent.log").symlink_to(shared_agent_log)
+
+        with patch("hermes_cli.config.is_managed", return_value=False), \
+             patch("hermes_cli.config._is_container", return_value=False):
+            hermes_logging.setup_logging(hermes_home=home)
+
+        assert (log_dir / "agent.log").is_symlink()
+        assert stat.S_IMODE(shared_agent_log.stat().st_mode) == 0o660
+
     def test_creates_agent_log_handler(self, hermes_home):
         hermes_logging.setup_logging(hermes_home=hermes_home)
         root = logging.getLogger()
