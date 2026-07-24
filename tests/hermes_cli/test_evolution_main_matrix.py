@@ -167,6 +167,28 @@ def test_actual_main_evolution_help_keeps_handler_import_lazy(
     assert "hermes_cli.evolution.command" not in sys.modules
 
 
+def test_actual_main_evolution_parser_rejects_identifier_without_disclosure(
+    tmp_path: Path,
+) -> None:
+    secret_path = "/Users/example/private/a8-secret"
+
+    result = _main_process(
+        tmp_path / "home",
+        "evolution",
+        "show",
+        "suggestion",
+        secret_path,
+        "--json",
+    )
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert secret_path not in result.stderr
+    assert result.stderr.endswith(
+        "error: argument record_id: invalid evolution identifier\n"
+    )
+
+
 @pytest.mark.parametrize(
     "argv",
     [

@@ -51,6 +51,68 @@ def test_symbolic_non_uuid_suggestion_id_is_a_valid_parser_contract() -> None:
     assert parsed.json is True
 
 
+@pytest.mark.parametrize("kind", ["suggestion", "blueprint"])
+@pytest.mark.parametrize(
+    "record_id",
+    [
+        "/Users/example/private",
+        r"C:\\Users\\example\\private",
+        "../private",
+        "file:///private/token",
+        "Bearer secret-token",
+        "first line\nsecond-secret-line",
+    ],
+)
+def test_identifier_parse_errors_do_not_reflect_input(
+    kind: str,
+    record_id: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    parser = __import__("argparse").ArgumentParser()
+    build_evolution_parser(
+        parser.add_subparsers(dest="command", required=True),
+        cmd_evolution=lambda args: 0,
+    )
+
+    with pytest.raises(SystemExit) as error:
+        parser.parse_args(["evolution", "show", kind, record_id, "--json"])
+
+    assert error.value.code == 2
+    stderr = capsys.readouterr().err
+    assert record_id not in stderr
+    assert stderr.endswith("error: argument record_id: invalid evolution identifier\n")
+
+
+@pytest.mark.parametrize(
+    ("argv", "value", "message"),
+    [
+        (["evolution", "history", "--limit"], "/private/token", "must be an integer between 1 and 1000"),
+        (["evolution", "history", "--limit"], "1001", "must be an integer between 1 and 1000"),
+        (["evolution", "history", "--after"], "file:///private/token", "must be a non-negative integer"),
+        (["evolution", "history", "--after"], "-1", "must be a non-negative integer"),
+    ],
+)
+def test_history_parse_errors_do_not_reflect_input(
+    argv: list[str],
+    value: str,
+    message: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    parser = __import__("argparse").ArgumentParser()
+    build_evolution_parser(
+        parser.add_subparsers(dest="command", required=True),
+        cmd_evolution=lambda args: 0,
+    )
+
+    with pytest.raises(SystemExit) as error:
+        parser.parse_args([*argv, value])
+
+    assert error.value.code == 2
+    stderr = capsys.readouterr().err
+    assert value not in stderr
+    assert stderr.endswith(f"error: argument {argv[-1]}: {message}\n")
+
+
 @pytest.mark.parametrize("kind", ["blueprint", "generation", "report"])
 @pytest.mark.parametrize(
     "record_id",

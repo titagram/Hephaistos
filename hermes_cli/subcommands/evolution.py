@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 from typing import Callable
 import re
 
@@ -11,16 +12,24 @@ _SYMBOL = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,63}\Z", re.ASCII)
 
 
 def _bounded_positive(value: str) -> int:
-    parsed = int(value)
+    try:
+        parsed = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            "must be an integer between 1 and 1000"
+        ) from None
     if not 1 <= parsed <= 1000:
-        raise ValueError("must be between 1 and 1000")
+        raise argparse.ArgumentTypeError("must be an integer between 1 and 1000")
     return parsed
 
 
 def _after(value: str) -> int:
-    parsed = int(value)
+    try:
+        parsed = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("must be a non-negative integer") from None
     if parsed < 0:
-        raise ValueError("must be non-negative")
+        raise argparse.ArgumentTypeError("must be a non-negative integer")
     return parsed
 
 
@@ -28,7 +37,7 @@ def _identifier(kind: str):
     pattern = _SYMBOL if kind == "suggestion" else _DIGEST
     def validate(value: str) -> str:
         if pattern.fullmatch(value) is None:
-            raise ValueError("invalid identifier")
+            raise argparse.ArgumentTypeError("invalid evolution identifier")
         return value
     return validate
 
