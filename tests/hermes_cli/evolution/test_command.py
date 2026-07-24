@@ -127,3 +127,12 @@ def test_foreign_root_keeps_history_and_show_failure_envelopes(
     assert set(json.loads(capsys.readouterr().out)) == {"schema_version", "status", "items", "next_after"}
     assert evolution_command(_args(action="show", kind="generation", record_id="a" * 64)) == 1
     assert set(json.loads(capsys.readouterr().out)) == {"schema_version", "status", "kind", "record"}
+
+
+def test_show_preserves_safe_symbolic_suggestion_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    ensure_evolution_initialized()
+    from hermes_cli.evolution.command import _show
+    # No row yet is still the canonical closed missing envelope; the symbolic ID
+    # must pass validation rather than be rejected as a non-UUID.
+    assert _show("suggestion", "suggestion-alpha")["status"] == "missing"
