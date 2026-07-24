@@ -92,6 +92,26 @@ class TestSetupLogging:
         assert stat.S_IMODE((home / "logs" / "agent.log").stat().st_mode) == 0o600
         assert stat.S_IMODE((home / "logs" / "errors.log").stat().st_mode) == 0o600
 
+    def test_private_first_use_ignores_symlinked_ancestor_above_home(self, tmp_path):
+        real_parent = tmp_path / "real-parent"
+        linked_parent = tmp_path / "linked-parent"
+        real_parent.mkdir()
+        linked_parent.symlink_to(real_parent, target_is_directory=True)
+        home = linked_parent / "home"
+
+        old_umask = os.umask(0)
+        try:
+            with patch("hermes_cli.config.is_managed", return_value=False), \
+                 patch("hermes_cli.config._is_container", return_value=False):
+                hermes_logging.setup_logging(hermes_home=home)
+        finally:
+            os.umask(old_umask)
+
+        assert stat.S_IMODE(home.stat().st_mode) == 0o700
+        assert stat.S_IMODE((home / "logs").stat().st_mode) == 0o700
+        assert stat.S_IMODE((home / "logs" / "agent.log").stat().st_mode) == 0o600
+        assert stat.S_IMODE((home / "logs" / "errors.log").stat().st_mode) == 0o600
+
     def test_does_not_chmod_target_of_symlinked_home(self, tmp_path):
         shared_home = tmp_path / "shared-home"
         shared_logs = shared_home / "logs"
