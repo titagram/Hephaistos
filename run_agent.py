@@ -866,6 +866,23 @@ class AIAgent:
             except Exception:
                 logger.debug("notice_clear_callback error in _emit_notice_clear", exc_info=True)
 
+    def drain_autopoiesis_notices(self) -> None:
+        """Drain pending autopoiesis notices built by finalize_turn.
+
+        Called by frontends AFTER the response has been visibly delivered.
+        Each notice is emitted via _emit_notice then cleared from the queue.
+        Failures are logged but never block or alter the response.
+        """
+        pending = getattr(self, "_pending_autopoiesis_notices", None)
+        if not pending:
+            return
+        for entry in list(pending):
+            try:
+                self._emit_notice(entry)
+            except Exception:
+                logger.debug("drain_autopoiesis_notices: emit failed", exc_info=True)
+        self._pending_autopoiesis_notices = []
+
     # ── Buffered retry/fallback status ────────────────────────────────────
     # Retry and fallback chains were flooding the CLI/gateway with status
     # noise that users found confusing: a single transient 429 could produce

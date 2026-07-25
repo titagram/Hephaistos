@@ -8639,6 +8639,14 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
                 _clear_inflight_turn(session)
             _emit("message.complete", sid, payload)
 
+            # Drain autopoiesis notices after TUI response delivery
+            _tui_agent = session.get("agent")
+            if _tui_agent:
+                try:
+                    _tui_agent.drain_autopoiesis_notices()
+                except Exception:
+                    pass
+
             # ── /goal continuation (Ralph-style loop) ─────────────────
             # After every TUI turn, if a /goal is active, ask the judge
             # whether the goal is done and — if not and we're still under

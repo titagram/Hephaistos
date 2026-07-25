@@ -12271,6 +12271,13 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                 sys.stdout.write("\a")
                 sys.stdout.flush()
 
+            # Drain autopoiesis notices after response delivery
+            if self.agent:
+                try:
+                    self.agent.drain_autopoiesis_notices()
+                except Exception:
+                    pass
+
             # Notify when iteration budget was hit
             if result and not result.get("completed") and not result.get("interrupted"):
                 _api_calls = result.get("api_calls", 0)
