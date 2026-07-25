@@ -269,3 +269,51 @@ def test_broker_get_pending_requests(tmp_path, monkeypatch):
     assert len(broker.get_pending_requests(ledger, "other-org")) == 0
 
     ledger.connection.close()
+
+
+# --- 2C.3: CLI Prompt Tests ---
+
+def test_cli_telos_approval_prompt_timeout_is_deny():
+    """Timeout must produce denied, not crash."""
+    from unittest import mock
+    from hermes_cli.evolution.telos_approval import telos_approval_prompt, TelosApprovalPrompt
+
+    prompt = TelosApprovalPrompt(
+        request_id="req-1", organism_id="org-1", telos_digest="a" * 64,
+        action="activate", display_nonce="1234",
+        bounded_summary="Test Telos activation",
+        host_context_digest="c" * 64,
+    )
+    with mock.patch("prompt_toolkit.shortcuts.PromptSession.prompt", side_effect=TimeoutError):
+        decision = telos_approval_prompt(prompt, timeout=1)
+        assert decision.decision == "denied"
+
+
+def test_cli_telos_approval_accepts_y():
+    """'y' must produce approved decision."""
+    from unittest import mock
+    from hermes_cli.evolution.telos_approval import telos_approval_prompt, TelosApprovalPrompt
+
+    prompt = TelosApprovalPrompt(
+        request_id="req-1", organism_id="org-1", telos_digest="a" * 64,
+        action="activate", display_nonce="1234",
+        bounded_summary="Test", host_context_digest="c" * 64,
+    )
+    with mock.patch("prompt_toolkit.shortcuts.PromptSession.prompt", return_value="y"):
+        decision = telos_approval_prompt(prompt, timeout=30)
+        assert decision.decision == "approved"
+
+
+def test_cli_telos_approval_rejects_invalid_input():
+    """Anything other than 'y'/'yes' must be denied."""
+    from unittest import mock
+    from hermes_cli.evolution.telos_approval import telos_approval_prompt, TelosApprovalPrompt
+
+    prompt = TelosApprovalPrompt(
+        request_id="req-1", organism_id="org-1", telos_digest="a" * 64,
+        action="activate", display_nonce="1234",
+        bounded_summary="Test", host_context_digest="c" * 64,
+    )
+    with mock.patch("prompt_toolkit.shortcuts.PromptSession.prompt", return_value="maybe"):
+        decision = telos_approval_prompt(prompt, timeout=30)
+        assert decision.decision == "denied"

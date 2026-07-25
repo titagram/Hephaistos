@@ -372,3 +372,42 @@ class SqliteTelosApprovalBroker(TelosApprovalBroker):
             (organism_id,),
         ).fetchall()
         return [dict(row) for row in rows]
+
+
+def telos_approval_prompt(prompt: TelosApprovalPrompt, timeout: int = 120) -> HostApprovalDecision:
+    """Show a prompt_toolkit-based Telos approval prompt to the user.
+
+    Returns a HostApprovalDecision. Timeout, Ctrl-C, EOF, and invalid input
+    all result in 'denied'. Only explicit 'y' or 'yes' is 'approved'.
+    """
+    from datetime import datetime, timezone
+
+    lines = [
+        "══════════════════════════════════════════",
+        f" Telos {prompt.action.upper()} Request",
+        "══════════════════════════════════════════",
+        f" Digest:  {prompt.telos_digest[:16]}...",
+        f" Nonce:   {prompt.display_nonce}",
+        f" Summary: {prompt.bounded_summary}",
+        "──────────────────────────────────────────",
+        "Type 'y' to approve or 'n' to deny.",
+    ]
+
+    try:
+        from prompt_toolkit.shortcuts import PromptSession
+        session = PromptSession()
+        answer = session.prompt(
+            "\n".join(lines) + "\n> ",
+            timeout=timeout,
+        )
+    except (TimeoutError, EOFError, KeyboardInterrupt):
+        answer = "n"
+
+    decision = "approved" if answer.strip().lower() in ("y", "yes") else "denied"
+    return HostApprovalDecision(
+        request_id=prompt.request_id,
+        decision=decision,
+        host_surface="classic_cli",
+        host_actor_ref="interactive",
+        timestamp=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+    )
