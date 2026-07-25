@@ -186,3 +186,189 @@ class TelosApprovalBroker(ABC):
     ) -> list[dict]:
         """Return pending (no decision yet) requests for an organism."""
         ...
+
+
+class SqliteTelosApprovalBroker(TelosApprovalBroker):
+    """SQLite-backed Telos approval broker.
+
+    Implements all broker methods using the Telos append-only tables
+    in the EvolutionLedger (created by v3→v4 migration).
+    """
+
+    def create_request(
+        self,
+        ledger: EvolutionLedger,
+        organism_id: str,
+        telos_digest: str,
+        action: str,
+        context: HostApprovalContext,
+        ttl_seconds: int,
+    ) -> str:
+        import uuid
+        from datetime import datetime, timezone, timedelta
+
+        request_id = str(uuid.uuid4())
+        now = datetime.now(timezone.utc)
+        expires = now + timedelta(seconds=ttl_seconds)
+
+        with ledger.transaction() as conn:
+            conn.execute(
+                """INSERT INTO telos_approval_requests
+                   (request_id, organism_id, telos_digest, action,
+                    expected_host_context_digest, display_nonce,
+                    bounded_summary, created_at, expires_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    request_id, organism_id, telos_digest, action,
+                    context.context_digest, context.nonce,
+                    f"Telos {action} for {organism_id[:8]}...",
+                    now.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+                    expires.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+                ),
+            )
+        return request_id
+
+    def record_host_decision(
+        self,
+        ledger: EvolutionLedger,
+        capability: HostApprovalCapability,
+        context: HostApprovalContext,
+        decision: str,
+    ) -> str:
+        from datetime import datetime, timezone
+
+        if not self._registry.verify(capability):
+            raise TelosApprovalError("telos_capability_not_verified")
+
+        if decision not in ("approved", "denied"):
+            raise TelosApprovalError("telos_invalid_decision")
+
+        import uuid
+        decision_id = str(uuid.uuid4())
+        now = datetime.now(timezone.utc)
+
+        try:
+            with ledger.transaction() as conn:
+                conn.execute(
+                    """INSERT INTO telos_approval_decisions
+                       (decision_id, request_id, decision,
+                        host_surface, host_actor_ref,
+                        host_context_digest, decided_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        decision_id, context.request_id, decision,
+                        context.surface, context.actor_ref,
+                        context.context_digest,
+                        now.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+                    ),
+                )
+        except Exception:
+            raise TelosApprovalError("telos_decision_failed") from None
+
+        return decision_id
+
+    def issue_grant(
+        self,
+        ledger: EvolutionLedger,
+        request_id: str,
+        decision_id: str,
+    ) -> str:
+        from datetime import datetime, timezone, timedelta
+        import uuid
+
+        grant_id = str(uuid.uuid4())
+        now = datetime.now(timezone.utc)
+        expires = now + timedelta(hours=1)
+
+        with ledger.transaction() as conn:
+            # Verify request exists
+            req = conn.execute(
+                "SELECT organism_id, telos_digest, action FROM telos_approval_requests WHERE request_id = ?",
+                (request_id,),
+            ).fetchone()
+            if req is None:
+                raise TelosApprovalError("telos_request_not_found")
+
+            try:
+                conn.execute(
+                    """INSERT INTO telos_approval_grants
+                       (grant_id, request_id, decision_id,
+                        organism_id, telos_digest, action,
+                        issued_at, expires_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        grant_id, request_id, decision_id,
+                        req["organism_id"], req["telos_digest"], req["action"],
+                        now.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+                        expires.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+                    ),
+                )
+            except Exception:
+                raise TelosApprovalError("telos_grant_failed") from None
+
+        return grant_id
+
+    def consume_grant(
+        self,
+        ledger: EvolutionLedger,
+        grant_id: str,
+        organism_id: str,
+        telos_digest: str,
+        action: str,
+    ) -> str:
+        from datetime import datetime, timezone
+        import uuid
+
+        consumption_id = str(uuid.uuid4())
+        now = datetime.now(timezone.utc)
+
+        with ledger.transaction() as conn:
+            # Verify grant exists and hasn't expired
+            grant = conn.execute(
+                "SELECT organism_id, telos_digest, action, expires_at FROM telos_approval_grants WHERE grant_id = ?",
+                (grant_id,),
+            ).fetchone()
+            if grant is None:
+                raise TelosApprovalError("telos_grant_not_found")
+            if grant["organism_id"] != organism_id:
+                raise TelosApprovalError("telos_grant_organism_mismatch")
+            if grant["telos_digest"] != telos_digest:
+                raise TelosApprovalError("telos_grant_digest_mismatch")
+            if grant["action"] != action:
+                raise TelosApprovalError("telos_grant_action_mismatch")
+
+            try:
+                conn.execute(
+                    """INSERT INTO telos_approval_consumptions
+                       (consumption_id, grant_id, organism_id,
+                        telos_digest, action, consumed_at)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (
+                        consumption_id, grant_id, organism_id,
+                        telos_digest, action,
+                        now.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+                    ),
+                )
+            except Exception:
+                raise TelosApprovalError("telos_consumption_failed") from None
+
+        return consumption_id
+
+    def get_pending_requests(
+        self,
+        ledger: EvolutionLedger,
+        organism_id: str,
+    ) -> list[dict]:
+        rows = ledger.connection.execute(
+            """SELECT r.request_id, r.telos_digest, r.action, r.display_nonce,
+                      r.bounded_summary, r.created_at, r.expires_at
+               FROM telos_approval_requests r
+               WHERE r.organism_id = ?
+                 AND NOT EXISTS (
+                     SELECT 1 FROM telos_approval_decisions d
+                     WHERE d.request_id = r.request_id
+                 )
+               ORDER BY r.created_at""",
+            (organism_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]

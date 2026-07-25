@@ -119,3 +119,153 @@ def test_host_approval_decision_frozen():
     assert dec.decision == "approved"
     with pytest.raises(Exception):
         dec.decision = "denied"  # frozen
+
+
+# --- 2C.1: Broker SQLite Integration Tests ---
+
+import uuid as _uuid_mod
+from datetime import datetime, timezone, timedelta
+from pathlib import Path as _Path
+
+
+def _setup_organism_ledger(tmp_path: _Path, monkeypatch) -> tuple:
+    """Setup organism with v4 ledger for broker tests."""
+    from hermes_cli.evolution import organism_home as _oh
+    import hermes_constants as _hc
+
+    org = tmp_path / "organism"
+    monkeypatch.setattr(_hc, "get_organism_home", lambda: org)
+    monkeypatch.setattr(_oh, "get_organism_home", lambda: org)
+    monkeypatch.setattr(_hc, "get_default_hermes_root", lambda: tmp_path / ".hermes")
+
+    from hermes_cli.evolution.lifecycle_global import ensure_global_lifecycle_initialized
+    from hermes_cli.evolution.ledger import EvolutionLedger
+    from hermes_cli.evolution.telos_approval import SqliteTelosApprovalBroker
+
+    ensure_global_lifecycle_initialized()
+    ledger = EvolutionLedger(org / "evolution" / "evolution.db")
+    registry = CapabilityRegistry()
+    broker = SqliteTelosApprovalBroker(registry)
+    return org, ledger, registry, broker
+
+
+def test_broker_issue_and_consume_grant_with_capability(tmp_path, monkeypatch):
+    """Full happy path: create request, approve with capability, issue grant, consume."""
+    import hashlib
+
+    org, ledger, registry, broker = _setup_organism_ledger(tmp_path, monkeypatch)
+
+    cap = HostApprovalCapability._test_create("classic_cli", "test_actor")
+    registry.register(cap)
+
+    org_id = str(_uuid_mod.uuid4())
+    digest = "a" * 64
+    ctx = HostApprovalContext(
+        surface="classic_cli", actor_ref="test_actor",
+        session_ref="sess1", request_id=None,
+        telos_digest=digest, action="activate",
+        nonce="1234",
+        context_digest=hashlib.sha256(b"ctx").hexdigest(),
+        expires_at=(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+    )
+
+    req_id = broker.create_request(ledger, org_id, digest, "activate", ctx, 3600)
+    assert isinstance(req_id, str)
+
+    ctx_with_req = HostApprovalContext(
+        surface="classic_cli", actor_ref="test_actor",
+        session_ref="sess1", request_id=req_id,
+        telos_digest=digest, action="activate",
+        nonce="1234",
+        context_digest=hashlib.sha256(b"ctx").hexdigest(),
+    )
+
+    dec_id = broker.record_host_decision(ledger, cap, ctx_with_req, "approved")
+    assert isinstance(dec_id, str)
+
+    grant_id = broker.issue_grant(ledger, req_id, dec_id)
+    assert isinstance(grant_id, str)
+
+    consumption = broker.consume_grant(ledger, grant_id, org_id, digest, "activate")
+    assert consumption is not None
+
+    # Replay: second consumption must fail (UNIQUE on grant_id)
+    with pytest.raises(TelosApprovalError, match="telos_consumption_failed"):
+        broker.consume_grant(ledger, grant_id, org_id, digest, "activate")
+
+    ledger.connection.close()
+
+
+def test_broker_rejects_capability_not_in_registry(tmp_path, monkeypatch):
+    """A capability not in the registry must be rejected."""
+    import hashlib
+
+    org, ledger, registry, broker = _setup_organism_ledger(tmp_path, monkeypatch)
+
+    # Capability NOT registered
+    cap = HostApprovalCapability._test_create("gateway", "attacker")
+    ctx = HostApprovalContext(
+        surface="gateway", actor_ref="attacker", session_ref="s",
+        request_id="req-x", telos_digest="a" * 64, action="activate",
+        nonce="x", context_digest=hashlib.sha256(b"x").hexdigest(), expires_at=None,
+    )
+
+    with pytest.raises(TelosApprovalError, match="telos_capability_not_verified"):
+        broker.record_host_decision(ledger, cap, ctx, "approved")
+
+    ledger.connection.close()
+
+
+def test_broker_denied_decision_prevents_grant(tmp_path, monkeypatch):
+    """A denied decision must not produce a grant (trigger-enforced)."""
+    import hashlib
+
+    org, ledger, registry, broker = _setup_organism_ledger(tmp_path, monkeypatch)
+
+    cap = HostApprovalCapability._test_create("cli", "actor")
+    registry.register(cap)
+
+    digest = "b" * 64
+    ctx = HostApprovalContext(
+        surface="cli", actor_ref="actor", session_ref="s",
+        request_id=None, telos_digest=digest, action="activate",
+        nonce="1", context_digest=hashlib.sha256(b"c").hexdigest(),
+    )
+
+    req_id = broker.create_request(ledger, "org-1", digest, "activate", ctx, 60)
+    ctx_r = HostApprovalContext(
+        surface="cli", actor_ref="actor", session_ref="s",
+        request_id=req_id, telos_digest=digest, action="activate",
+        nonce="1", context_digest=hashlib.sha256(b"c").hexdigest(),
+    )
+
+    broker.record_host_decision(ledger, cap, ctx_r, "denied")
+
+    with pytest.raises(TelosApprovalError, match="telos_grant_failed"):
+        broker.issue_grant(ledger, req_id, "some-dec-id")
+
+    ledger.connection.close()
+
+
+def test_broker_get_pending_requests(tmp_path, monkeypatch):
+    """Pending requests must be queryable."""
+    import hashlib
+
+    org, ledger, registry, broker = _setup_organism_ledger(tmp_path, monkeypatch)
+
+    digest = "c" * 64
+    ctx = HostApprovalContext(
+        surface="gateway", actor_ref="a", session_ref="s",
+        request_id=None, telos_digest=digest, action="activate",
+        nonce="1", context_digest=hashlib.sha256(b"p").hexdigest(),
+    )
+
+    req_id = broker.create_request(ledger, "pending-org", digest, "activate", ctx, 60)
+    pending = broker.get_pending_requests(ledger, "pending-org")
+    assert len(pending) >= 1
+    assert any(p["request_id"] == req_id for p in pending)
+
+    # Other org has none
+    assert len(broker.get_pending_requests(ledger, "other-org")) == 0
+
+    ledger.connection.close()
