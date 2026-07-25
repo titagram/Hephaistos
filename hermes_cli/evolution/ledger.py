@@ -774,6 +774,74 @@ _SCHEMA_V4_ADDITIVE_STATEMENTS = (
         THEN RAISE(FAIL, 'telos_grant_requires_approved_decision') END;
     END
     """,
+    # Grant organism/digest/action must match the request
+    """
+    CREATE TRIGGER trg_telos_grant_matches_request
+    BEFORE INSERT ON telos_approval_grants
+    BEGIN
+        SELECT CASE WHEN (
+            SELECT organism_id FROM telos_approval_requests
+            WHERE request_id = NEW.request_id
+        ) != NEW.organism_id
+        THEN RAISE(FAIL, 'telos_grant_organism_mismatch') END;
+        SELECT CASE WHEN (
+            SELECT telos_digest FROM telos_approval_requests
+            WHERE request_id = NEW.request_id
+        ) != NEW.telos_digest
+        THEN RAISE(FAIL, 'telos_grant_digest_mismatch') END;
+        SELECT CASE WHEN (
+            SELECT action FROM telos_approval_requests
+            WHERE request_id = NEW.request_id
+        ) != NEW.action
+        THEN RAISE(FAIL, 'telos_grant_action_mismatch') END;
+    END
+    """,
+    # Consumption organism/digest/action must match the grant
+    """
+    CREATE TRIGGER trg_telos_consumption_matches_grant
+    BEFORE INSERT ON telos_approval_consumptions
+    BEGIN
+        SELECT CASE WHEN (
+            SELECT organism_id FROM telos_approval_grants
+            WHERE grant_id = NEW.grant_id
+        ) != NEW.organism_id
+        THEN RAISE(FAIL, 'telos_consumption_organism_mismatch') END;
+        SELECT CASE WHEN (
+            SELECT telos_digest FROM telos_approval_grants
+            WHERE grant_id = NEW.grant_id
+        ) != NEW.telos_digest
+        THEN RAISE(FAIL, 'telos_consumption_digest_mismatch') END;
+        SELECT CASE WHEN (
+            SELECT action FROM telos_approval_grants
+            WHERE grant_id = NEW.grant_id
+        ) != NEW.action
+        THEN RAISE(FAIL, 'telos_consumption_action_mismatch') END;
+    END
+    """,
+    # Expired request cannot be decided
+    """
+    CREATE TRIGGER trg_telos_decision_not_expired
+    BEFORE INSERT ON telos_approval_decisions
+    BEGIN
+        SELECT CASE WHEN (
+            SELECT expires_at FROM telos_approval_requests
+            WHERE request_id = NEW.request_id
+        ) < NEW.decided_at
+        THEN RAISE(FAIL, 'telos_request_expired') END;
+    END
+    """,
+    # Expired grant cannot be consumed
+    """
+    CREATE TRIGGER trg_telos_consumption_not_expired
+    BEFORE INSERT ON telos_approval_consumptions
+    BEGIN
+        SELECT CASE WHEN (
+            SELECT expires_at FROM telos_approval_grants
+            WHERE grant_id = NEW.grant_id
+        ) < NEW.consumed_at
+        THEN RAISE(FAIL, 'telos_grant_expired') END;
+    END
+    """,
 )
 
 _TABLES_V3 = (
