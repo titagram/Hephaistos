@@ -46,7 +46,7 @@ def test_organism_identity_symlink_rejection(tmp_path: Path):
     fake_target.write_text("{}")
     ident_path.symlink_to(fake_target)
 
-    with pytest.raises(OrganismIdentityError, match="symlink"):
+    with pytest.raises(OrganismIdentityError, match="unsafe"):
         load_organism_identity(org)
 
 
