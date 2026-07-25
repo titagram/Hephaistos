@@ -73,14 +73,12 @@ def _broker_activate(org_root, ledger, org_id, digest, action="activate"):
     return grant_id
 
 
-def _make_cap(surface="cli", organism_id=None, digest=None, action=None):
-    """Create a host capability, bind it, and register it in the host registry."""
+def _make_cap(surface="cli"):
+    """Create a host capability and register it in the host registry."""
     from hermes_cli.evolution.telos_approval import (
         HostApprovalCapability, set_host_capability,
     )
     cap = HostApprovalCapability._test_create(surface, "test_actor")
-    if organism_id is not None and digest is not None and action is not None:
-        cap.bind_to_request(organism_id, digest, action)
     set_host_capability(cap)
     return cap
 
@@ -139,13 +137,13 @@ def test_telos_store_save_activate_rollback(tmp_path: Path, monkeypatch):
 
     # 3. exact host-approved activation of A succeeds
     grant_a = _broker_activate(org_root, ledger, t_a.organism_id, digest_a, "activate")
-    store.activate_revision(digest_a, grant_id=grant_a, capability=_make_cap(digest=digest_a, organism_id=t_a.organism_id, action="activate"))
+    store.activate_revision(digest_a, grant_id=grant_a, capability=_make_cap())
     assert store.get_active_digest() == digest_a
     assert store.get_active_revision().canonical_digest == digest_a
 
     # 4. replay fails
     with pytest.raises(TelosStoreError):
-        store.activate_revision(digest_a, grant_id=grant_a, capability=_make_cap(digest=digest_a, organism_id=t_a.organism_id, action="activate"))
+        store.activate_revision(digest_a, grant_id=grant_a, capability=_make_cap())
 
     # 5. amendment B succeeds with exact approval
     t_b = create_sample_telos(parent_digest=digest_a)
@@ -154,7 +152,7 @@ def test_telos_store_save_activate_rollback(tmp_path: Path, monkeypatch):
     assert digest_b != digest_a
 
     grant_b = _broker_activate(org_root, ledger, t_b.organism_id, digest_b, "activate")
-    store.activate_revision(digest_b, grant_id=grant_b, capability=_make_cap(digest=digest_b, organism_id=t_b.organism_id, action="activate"))
+    store.activate_revision(digest_b, grant_id=grant_b, capability=_make_cap())
     assert store.get_active_digest() == digest_b
 
     # 6. LKG still points to A
@@ -164,7 +162,7 @@ def test_telos_store_save_activate_rollback(tmp_path: Path, monkeypatch):
 
     # 7. exact approved rollback to A succeeds
     rollback_grant = _broker_activate(org_root, ledger, t_a.organism_id, digest_a, "rollback")
-    store.rollback(digest_a, grant_id=rollback_grant, capability=_make_cap(digest=digest_a, organism_id=t_a.organism_id, action="rollback"))
+    store.rollback(digest_a, grant_id=rollback_grant, capability=_make_cap())
     assert store.get_active_digest() == digest_a
 
     # 8. later history remains immutable — B is still available

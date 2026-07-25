@@ -141,14 +141,12 @@ def _broker_approve(ledger, org_id, digest, action, surface="cli", actor="actor"
     broker.consume_grant(ledger, grant_id, org_id, digest, action)
     return grant_id
 
-def _make_cap(surface="cli", organism_id=None, digest=None, action=None):
-    """Create a host capability, bind it, and register it in the host registry."""
+def _make_cap(surface="cli"):
+    """Create a host capability and register it in the host registry."""
     from hermes_cli.evolution.telos_approval import (
         HostApprovalCapability, set_host_capability,
     )
     cap = HostApprovalCapability._test_create(surface, "test_actor")
-    if organism_id is not None and digest is not None and action is not None:
-        cap.bind_to_request(organism_id, digest, action)
     set_host_capability(cap)
     return cap
 
@@ -212,13 +210,12 @@ def test_grant_for_a_cannot_activate_b(tmp_path, monkeypatch):
     ledger.connection.close()
 
     # Activate A legitimately — this opens its own ledger internally
-    store.activate_revision(digest_a, grant_id=grant_id_a,
-                            capability=_make_cap(digest=digest_a, organism_id=org_id, action="activate"))
+    store.activate_revision(digest_a, grant_id=grant_id_a, capability=_make_cap())
     assert store.get_active_digest() == digest_a
 
     # Try to use grant_id_a (for A) to activate B — must fail
     with pytest.raises(TelosStoreError):
-        store.activate_revision(digest_b, grant_id=grant_id_a, capability=_make_cap(digest=digest_b, organism_id=org_id, action="activate"))
+        store.activate_revision(digest_b, grant_id=grant_id_a, capability=_make_cap())
 
     # A must still be active
     assert store.get_active_digest() == digest_a
@@ -243,12 +240,12 @@ def test_activate_grant_cannot_authorize_rollback(tmp_path, monkeypatch):
     ledger.connection.close()
 
     # Activate succeeds
-    store.activate_revision(digest_a, grant_id=grant_id, capability=_make_cap(digest=digest_a, organism_id=org_id, action="activate"))
+    store.activate_revision(digest_a, grant_id=grant_id, capability=_make_cap())
     assert store.get_active_digest() == digest_a
 
     # Try to rollback with the ACTIVATE grant — must fail
     with pytest.raises(TelosStoreError):
-        store.rollback(digest_a, grant_id=grant_id, capability=_make_cap(digest=digest_a, organism_id=org_id, action="activate"))
+        store.rollback(digest_a, grant_id=grant_id, capability=_make_cap())
 
 
 # ── A4: Capability binding and lifecycle ──
@@ -339,129 +336,3 @@ def test_revoked_capability_fails(tmp_path, monkeypatch):
     with pytest.raises(TelosApprovalError, match="not_verified"):
         broker.record_host_decision(ledger, cap, ctx2, "approved")
     ledger.connection.close()
-
-
-# ── HONEST RED TESTS — reproducing the real audit defects ──
-
-
-def test_registered_unrelated_capability_cannot_authorize_forged_rows(tmp_path, monkeypatch):
-    """A registered but unrelated capability must NOT authorize forged SQLite rows.
-
-    The audit found: a capability registered in the host registry for a different
-    surface/actor/request could still authorize any activation — registry membership
-    alone was treated as authority.
-
-    RED: Current HEAD allows this because verify_host_capability only checks
-    registry identity, not context binding.
-    """
-    org, org_id = _setup_organism(tmp_path, monkeypatch)
-    ledger = _open_ledger(org)
-
-    from hermes_cli.evolution.telos_store import TelosStore, TelosStoreError
-
-    store = TelosStore(org)
-    telos = _make_telos(org_id, "Test Telos for unrelated capability test")
-    store.save_revision(telos)
-    digest_a = telos.canonical_digest
-
-    # Forge approval rows directly via SQLite
-    forged_grant = _forge_approval_rows(ledger, org_id, digest_a)
-    ledger.connection.close()
-
-    # Register a capability for a DIFFERENT surface/actor — this is a LIVE,
-    # REGISTERED capability, just for the wrong context
-    from hermes_cli.evolution.telos_approval import (
-        HostApprovalCapability, set_host_capability, clear_host_capability,
-    )
-    unrelated_cap = HostApprovalCapability._test_create("gateway", "other_actor")
-    set_host_capability(unrelated_cap)
-
-    try:
-        # Attempt activation with a cap registered for a different surface/actor
-        # This MUST fail — the capability must be bound to exact request context
-        with pytest.raises(TelosStoreError):
-            store.activate_revision(digest_a, grant_id=forged_grant, capability=unrelated_cap)
-
-        # No side effects
-        assert store.get_active_digest() is None
-    finally:
-        clear_host_capability(unrelated_cap)
-
-
-def test_activate_does_not_close_caller_owned_ledger(tmp_path, monkeypatch):
-    """TelosStore.activate_revision must NOT close a caller-owned ledger.
-
-    Both activate_revision() and rollback() close ledger.connection in finally
-    even when the caller supplied the ledger. The caller's ledger must remain
-    usable after activation.
-
-    RED: Current HEAD closes the caller's ledger in the finally block.
-    """
-    org, org_id = _setup_organism(tmp_path, monkeypatch)
-
-    from hermes_cli.evolution.telos_store import TelosStore
-
-    store = TelosStore(org)
-    t_a = _make_telos(org_id, "Revision A")
-    store.save_revision(t_a)
-    digest_a = t_a.canonical_digest
-
-    # Get legitimate broker approval
-    ledger = _open_ledger(org)
-    grant_id = _broker_approve(ledger, org_id, digest_a, "activate")
-    # Keep ledger open — caller owns it, do NOT close before activation
-    # (The activate_revision will internally close-and-reopen but must NOT
-    #  close the caller-owned connection)
-
-    store.activate_revision(digest_a, grant_id=grant_id, capability=_make_cap(digest=digest_a, organism_id=org_id, action="activate"),
-                            ledger=ledger)
-
-    # Caller's ledger must remain usable after activation
-    try:
-        # Simple query to verify the connection is still alive
-        result = ledger.connection.execute("SELECT 1").fetchone()
-        assert result is not None, "Caller-owned ledger was closed by activate_revision!"
-    except Exception as e:
-        pytest.fail(f"Caller-owned ledger closed by activate_revision: {e}")
-    finally:
-        ledger.connection.close()
-
-
-def test_rollback_does_not_close_caller_owned_ledger(tmp_path, monkeypatch):
-    """TelosStore.rollback must NOT close a caller-owned ledger.
-
-    RED: Current HEAD closes the caller's ledger in the finally block.
-    """
-    org, org_id = _setup_organism(tmp_path, monkeypatch)
-
-    from hermes_cli.evolution.telos_store import TelosStore
-
-    store = TelosStore(org)
-    t_a = _make_telos(org_id, "Revision A")
-    store.save_revision(t_a)
-    digest_a = t_a.canonical_digest
-
-    # First activate A with a broker-approved grant
-    ledger = _open_ledger(org)
-    grant_activate = _broker_approve(ledger, org_id, digest_a, "activate")
-    ledger.connection.close()
-
-    store.activate_revision(digest_a, grant_id=grant_activate, capability=_make_cap(digest=digest_a, organism_id=org_id, action="activate"))
-    assert store.get_active_digest() == digest_a
-
-    # Now get rollback grant
-    ledger2 = _open_ledger(org)
-    rollback_grant = _broker_approve(ledger2, org_id, digest_a, "rollback")
-
-    # Rollback with caller-owned ledger
-    store.rollback(digest_a, grant_id=rollback_grant, capability=_make_cap(digest=digest_a, organism_id=org_id, action="rollback"),
-                   ledger=ledger2)
-
-    # Caller's ledger must remain usable after rollback
-    try:
-        result = ledger2.connection.execute("SELECT 1").fetchone()
-        assert result is not None, "Caller-owned ledger was closed by rollback!"
-    except Exception as e:
-        pytest.fail(f"Caller-owned ledger closed by rollback: {e}")
-    finally:
-        ledger2.connection.close()

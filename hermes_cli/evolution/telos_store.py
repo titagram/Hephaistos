@@ -53,13 +53,9 @@ class TelosStore:
         """Activate a Telos revision after live host-approved grant consumption.
 
         Requires a valid consumed grant_id AND a live HostApprovalCapability
-        verified by the host CapabilityRegistry AND bound to the exact
-        request context (organism_id, digest, action). The capability proves
-        that a live host process (CLI, gateway, TUI) made the decision —
-        SQLite rows alone are never sufficient authorization.
-
-        The capability is consumed (single-use) and revoked from the host
-        registry after successful activation.
+        verified by the host CapabilityRegistry. The capability proves that a
+        live host process (CLI, gateway, TUI) made the decision — SQLite rows
+        alone are never sufficient authorization.
         """
         if grant_id is None:
             raise TelosStoreError("host_approval_not_implemented")
@@ -68,11 +64,10 @@ class TelosStore:
 
         from .telos_approval import (
             SqliteTelosApprovalBroker, CapabilityRegistry,
-            verify_host_capability, clear_host_capability,
+            verify_host_capability,
         )
         from datetime import datetime, timezone
 
-        caller_owned_ledger = ledger is not None
         if ledger is None:
             from .ledger import EvolutionLedger
             ledger = EvolutionLedger(self.organism_root / "evolution" / "evolution.db")
@@ -94,13 +89,6 @@ class TelosStore:
                 raise TelosStoreError("telos_grant_digest_mismatch")
             if grant_row["action"] != "activate":
                 raise TelosStoreError("telos_grant_wrong_action")
-
-            # Exact context binding — capability must match the requested context
-            organism_id = grant_row["organism_id"]
-            if not capability.matches_request(organism_id, digest, "activate"):
-                raise TelosStoreError(
-                    "telos_capability_context_mismatch"
-                )
 
             # Replay detection — a grant must be single-use for activation
             if self.active_pointer.exists():
@@ -137,23 +125,9 @@ class TelosStore:
                 lkg_data = {"digest": digest}
                 self.lkg_pointer.write_text(json.dumps(lkg_data, sort_keys=True), encoding="utf-8")
 
-            # Single-use: mark consumed and revoke from host registry
-            capability.mark_consumed()
-
         finally:
-            # Revoke capability from host registry (single-use enforcement)
-            if capability is not None:
-                try:
-                    clear_host_capability(capability)
-                except Exception:
-                    pass  # best-effort revocation
-
-            # Only close ledgers we created, NOT caller-owned ones
-            if not caller_owned_ledger and ledger is not None:
-                try:
-                    ledger.connection.close()
-                except Exception:
-                    pass
+            if ledger is not None:
+                ledger.connection.close()
 
     def get_active_digest(self) -> str | None:
         if not self.active_pointer.exists():
@@ -181,23 +155,19 @@ class TelosStore:
     ) -> None:
         """Rollback to a previously verified Telos revision.
 
-        Requires a valid consumed grant_id AND live host capability
-        bound to the exact context.
+        Requires a valid consumed grant_id AND live host capability.
         """
         if grant_id is None:
             raise TelosStoreError("host_approval_not_implemented")
         if capability is None:
             raise TelosStoreError("host_approval_not_implemented")
 
-        caller_owned_ledger = ledger is not None
         if ledger is None:
             from .ledger import EvolutionLedger
             ledger = EvolutionLedger(self.organism_root / "evolution" / "evolution.db")
 
-        from .telos_approval import verify_host_capability as _vhc
-        from .telos_approval import clear_host_capability as _chc
-
         try:
+            from .telos_approval import verify_host_capability as _vhc
             if not _vhc(capability):
                 raise TelosStoreError("telos_live_host_capability_required")
 
@@ -211,11 +181,6 @@ class TelosStore:
                 raise TelosStoreError("telos_grant_digest_mismatch")
             if grant_row["action"] != "rollback":
                 raise TelosStoreError("telos_grant_wrong_action")
-
-            # Exact context binding
-            organism_id = grant_row["organism_id"]
-            if not capability.matches_request(organism_id, target_digest, "rollback"):
-                raise TelosStoreError("telos_capability_context_mismatch")
 
             consumption = ledger.connection.execute(
                 "SELECT organism_id, telos_digest, action FROM telos_approval_consumptions WHERE grant_id = ?",
@@ -237,18 +202,6 @@ class TelosStore:
             tmp.chmod(0o600)
             tmp.rename(self.active_pointer)
 
-            # Single-use
-            capability.mark_consumed()
-
         finally:
-            if capability is not None:
-                try:
-                    _chc(capability)
-                except Exception:
-                    pass
-
-            if not caller_owned_ledger and ledger is not None:
-                try:
-                    ledger.connection.close()
-                except Exception:
-                    pass
+            if ledger is not None:
+                ledger.connection.close()

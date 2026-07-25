@@ -23,14 +23,12 @@ def _setup_organism(tmp_path, monkeypatch):
     return org, ledger, gen.generation_id
 
 
-def _make_cap(surface="cli", organism_id=None, digest=None, action=None):
-    """Create a host capability, bind it, and register it in the host registry."""
+def _make_cap(surface="cli"):
+    """Create a host capability and register it in the host registry."""
     from hermes_cli.evolution.telos_approval import (
         HostApprovalCapability, set_host_capability,
     )
     cap = HostApprovalCapability._test_create(surface, "test_actor")
-    if organism_id is not None and digest is not None and action is not None:
-        cap.bind_to_request(organism_id, digest, action)
     set_host_capability(cap)
     return cap
 
