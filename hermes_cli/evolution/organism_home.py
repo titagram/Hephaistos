@@ -15,29 +15,26 @@ class OrganismHomeError(RuntimeError):
 def resolve_organism_root(root: Path | None = None) -> Path:
     """Resolve the organism root path, rejecting symlinks and non-directories.
 
-    Walks up from the target path checking each ancestor with lstat().
-    Rejects symlinks at any level. Rejects non-directory at the target.
-    Stops at the first non-existing ancestor (directories will be created
-    by ensure_organism_directories). Never creates directories.
+    Walks from the filesystem root down toward the target, lstat() each
+    component. Rejects symlinks, non-directories, and unsafe modes at
+    every existing component. Non-existing components are accepted (will be
+    created by ensure_organism_directories). Never creates directories.
     """
     raw = (root or get_organism_home()).absolute()
-    check: Path = raw
-    while True:
+    walked = Path(raw.parts[0])
+    for part in raw.parts[1:]:
+        candidate = walked / part
         try:
-            st = check.lstat()
+            st = candidate.lstat()
         except FileNotFoundError:
-            # Ancestor does not exist yet — stop checking further up
-            break
+            return raw
         except OSError:
             raise OrganismHomeError("observer_database_unsafe") from None
         if stat_module.S_ISLNK(st.st_mode):
             raise OrganismHomeError("observer_database_unsafe") from None
-        if check == raw and not stat_module.S_ISDIR(st.st_mode):
+        if not stat_module.S_ISDIR(st.st_mode):
             raise OrganismHomeError("observer_database_unsafe") from None
-        parent = check.parent
-        if parent == check:
-            break  # reached filesystem root
-        check = parent
+        walked = candidate
     return raw
 
 
@@ -65,10 +62,20 @@ def ensure_organism_directories(root: Path | None = None) -> Path:
     ]
 
     for sub in subdirs:
-        d = organism_root / sub
-        d.mkdir(mode=0o700, parents=True, exist_ok=True)
+        subpath = organism_root / sub
+        # Reject symlinks at any subdirectory
+        if subpath.exists():
+            try:
+                st = subpath.lstat()
+                if stat_module.S_ISLNK(st.st_mode):
+                    raise OrganismHomeError("observer_database_unsafe") from None
+            except FileNotFoundError:
+                pass
+            except OSError:
+                raise OrganismHomeError("observer_database_unsafe") from None
+        subpath.mkdir(mode=0o700, exist_ok=True)
         try:
-            os.chmod(d, 0o700)
+            os.chmod(subpath, 0o700)
         except OSError:
             pass
 
