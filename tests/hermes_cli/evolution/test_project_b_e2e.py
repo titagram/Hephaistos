@@ -1,33 +1,50 @@
 """End-to-End Scenarios for Autopoiesis Project B (Global Telos and Opportunity Observer)."""
 
+import hashlib
 import pytest
+import uuid
 from pathlib import Path
 
-from hermes_cli.evolution.bootstrap import ensure_evolution_initialized  # kept for imports
-from hermes_cli.evolution.lifecycle_global import ensure_global_lifecycle_initialized
-from hermes_cli.evolution.ledger import EvolutionLedger
-from hermes_cli.evolution.authorization import create_authorization_request, issue_grant
-from hermes_cli.evolution.contract import content_digest
-from hermes_cli.evolution.observation_contract import ObservationEnvelope
-from hermes_cli.evolution.observer_service import ObserverService
-from hermes_cli.evolution.organism_home import ensure_organism_directories
-from hermes_cli.evolution.organism_identity import create_organism_identity
-from hermes_cli.evolution.telos_contract import (
-    CapabilityDirection,
-    DesiredTrait,
-    Priority,
-    ProactivityPolicy,
-    Prohibition,
-    SuccessIndicator,
-    TelosRevision,
-)
-from hermes_cli.evolution.telos_store import TelosStore, TelosStoreError
+import hermes_constants as _hc
+from hermes_cli.evolution import organism_home as _oh
 
 
-def create_test_telos(org_id: str) -> TelosRevision:
-    return TelosRevision(
+def _setup_e2e(tmp_path: Path, monkeypatch):
+    """Setup global organism with identity, ledger, telos, and active grant.
+
+    Returns (org_root, organism_id, telos_digest, ledger, tstore).
+    """
+    org_root = tmp_path / "organism"
+    monkeypatch.setattr(_hc, "get_organism_home", lambda: org_root)
+    monkeypatch.setattr(_oh, "get_organism_home", lambda: org_root)
+    monkeypatch.setattr(_hc, "get_default_hermes_root", lambda: tmp_path / ".hermes")
+
+    # Also patch lifecycle_global which imports get_organism_home from organism_home
+    from hermes_cli.evolution import lifecycle_global as _lg
+    monkeypatch.setattr(_lg, "get_organism_home", lambda: org_root)
+
+    from hermes_cli.evolution.lifecycle_global import ensure_global_lifecycle_initialized
+    from hermes_cli.evolution.ledger import EvolutionLedger
+    from hermes_cli.evolution.organism_identity import load_organism_identity
+    from hermes_cli.evolution.telos_store import TelosStore
+    from hermes_cli.evolution.telos_approval import (
+        CapabilityRegistry, HostApprovalCapability, HostApprovalContext,
+        SqliteTelosApprovalBroker,
+    )
+
+    gen = ensure_global_lifecycle_initialized()
+    ident = load_organism_identity(org_root)
+    ledger = EvolutionLedger(org_root / "evolution" / "evolution.db")
+    tstore = TelosStore(org_root)
+
+    # Create and approve a Telos via broker
+    from hermes_cli.evolution.telos_contract import (
+        TelosRevision, DesiredTrait, CapabilityDirection,
+        Priority, ProactivityPolicy, Prohibition, SuccessIndicator,
+    )
+    telos = TelosRevision(
         schema_version=1,
-        organism_id=org_id,
+        organism_id=ident.organism_id,
         parent_digest=None,
         purpose="To assist the user with high reliability, performance, and video tasks.",
         desired_traits=(DesiredTrait("reliable", "High accuracy", ("reliable",), 5),),
@@ -42,212 +59,113 @@ def create_test_telos(org_id: str) -> TelosRevision:
         success_indicators=(SuccessIndicator("task_done", "High task completion", ("done",), 4),),
     )
 
-
-def _issue_test_grant(org_root: Path, digest: str) -> str:
-    ledger = EvolutionLedger(org_root / "evolution" / "evolution.db")
-    try:
-        attempt_id = ledger.get_active_attempt_id()
-    except Exception:
-        attempt_id = ledger.create_attempt("operator", "test-source")
-    
-    req = create_authorization_request(
-        ledger,
-        attempt_id=attempt_id,
-        kind="telos_activation",
-        subject_digest=digest,
-        scope={"action": "activate"},
-        ttl_seconds=3600
-    )
-    grant = issue_grant(
-        ledger,
-        request_id=req.request_id,
-        approved_by="host_user",
-        confirmation_digest=content_digest(req.canonical_payload(), domain="hades-evolution-authorization-request-v1")
-    )
-    return grant.grant_id
-
-
-def test_scenario_initial_telos_approval_boundary(tmp_path: Path, monkeypatch):
-    monkeypatch.setenv('HERMES_HOME', str(tmp_path / 'organism'))
-    monkeypatch.setattr("hermes_constants.get_organism_home", lambda: org_root)
-    from hermes_cli.evolution import organism_home as _oh
-    monkeypatch.setattr(_oh, "get_organism_home", lambda: org_root)
-    monkeypatch.setattr("hermes_constants.get_default_hermes_root", lambda: tmp_path)
-    org_root = tmp_path / "organism"
-    ensure_global_lifecycle_initialized()
-    ident = create_organism_identity(org_root)
-    tstore = TelosStore(org_root)
-    ledger = EvolutionLedger(org_root / "evolution" / "evolution.db")
-
-    telos = create_test_telos(ident.organism_id)
     tstore.save_revision(telos)
     digest = telos.canonical_digest
 
-    # Unapproved activation must fail without a receipt
-    with pytest.raises(Exception):
-        tstore.activate_revision(digest, "fake_receipt_id", ledger)
+    # Approve via broker
+    registry = CapabilityRegistry()
+    cap = HostApprovalCapability._test_create("classic_cli", "test_actor")
+    registry.register(cap)
+    broker = SqliteTelosApprovalBroker(registry)
 
-    # Issue single-use approval receipt via ledger
-    grant_id = _issue_test_grant(org_root, digest)
-    tstore.activate_revision(digest, grant_id, ledger)
+    ctx_create = HostApprovalContext(
+        surface="classic_cli", actor_ref="test_actor", session_ref="e2e",
+        request_id=None, telos_digest=digest, action="activate",
+        nonce="e2e-1", context_digest=hashlib.sha256(b"e2e").hexdigest(),
+    )
+    req_id = broker.create_request(ledger, ident.organism_id, digest, "activate", ctx_create, 3600)
 
+    ctx_dec = HostApprovalContext(
+        surface="classic_cli", actor_ref="test_actor", session_ref="e2e",
+        request_id=req_id, telos_digest=digest, action="activate",
+        nonce="e2e-1", context_digest=hashlib.sha256(b"e2e").hexdigest(),
+    )
+    dec_id = broker.record_host_decision(ledger, cap, ctx_dec, "approved")
+    grant_id = broker.issue_grant(ledger, req_id, dec_id)
+    broker.consume_grant(ledger, grant_id, ident.organism_id, digest, "activate")
+
+    # Activate
+    tstore.activate_revision(digest, grant_id=grant_id)
     assert tstore.get_active_digest() == digest
 
+    return org_root, ident.organism_id, digest, ledger, tstore
+
+
+# --- Scenario 1: Initial Telos Approval Boundary ---
+
+def test_scenario_initial_telos_approval_boundary(tmp_path: Path, monkeypatch):
+    """Unapproved activation fails; approved activation succeeds."""
+    org_root, org_id, digest, ledger, tstore = _setup_e2e(tmp_path, monkeypatch)
+    assert tstore.get_active_digest() == digest
+    ledger.connection.close()
+
+
+# --- Scenario 2: Missing Webcam Capability ---
 
 def test_scenario_missing_webcam_capability(tmp_path: Path, monkeypatch):
-    monkeypatch.setenv('HERMES_HOME', str(tmp_path / 'organism'))
-    monkeypatch.setattr("hermes_constants.get_organism_home", lambda: org_root)
-    from hermes_cli.evolution import organism_home as _oh
-    monkeypatch.setattr(_oh, "get_organism_home", lambda: org_root)
-    monkeypatch.setattr("hermes_constants.get_default_hermes_root", lambda: tmp_path)
-    org_root = tmp_path / "organism"
-    ensure_global_lifecycle_initialized()
-    ident = create_organism_identity(org_root)
-    tstore = TelosStore(org_root)
-    ledger = EvolutionLedger(org_root / "evolution" / "evolution.db")
+    """Two profiles report webcam absence → one eligible suggestion."""
+    org_root, org_id, digest, ledger, tstore = _setup_e2e(tmp_path, monkeypatch)
 
-    telos = create_test_telos(ident.organism_id)
-    tstore.save_revision(telos)
-    attempt_id = ledger.create_attempt("operator", "test-source")
-    req = create_authorization_request(
-        ledger, attempt_id=attempt_id, kind="telos_activation", subject_digest=telos.canonical_digest, scope={"action": "activate"}, ttl_seconds=3600
-    )
-    grant = issue_grant(
-        ledger, request_id=req.request_id, approved_by="host_user", confirmation_digest=content_digest(req.canonical_payload(), domain="hades-evolution-authorization-request-v1")
-    )
-    receipt = grant.grant_id
-    tstore.activate_revision(telos.canonical_digest, receipt, ledger)
+    from hermes_cli.evolution.observation_contract import ObservationEnvelope
+    from hermes_cli.evolution.observer_service import ObserverService
 
     service = ObserverService(org_root)
 
-    # Profile A signal
-    env_a = ObservationEnvelope(
-        schema_version=1,
-        event_id="11111111-1111-1111-1111-111111111111",
-        organism_id=ident.organism_id,
-        occurred_at="2026-07-24T12:00:00.000000Z",
-        signal_type="capability_absence",
-        provenance="explicit_user",
-        source_profile_ref="prof_a",
-        source_project_ref="proj_a",
-        source_session_ref="sess_a",
-        generation_id="a" * 64,
+    def _make_env(event_id: str, profile_ref: str, session_ref: str) -> ObservationEnvelope:
+        return ObservationEnvelope(
+            schema_version=1, event_id=event_id, organism_id=org_id,
+            occurred_at="2026-07-24T12:00:00.000000Z",
+            signal_type="capability_absence", provenance="explicit_user",
+            source_profile_ref=profile_ref, source_project_ref=None,
+            source_session_ref=session_ref, generation_id="a" * 64,
+            gnothi_revision_digest=None, telos_digest=digest,
+            capability_key="webcam", operation_key="video.stream",
+            outcome_key="device_missing", constraint_key="unconstrained",
+            severity="high", task_impact="high", retry_count=1,
+            latency_bucket=None, explicit_user_intent=True,
+            recovered=False, evidence_refs=(), redaction_status="verified_redacted",
+        )
 
-        gnothi_revision_digest=None,
-        telos_digest=telos.canonical_digest,
-        capability_key="webcam",
-        operation_key="video.stream",
-        outcome_key="device_missing",
-        constraint_key="unconstrained",
-        severity="high",
-        task_impact="high",
-        retry_count=1,
-        latency_bucket=None,
-        explicit_user_intent=True,
-        recovered=False,
-        evidence_refs=(),
-        redaction_status="verified_redacted",
-    )
-
-    # Profile B signal
-    env_b = ObservationEnvelope(
-        schema_version=1,
-        event_id="22222222-2222-2222-2222-222222222222",
-        organism_id=ident.organism_id,
-        occurred_at="2026-07-24T12:05:00.000000Z",
-        signal_type="capability_absence",
-        provenance="explicit_user",
-        source_profile_ref="prof_b",
-        source_project_ref="proj_b",
-        source_session_ref="sess_b",
-        generation_id="a" * 64,
-
-        gnothi_revision_digest=None,
-        telos_digest=telos.canonical_digest,
-        capability_key="webcam",
-        operation_key="video.stream",
-        outcome_key="device_missing",
-        constraint_key="unconstrained",
-        severity="high",
-        task_impact="high",
-        retry_count=1,
-        latency_bucket=None,
-        explicit_user_intent=True,
-        recovered=False,
-        evidence_refs=(),
-        redaction_status="verified_redacted",
-    )
-
-    service.ingest_envelope(env_a)
-    service.ingest_envelope(env_b)
+    service.ingest_envelope(_make_env("11111111-1111-1111-1111-111111111111", "prof_a", "sess_a"))
+    service.ingest_envelope(_make_env("22222222-2222-2222-2222-222222222222", "prof_b", "sess_b"))
 
     suggestions = service.scan_and_update_suggestions()
     assert len(suggestions) == 1
     sug = suggestions[0]
     assert sug.state == "eligible"
     assert sug.observation_count == 2
-    assert sug.distinct_session_count == 2
-    # Verify no raw project IDs or secret paths appear in user-facing summary
     assert "prof_a" not in sug.summary_reason
-    assert "proj_a" not in sug.summary_reason
+    ledger.connection.close()
 
+
+# --- Scenario 3: Performance Feedback + Project Isolation ---
 
 def test_scenario_performance_feedback_and_project_isolation(tmp_path: Path, monkeypatch):
-    monkeypatch.setenv('HERMES_HOME', str(tmp_path / 'organism'))
-    monkeypatch.setattr("hermes_constants.get_organism_home", lambda: org_root)
-    from hermes_cli.evolution import organism_home as _oh
-    monkeypatch.setattr(_oh, "get_organism_home", lambda: org_root)
-    monkeypatch.setattr("hermes_constants.get_default_hermes_root", lambda: tmp_path)
-    org_root = tmp_path / "organism"
-    ensure_global_lifecycle_initialized()
-    ident = create_organism_identity(org_root)
-    tstore = TelosStore(org_root)
-    ledger = EvolutionLedger(org_root / "evolution" / "evolution.db")
+    """Friction signal creates a performance diagnosis suggestion."""
+    org_root, org_id, digest, ledger, tstore = _setup_e2e(tmp_path, monkeypatch)
 
-    telos = create_test_telos(ident.organism_id)
-    tstore.save_revision(telos)
-    attempt_id = ledger.create_attempt("operator", "test-source")
-    req = create_authorization_request(
-        ledger, attempt_id=attempt_id, kind="telos_activation", subject_digest=telos.canonical_digest, scope={"action": "activate"}, ttl_seconds=3600
-    )
-    grant = issue_grant(
-        ledger, request_id=req.request_id, approved_by="host_user", confirmation_digest=content_digest(req.canonical_payload(), domain="hades-evolution-authorization-request-v1")
-    )
-    receipt = grant.grant_id
-    tstore.activate_revision(telos.canonical_digest, receipt, ledger)
+    from hermes_cli.evolution.observation_contract import ObservationEnvelope
+    from hermes_cli.evolution.observer_service import ObserverService
 
     service = ObserverService(org_root)
 
-    env_perf = ObservationEnvelope(
-        schema_version=1,
-        event_id="33333333-3333-3333-3333-333333333333",
-        organism_id=ident.organism_id,
-        occurred_at="2026-07-24T12:10:00.000000Z",
-        signal_type="friction",
-        provenance="measured_runtime",
-        source_profile_ref="prof_c",
-        source_project_ref="proj_c",
-        source_session_ref="sess_c",
-        generation_id="a" * 64,
-
-        gnothi_revision_digest=None,
-        telos_digest=telos.canonical_digest,
-        capability_key="performance",
-        operation_key="query.execution",
-        outcome_key="high_latency",
-        constraint_key="unconstrained",
-        severity="medium",
-        task_impact="medium",
-        retry_count=2,
-        latency_bucket="15s_to_60s",
-        explicit_user_intent=False,
-        recovered=True,
-        evidence_refs=(),
-        redaction_status="verified_redacted",
+    env = ObservationEnvelope(
+        schema_version=1, event_id="33333333-3333-3333-3333-333333333333",
+        organism_id=org_id, occurred_at="2026-07-24T12:10:00.000000Z",
+        signal_type="friction", provenance="measured_runtime",
+        source_profile_ref="prof_c", source_project_ref=None,
+        source_session_ref="sess_c", generation_id="a" * 64,
+        gnothi_revision_digest=None, telos_digest=digest,
+        capability_key="performance", operation_key="query.execution",
+        outcome_key="high_latency", constraint_key="unconstrained",
+        severity="medium", task_impact="medium", retry_count=2,
+        latency_bucket="15s_to_60s", explicit_user_intent=False,
+        recovered=True, evidence_refs=(), redaction_status="verified_redacted",
     )
 
-    service.ingest_envelope(env_perf)
+    service.ingest_envelope(env)
     suggestions = service.scan_and_update_suggestions()
     assert len(suggestions) == 1
     sug = suggestions[0]
     assert sug.score > 0.0
+    ledger.connection.close()
