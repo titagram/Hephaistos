@@ -331,5 +331,3 @@ def _suggestions_list(org_root: Any = None) -> dict[str, Any]:
         return {"schema_version": 1, "action": "suggestions", "count": len(items), "items": items}
     except Exception:
         return {"schema_version": 1, "action": "suggestions", "error": "ledger_error", "items": []}
-
-
