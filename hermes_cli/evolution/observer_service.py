@@ -23,23 +23,50 @@ class ObserverService:
     def __init__(self, organism_root: Path | None = None, max_consecutive_errors: int = 5) -> None:
         self.organism_root = ensure_organism_directories(organism_root)
         self.db_path = self.organism_root / "evolution" / "evolution.db"
-        self.repository = SuggestionRepository(self.db_path)
-        self.telos_store = TelosStore(self.organism_root)
         self.max_consecutive_errors = max_consecutive_errors
         self.state_file = self.organism_root / "observer_state.json"
         self.consecutive_errors = 0
         self.circuit_open = False
+        self.degraded_reason: str | None = None
+        self._repository: SuggestionRepository | None = None
+        self._telos_store: TelosStore | None = None
         self._load_state()
 
+    @property
+    def repository(self) -> SuggestionRepository:
+        if self._repository is None:
+            self._repository = SuggestionRepository(self.db_path)
+        return self._repository
+
+    @property
+    def telos_store(self) -> TelosStore:
+        if self._telos_store is None:
+            self._telos_store = TelosStore(self.organism_root)
+        return self._telos_store
+
     def _load_state(self) -> None:
+        import stat as _stat
         if not self.state_file.is_file():
+            return
+        # Reject symlink
+        try:
+            st = self.state_file.lstat()
+        except OSError:
+            self.circuit_open = True
+            self.degraded_reason = "observer_state_unreachable"
+            return
+        if _stat.S_ISLNK(st.st_mode):
+            self.circuit_open = True
+            self.degraded_reason = "observer_state_symlink_rejected"
             return
         try:
             data = json.loads(self.state_file.read_text(encoding="utf-8"))
             self.consecutive_errors = int(data.get("consecutive_errors", 0))
             self.circuit_open = bool(data.get("circuit_open", False))
-        except Exception as e:
-            logger.warning(f"Failed to load observer state: {e}")
+        except (json.JSONDecodeError, ValueError, KeyError):
+            # Malformed state — preserve file, fail closed
+            self.circuit_open = True
+            self.degraded_reason = "observer_state_corrupted"
 
     def _save_state(self) -> None:
         try:

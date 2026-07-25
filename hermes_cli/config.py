@@ -3059,6 +3059,24 @@ DEFAULT_CONFIG = {
         "disable_gpu": "auto",
     },
 
+    # ------------------------------------------------------------------
+    # Autopoiesis (global organism, observer, Telos)
+    # ------------------------------------------------------------------
+    "autopoiesis": {
+        "enabled": False,
+        "observer": {
+            "enabled": True,
+            "scan_interval_seconds": 300,
+            "notice_min_score": 0.65,
+            "max_events_per_scan": 1000,
+        },
+        "evidence": {
+            "retention_days": 30,
+        },
+        "telos": {
+            "require_interactive_approval": True,
+        },
+    },
 
     # Config schema version - bump this when adding new required fields
     "_config_version": 32,
