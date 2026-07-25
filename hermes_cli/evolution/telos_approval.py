@@ -87,16 +87,30 @@ class HostApprovalCapability:
     """An in-process, non-serializable token proving host origin.
 
     Created only by the host adapter factory (no public constructor).
-    Verified by identity (Python ``is``) against the active registry.
+    Verified by identity (Python ``is``) against the active registry AND
+    by exact context binding — the capability must match the requested
+    organism_id, digest, action, surface, and actor_ref.
+
     Never written to disk, DB, or transmitted to the model.
+
+    Single-use: consumed (revoked from registry) after one successful
+    Telos transition.
     """
 
-    __slots__ = ("_token", "_surface", "_actor_ref")
+    __slots__ = (
+        "_token", "_surface", "_actor_ref",
+        "_organism_id", "_digest", "_action",
+        "_consumed",
+    )
 
     def __init__(self, surface: str, actor_ref: str) -> None:
         self._token = secrets.token_urlsafe(32)
         self._surface = surface
         self._actor_ref = actor_ref
+        self._organism_id: str | None = None
+        self._digest: str | None = None
+        self._action: str | None = None
+        self._consumed: bool = False
 
     @classmethod
     def _test_create(cls, surface: str, actor_ref: str) -> HostApprovalCapability:
@@ -105,6 +119,55 @@ class HostApprovalCapability:
         NOT available in production — host adapters use their own internal factory.
         """
         return cls(surface, actor_ref)
+
+    def bind_to_request(
+        self,
+        organism_id: str,
+        digest: str,
+        action: str,
+    ) -> None:
+        """Bind this capability to a specific Telos request context.
+
+        Must be called by the host surface before activation/rollback.
+        Once bound, the capability can only authorize the exact context.
+        """
+        self._organism_id = organism_id
+        self._digest = digest
+        self._action = action
+
+    def matches_request(
+        self,
+        organism_id: str,
+        digest: str,
+        action: str,
+    ) -> bool:
+        """Check if this capability is bound to and matches the given context."""
+        if self._consumed:
+            return False
+        if self._organism_id is None:
+            # Legacy capability without binding — reject for safety
+            return False
+        return (
+            self._organism_id == organism_id
+            and self._digest == digest
+            and self._action == action
+        )
+
+    def mark_consumed(self) -> None:
+        """Mark this capability as consumed (single-use enforcement)."""
+        self._consumed = True
+
+    @property
+    def consumed(self) -> bool:
+        return self._consumed
+
+    @property
+    def surface(self) -> str:
+        return self._surface
+
+    @property
+    def actor_ref(self) -> str:
+        return self._actor_ref
 
     def __eq__(self, other: object) -> bool:
         """Identity-based equality — value equality is not supported."""

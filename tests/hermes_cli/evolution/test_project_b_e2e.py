@@ -81,12 +81,14 @@ def _broker_activate(ledger, org_id, digest, action="activate"):
     broker.consume_grant(ledger, grant_id, org_id, digest, action)
     return grant_id
 
-def _make_cap(surface="cli"):
-    """Create a host capability and register it in the host registry."""
+def _make_cap(surface="cli", organism_id=None, digest=None, action=None):
+    """Create a host capability, bind it, and register it in the host registry."""
     from hermes_cli.evolution.telos_approval import (
         HostApprovalCapability, set_host_capability,
     )
     cap = HostApprovalCapability._test_create(surface, "test_actor")
+    if organism_id is not None and digest is not None and action is not None:
+        cap.bind_to_request(organism_id, digest, action)
     set_host_capability(cap)
     return cap
 
@@ -133,13 +135,13 @@ def test_scenario_initial_telos_approval_boundary(tmp_path, monkeypatch):
     grant_id = _broker_activate(ledger, org_id, digest, "activate")
 
     # 5. activation succeeds
-    tstore.activate_revision(digest, grant_id=grant_id, capability=_make_cap())
+    tstore.activate_revision(digest, grant_id=grant_id, capability=_make_cap(digest=digest, organism_id=org_id, action="activate"))
     assert tstore.get_active_digest() == digest
 
     # 6. replay fails — close ledger first (activate_revision opens its own)
     ledger.connection.close()
     with pytest.raises(TelosStoreError, match="already_used"):
-        tstore.activate_revision(digest, grant_id=grant_id, capability=_make_cap())
+        tstore.activate_revision(digest, grant_id=grant_id, capability=_make_cap(digest=digest, organism_id=org_id, action="activate"))
 
     ledger.connection.close()
 
@@ -154,7 +156,7 @@ def test_scenario_missing_webcam_capability(tmp_path, monkeypatch):
 
     # Activate via host approval
     grant_id = _broker_activate(ledger, org_id, digest, "activate")
-    tstore.activate_revision(digest, grant_id=grant_id, capability=_make_cap())
+    tstore.activate_revision(digest, grant_id=grant_id, capability=_make_cap(digest=digest, organism_id=org_id, action="activate"))
 
     from hermes_cli.evolution.observation_contract import ObservationEnvelope
     from hermes_cli.evolution.observer_service import ObserverService
@@ -194,7 +196,7 @@ def test_scenario_performance_feedback_and_project_isolation(tmp_path, monkeypat
     telos = _save_telos(tstore, org_id, "Perf Telos")
     digest = telos.canonical_digest
     grant_id = _broker_activate(ledger, org_id, digest, "activate")
-    tstore.activate_revision(digest, grant_id=grant_id, capability=_make_cap())
+    tstore.activate_revision(digest, grant_id=grant_id, capability=_make_cap(digest=digest, organism_id=org_id, action="activate"))
 
     from hermes_cli.evolution.observation_contract import ObservationEnvelope
     from hermes_cli.evolution.observer_service import ObserverService
@@ -240,7 +242,7 @@ def test_project_isolation_two_profiles_one_organism(tmp_path, monkeypatch):
     telos = _save_telos(tstore, org_id, "Project Isolation Telos")
     digest = telos.canonical_digest
     grant_id = _broker_activate(ledger, org_id, digest, "activate")
-    tstore.activate_revision(digest, grant_id=grant_id, capability=_make_cap())
+    tstore.activate_revision(digest, grant_id=grant_id, capability=_make_cap(digest=digest, organism_id=org_id, action="activate"))
 
     # Two distinct profiles with separate workspace roots
     profile_a = tmp_path / "profile_a"

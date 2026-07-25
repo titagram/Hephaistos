@@ -3907,6 +3907,10 @@ class GatewaySlashCommandsMixin:
 
         Separate from dangerous-command approval. Uses the process-owned
         CapabilityRegistry to verify host-origin approval.
+
+        Records a host decision, issues a grant, and consumes it to prepare
+        for later activation by TelosStore. The capability is bound to the
+        exact request context and revoked after use.
         """
         source = event.source
         if not args:
@@ -3931,6 +3935,18 @@ class GatewaySlashCommandsMixin:
 
             ledger = EvolutionLedger(ledger_path)
             try:
+                # Look up the pending request to get context
+                req_row = ledger.connection.execute(
+                    "SELECT organism_id, telos_digest, action FROM telos_approval_requests WHERE request_id = ?",
+                    (request_id,),
+                ).fetchone()
+                if req_row is None:
+                    return f"Telos: request {request_id} not found."
+
+                organism_id = req_row["organism_id"]
+                digest = req_row["telos_digest"]
+                action = req_row["action"]
+
                 # Gateway process uses its own CapabilityRegistry
                 if not hasattr(self, "_telos_registry"):
                     self._telos_registry = CapabilityRegistry()
@@ -3945,8 +3961,8 @@ class GatewaySlashCommandsMixin:
                     actor_ref=f"{source.platform}:{source.user_id}",
                     session_ref=self._session_key_for_source(source),
                     request_id=request_id,
-                    telos_digest="",  # Will be matched by request_id lookup
-                    action="activate",
+                    telos_digest=digest,
+                    action=action,
                     nonce=request_id[:8],
                     context_digest=f"gateway:{source.platform}:{source.chat_id}",
                 )
