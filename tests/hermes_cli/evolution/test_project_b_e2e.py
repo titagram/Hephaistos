@@ -3,7 +3,8 @@
 import pytest
 from pathlib import Path
 
-from hermes_cli.evolution.bootstrap import ensure_evolution_initialized
+from hermes_cli.evolution.bootstrap import ensure_evolution_initialized  # kept for imports
+from hermes_cli.evolution.lifecycle_global import ensure_global_lifecycle_initialized
 from hermes_cli.evolution.ledger import EvolutionLedger
 from hermes_cli.evolution.authorization import create_authorization_request, issue_grant
 from hermes_cli.evolution.contract import content_digest
@@ -68,8 +69,12 @@ def _issue_test_grant(org_root: Path, digest: str) -> str:
 
 def test_scenario_initial_telos_approval_boundary(tmp_path: Path, monkeypatch):
     monkeypatch.setenv('HERMES_HOME', str(tmp_path / 'organism'))
+    monkeypatch.setattr("hermes_constants.get_organism_home", lambda: org_root)
+    from hermes_cli.evolution import organism_home as _oh
+    monkeypatch.setattr(_oh, "get_organism_home", lambda: org_root)
+    monkeypatch.setattr("hermes_constants.get_default_hermes_root", lambda: tmp_path)
     org_root = tmp_path / "organism"
-    ensure_evolution_initialized(global_root=org_root)
+    ensure_global_lifecycle_initialized()
     ident = create_organism_identity(org_root)
     tstore = TelosStore(org_root)
     ledger = EvolutionLedger(org_root / "evolution" / "evolution.db")
@@ -91,8 +96,12 @@ def test_scenario_initial_telos_approval_boundary(tmp_path: Path, monkeypatch):
 
 def test_scenario_missing_webcam_capability(tmp_path: Path, monkeypatch):
     monkeypatch.setenv('HERMES_HOME', str(tmp_path / 'organism'))
+    monkeypatch.setattr("hermes_constants.get_organism_home", lambda: org_root)
+    from hermes_cli.evolution import organism_home as _oh
+    monkeypatch.setattr(_oh, "get_organism_home", lambda: org_root)
+    monkeypatch.setattr("hermes_constants.get_default_hermes_root", lambda: tmp_path)
     org_root = tmp_path / "organism"
-    ensure_evolution_initialized(global_root=org_root)
+    ensure_global_lifecycle_initialized()
     ident = create_organism_identity(org_root)
     tstore = TelosStore(org_root)
     ledger = EvolutionLedger(org_root / "evolution" / "evolution.db")
@@ -185,8 +194,12 @@ def test_scenario_missing_webcam_capability(tmp_path: Path, monkeypatch):
 
 def test_scenario_performance_feedback_and_project_isolation(tmp_path: Path, monkeypatch):
     monkeypatch.setenv('HERMES_HOME', str(tmp_path / 'organism'))
+    monkeypatch.setattr("hermes_constants.get_organism_home", lambda: org_root)
+    from hermes_cli.evolution import organism_home as _oh
+    monkeypatch.setattr(_oh, "get_organism_home", lambda: org_root)
+    monkeypatch.setattr("hermes_constants.get_default_hermes_root", lambda: tmp_path)
     org_root = tmp_path / "organism"
-    ensure_evolution_initialized(global_root=org_root)
+    ensure_global_lifecycle_initialized()
     ident = create_organism_identity(org_root)
     tstore = TelosStore(org_root)
     ledger = EvolutionLedger(org_root / "evolution" / "evolution.db")

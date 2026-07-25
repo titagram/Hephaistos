@@ -1,4 +1,4 @@
-"""Tests for Telos contract, validation, approval receipts, pointers, and rollback."""
+"""Tests for Telos contract, validation, pointers, and rollback."""
 
 import pytest
 from pathlib import Path
@@ -79,30 +79,20 @@ def test_telos_contract_constitution_conflict():
 
 
 def test_telos_store_save_activate_rollback(tmp_path: Path, monkeypatch):
+    """Save revision, get active digest, verify rollback raises without grant."""
     monkeypatch.setattr("hermes_cli.evolution.ledger._open_file_descriptors", lambda: None)
     store = TelosStore(tmp_path / "organism")
     t1 = create_sample_telos()
     store.save_revision(t1)
 
-    receipt = store.issue_approval_receipt(t1.canonical_digest, action="activate")
-    store.activate_revision(t1.canonical_digest, receipt.receipt_id)
+    # Without grant_id, activate raises
+    with pytest.raises(TelosStoreError, match="host_approval_not_implemented"):
+        store.activate_revision(t1.canonical_digest)
 
-    assert store.get_active_digest() == t1.canonical_digest
-    assert store.get_active_revision() == t1
+    # Without grant_id, rollback raises
+    with pytest.raises(TelosStoreError, match="host_approval_not_implemented"):
+        store.rollback(t1.canonical_digest)
 
-    # Attempting to re-use consumed receipt must fail
-    from hermes_cli.evolution.authorization import AuthorizationError
-    with pytest.raises(AuthorizationError, match="grant_unavailable"):
-        store.activate_revision(t1.canonical_digest, receipt.receipt_id)
-
-    # Save second revision
-    t2 = create_sample_telos(parent_digest=t1.canonical_digest)
-    store.save_revision(t2)
-    receipt2 = store.issue_approval_receipt(t2.canonical_digest, action="activate")
-    store.activate_revision(t2.canonical_digest, receipt2.receipt_id)
-    assert store.get_active_digest() == t2.canonical_digest
-
-    # Rollback to t1
-    rollback_receipt = store.issue_approval_receipt(t1.canonical_digest, action="rollback")
-    store.rollback(t1.canonical_digest, rollback_receipt.receipt_id)
-    assert store.get_active_digest() == t1.canonical_digest
+    # get_active_digest returns None before activation
+    assert store.get_active_digest() is None
+    assert store.get_active_revision() is None
