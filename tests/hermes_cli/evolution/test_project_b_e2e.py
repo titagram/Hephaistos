@@ -218,3 +218,68 @@ def test_scenario_performance_feedback_and_project_isolation(tmp_path, monkeypat
     assert len(suggestions) == 1
     assert suggestions[0].score > 0.0
     ledger.connection.close()
+
+
+# -- Pass J: Project Isolation --
+
+def test_project_isolation_two_profiles_one_organism(tmp_path, monkeypatch):
+    """Two profiles share one organism. Raw logs separate. Suggestion deduplicates.
+    No profile/project/session identity leaks into summary."""
+    import hermes_constants as _hc
+    from hermes_cli.evolution import organism_home as _oh
+
+    # Shared organism root
+    org = tmp_path / "organism"
+    monkeypatch.setattr(_hc, "get_organism_home", lambda: org)
+    monkeypatch.setattr(_oh, "get_organism_home", lambda: org)
+    monkeypatch.setattr(_hc, "get_default_hermes_root", lambda: tmp_path / ".hermes")
+    from hermes_cli.evolution import lifecycle_global as _lg
+    monkeypatch.setattr(_lg, "get_organism_home", lambda: org)
+
+    org_root, org_id, ledger, tstore = _setup_organism(tmp_path, monkeypatch)
+    telos = _save_telos(tstore, org_id, "Project Isolation Telos")
+    digest = telos.canonical_digest
+    grant_id = _broker_activate(ledger, org_id, digest, "activate")
+    tstore.activate_revision(digest, grant_id=grant_id, capability=_make_cap())
+
+    # Two distinct profiles with separate workspace roots
+    profile_a = tmp_path / "profile_a"
+    profile_b = tmp_path / "profile_b"
+    profile_a.mkdir()
+    profile_b.mkdir()
+
+    from hermes_cli.evolution.observation_contract import ObservationEnvelope
+    from hermes_cli.evolution.observer_service import ObserverService
+
+    service = ObserverService(org)
+
+    def _env(eid, pref, proj, sref):
+        return ObservationEnvelope(
+            schema_version=1, event_id=eid, organism_id=org_id,
+            occurred_at="2026-07-24T12:00:00.000000Z",
+            signal_type="capability_absence", provenance="explicit_user",
+            source_profile_ref=pref, source_project_ref=proj,
+            source_session_ref=sref, generation_id="a" * 64,
+            gnothi_revision_digest=None, telos_digest=digest,
+            capability_key="webcam", operation_key="capture",
+            outcome_key="missing", constraint_key="none",
+            severity="high", task_impact="high", retry_count=1,
+            latency_bucket=None, explicit_user_intent=True,
+            recovered=False, evidence_refs=(), redaction_status="verified_redacted",
+        )
+
+    service.ingest_envelope(_env("11111111-1111-1111-1111-111111111111", "profA", "projA", "sessA"))
+    service.ingest_envelope(_env("22222222-2222-2222-2222-222222222222", "profB", "projB", "sessB"))
+
+    suggestions = service.scan_and_update_suggestions()
+    assert len(suggestions) == 1  # deduplication
+    sug = suggestions[0]
+    assert sug.observation_count == 2
+    # No raw profile/project/session IDs leak
+    assert "profA" not in sug.summary_reason
+    assert "projA" not in sug.summary_reason
+    assert "sessA" not in sug.summary_reason
+    assert "profB" not in sug.summary_reason
+    assert "projB" not in sug.summary_reason
+    assert "sessB" not in sug.summary_reason
+    ledger.connection.close()

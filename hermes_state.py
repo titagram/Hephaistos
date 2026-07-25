@@ -1134,6 +1134,54 @@ class SessionDB:
         except Exception:
             pass  # Best effort — never fatal.
 
+
+    def get_autopoiesis_pin(self, session_id: str) -> dict | None:
+        """Read _autopoiesis_pin from model_config without parsing all keys."""
+        row = self._conn.execute(
+            "SELECT json_extract(COALESCE(model_config, '{}'), '$._autopoiesis_pin') "
+            "FROM sessions WHERE id = ?",
+            (session_id,),
+        ).fetchone()
+        if row and row[0]:
+            import json
+            return json.loads(row[0])
+        return None
+
+    def set_autopoiesis_pin_if_absent(self, session_id: str, pin: dict) -> bool:
+        """Set the pin only if not already present. Returns True if set."""
+        import json
+        pin_json = json.dumps(pin, sort_keys=True)
+        def _set(conn):
+            cur = conn.execute(
+                "UPDATE sessions SET model_config = json_set("
+                "  COALESCE(model_config, '{}'), '$._autopoiesis_pin', json(?)) "
+                "WHERE id = ? "
+                "AND json_extract(COALESCE(model_config, '{}'), '$._autopoiesis_pin') IS NULL",
+                (pin_json, session_id),
+            )
+            return cur.rowcount > 0
+        return self._execute_write(_set)
+
+    def inherit_autopoiesis_pin(self, parent_session_id: str, child_session_id: str) -> bool:
+        """Copy pin from parent to child. Returns True if inherited."""
+        def _inherit(conn):
+            row = conn.execute(
+                "SELECT json_extract(COALESCE(model_config, '{}'), '$._autopoiesis_pin') "
+                "FROM sessions WHERE id = ?",
+                (parent_session_id,),
+            ).fetchone()
+            if not row or not row[0]:
+                return False
+            cur = conn.execute(
+                "UPDATE sessions SET model_config = json_set("
+                "  COALESCE(model_config, '{}'), '$._autopoiesis_pin', json(?)) "
+                "WHERE id = ?",
+                (row[0], child_session_id),
+            )
+            return cur.rowcount > 0
+        return self._execute_write(_inherit)
+
+
     def close(self):
         """Close the database connection.
 

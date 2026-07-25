@@ -542,28 +542,10 @@ def finalize_turn(
     except Exception as exc:
         logger.warning("on_session_end hook failed: %s", exc)
 
-    # -- Autopoiesis pending notice queue --
+    # -- Autopoiesis pending notice queue (container only, no scan) --
+    # Scans and delivery happen in drain_autopoiesis_notices() called by
+    # frontends AFTER the response has been visibly delivered.
     if not getattr(agent, "_pending_autopoiesis_notices", None):
         agent._pending_autopoiesis_notices = []
-    try:
-        from hermes_cli.evolution.organism_home import get_organism_home
-        org_root = get_organism_home()
-        if (org_root / "identity.json").exists():
-            from hermes_cli.evolution.observer_service import ObserverService
-            svc = ObserverService(org_root)
-            if not svc.circuit_open:
-                suggestions = svc.scan_and_update_suggestions(max_events=100)
-                for s in suggestions:
-                    if s.state in ("eligible", "surfaced"):
-                        entry = {
-                            "suggestion_id": s.suggestion_id,
-                            "opportunity_key": s.opportunity_key,
-                            "state": s.state,
-                            "score": s.score if s.score else 0.0,
-                        }
-                        if entry not in agent._pending_autopoiesis_notices:
-                            agent._pending_autopoiesis_notices.append(entry)
-    except Exception:
-        pass
 
     return result

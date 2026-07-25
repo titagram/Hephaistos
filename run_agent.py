@@ -876,7 +876,29 @@ class AIAgent:
         pending = getattr(self, "_pending_autopoiesis_notices", None)
         if not pending:
             return
-        for entry in list(pending):
+        # Perform the scan now (was moved from finalize_turn to post-delivery)
+        try:
+            from hermes_cli.evolution.organism_home import get_organism_home
+            org_root = get_organism_home()
+            if (org_root / "identity.json").exists():
+                from hermes_cli.evolution.observer_service import ObserverService
+                svc = ObserverService(org_root)
+                if not svc.circuit_open:
+                    suggestions = svc.scan_and_update_suggestions(max_events=100)
+                    for s in suggestions:
+                        if s.state in ("eligible", "surfaced"):
+                            entry = {
+                                "suggestion_id": s.suggestion_id,
+                                "opportunity_key": s.opportunity_key,
+                                "state": s.state,
+                                "score": s.score if s.score else 0.0,
+                            }
+                            if entry not in self._pending_autopoiesis_notices:
+                                self._pending_autopoiesis_notices.append(entry)
+        except Exception:
+            logger.debug("drain_autopoiesis_notices: scan failed", exc_info=True)
+        # Emit all pending notices
+        for entry in list(self._pending_autopoiesis_notices):
             try:
                 self._emit_notice(entry)
             except Exception:
