@@ -3856,9 +3856,15 @@ class GatewaySlashCommandsMixin:
             /approve all session  — approve all + remember for session
             /approve always       — approve oldest + remember permanently
             /approve all always   — approve all + remember permanently
+            /approve telos <id>   — Telos approval (separate path)
         """
         source = event.source
         session_key = self._session_key_for_source(source)
+        args = event.get_command_args().strip().lower().split()
+
+        # --- Telos routing must occur BEFORE dangerous-command check ---
+        if args and args[0] == "telos":
+            return await self._handle_telos_approve_command(event, args[1:])
 
         from tools.approval import (
             resolve_gateway_approval, has_blocking_approval,
@@ -3871,7 +3877,6 @@ class GatewaySlashCommandsMixin:
             return t("gateway.approve.no_pending")
 
         # Parse args: support "all", "all session", "all always", "session", "always"
-        args = event.get_command_args().strip().lower().split()
         resolve_all = "all" in args
         remaining = [a for a in args if a != "all"]
 
@@ -3894,6 +3899,69 @@ class GatewaySlashCommandsMixin:
         logger.info("User approved %d dangerous command(s) via /approve (%s)", count, choice)
         plural = "plural" if count > 1 else "singular"
         return t(f"gateway.approve.{choice}_{plural}", count=count)
+
+    async def _handle_telos_approve_command(
+        self, event: MessageEvent, args: list[str]
+    ) -> str:
+        """Handle /approve telos <request-id> — Telos authorization path.
+
+        Separate from dangerous-command approval. Uses the process-owned
+        CapabilityRegistry to verify host-origin approval.
+        """
+        source = event.source
+        if not args:
+            return "Usage: /approve telos <request-id>"
+
+        request_id = args[0]
+        try:
+            from hermes_cli.evolution.organism_home import get_organism_home
+            from hermes_cli.evolution.ledger import EvolutionLedger
+            from hermes_cli.evolution.telos_approval import (
+                CapabilityRegistry,
+                HostApprovalCapability,
+                HostApprovalContext,
+                SqliteTelosApprovalBroker,
+                TelosApprovalError,
+            )
+
+            organism_root = get_organism_home()
+            ledger_path = organism_root / "evolution" / "evolution.db"
+            if not ledger_path.exists():
+                return "Telos: no organism ledger found — run autopoiesis init first."
+
+            ledger = EvolutionLedger(ledger_path)
+            try:
+                # Gateway process uses its own CapabilityRegistry
+                if not hasattr(self, "_telos_registry"):
+                    self._telos_registry = CapabilityRegistry()
+
+                cap = HostApprovalCapability("gateway", f"{source.platform}:{source.user_id}")
+                self._telos_registry.register(cap)
+
+                broker = SqliteTelosApprovalBroker(self._telos_registry)
+
+                ctx = HostApprovalContext(
+                    surface="gateway",
+                    actor_ref=f"{source.platform}:{source.user_id}",
+                    session_ref=self._session_key_for_source(source),
+                    request_id=request_id,
+                    telos_digest="",  # Will be matched by request_id lookup
+                    action="activate",
+                    nonce=request_id[:8],
+                    context_digest=f"gateway:{source.platform}:{source.chat_id}",
+                )
+
+                broker.record_host_decision(ledger, cap, ctx, "approved")
+                self._telos_registry.revoke(cap)
+
+                return f"Telos request {request_id} approved."
+            except TelosApprovalError as e:
+                return f"Telos approval failed: {e}"
+            finally:
+                ledger.connection.close()
+        except Exception as e:
+            logger.warning("Telos approval error: %s", e)
+            return "Telos approval failed — see logs for details."
 
     async def _handle_deny_command(self, event: MessageEvent) -> str:
         """Handle /deny command — reject pending dangerous command(s).
