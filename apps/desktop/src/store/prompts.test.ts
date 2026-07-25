@@ -6,13 +6,16 @@ import {
   $approvalRequest,
   $secretRequest,
   $sudoRequest,
+  $telosApprovalRequest,
   clearAllPrompts,
   clearApprovalRequest,
   clearSecretRequest,
   clearSudoRequest,
+  clearTelosApprovalRequest,
   setApprovalRequest,
   setSecretRequest,
-  setSudoRequest
+  setSudoRequest,
+  setTelosApprovalRequest
 } from './prompts'
 import { $activeSessionId } from './session'
 
@@ -115,27 +118,49 @@ describe('clearAllPrompts', () => {
     setApprovalRequest({ command: 'x', description: 'd', sessionId: 's1' })
     setSudoRequest({ requestId: 'abc', sessionId: 's1' })
     setSecretRequest({ requestId: 'r1', envVar: 'E', prompt: 'p', sessionId: 's1' })
+    setTelosApprovalRequest({
+      kind: 'telos',
+      requestId: 'telos-r1',
+      digest: 'a'.repeat(64),
+      action: 'activate',
+      boundedSummary: 'test',
+      nonce: 'n1',
+      expiresAt: '2026-07-25T12:00:00Z',
+      capturedSessionId: 'ev-sid',
+      sessionId: 's1'
+    })
 
     clearAllPrompts('s1')
 
     expect($approvalRequest.get()).toBeNull()
     expect($sudoRequest.get()).toBeNull()
     expect($secretRequest.get()).toBeNull()
+    expect($telosApprovalRequest.get()).toBeNull()
   })
 
   it('leaves other sessions parked prompts intact', () => {
     setApprovalRequest({ command: 'x', description: 'd', sessionId: 's1' })
-    setApprovalRequest({ command: 'y', description: 'e', sessionId: 's2' })
+    setTelosApprovalRequest({
+      kind: 'telos',
+      requestId: 'telos-s2',
+      digest: 'b'.repeat(64),
+      action: 'rollback',
+      boundedSummary: 'test2',
+      nonce: 'n2',
+      expiresAt: '2026-07-25T12:00:00Z',
+      capturedSessionId: 'ev-sid',
+      sessionId: 's2'
+    })
 
     clearAllPrompts('s1')
 
     $activeSessionId.set('s2')
-    expect($approvalRequest.get()?.command).toBe('y')
+    expect($telosApprovalRequest.get()?.requestId).toBe('telos-s2')
   })
 })
 
 describe('$activeSessionAwaitingInput', () => {
-  it('is true while any blocking prompt (clarify or approval/sudo/secret) is parked on the active session', () => {
+  it('is true while any blocking prompt (clarify or approval/sudo/secret/telos) is parked on the active session', () => {
     expect($activeSessionAwaitingInput.get()).toBe(false)
 
     setApprovalRequest({ command: 'x', description: 'd', sessionId: 's1' })
@@ -146,6 +171,22 @@ describe('$activeSessionAwaitingInput', () => {
 
     setClarifyRequest({ choices: null, question: 'q', requestId: 'c1', sessionId: 's1' })
     expect($activeSessionAwaitingInput.get()).toBe(true)
+
+    clearClarifyRequest(undefined, 's1')
+    expect($activeSessionAwaitingInput.get()).toBe(false)
+
+    setTelosApprovalRequest({
+      kind: 'telos',
+      requestId: 'telos-1',
+      digest: 'a'.repeat(64),
+      action: 'activate',
+      boundedSummary: 'telos test',
+      nonce: 'n1',
+      expiresAt: '2026-07-25T12:00:00Z',
+      capturedSessionId: 'ev-sid',
+      sessionId: 's1'
+    })
+    expect($activeSessionAwaitingInput.get()).toBe(true)
   })
 
   it('ignores a prompt parked on a background session', () => {
@@ -154,5 +195,90 @@ describe('$activeSessionAwaitingInput', () => {
 
     $activeSessionId.set('s2')
     expect($activeSessionAwaitingInput.get()).toBe(true)
+  })
+})
+
+describe('telos approval prompt store', () => {
+  it('holds active session-keyed telos request', () => {
+    setTelosApprovalRequest({
+      kind: 'telos',
+      requestId: 'tr-1',
+      digest: 'a'.repeat(64),
+      action: 'activate',
+      boundedSummary: 'test activation',
+      nonce: 'n1',
+      expiresAt: '2026-07-25T12:00:00Z',
+      capturedSessionId: 'ev-sid',
+      sessionId: 's1'
+    })
+
+    expect($telosApprovalRequest.get()).toEqual({
+      kind: 'telos',
+      requestId: 'tr-1',
+      digest: 'a'.repeat(64),
+      action: 'activate',
+      boundedSummary: 'test activation',
+      nonce: 'n1',
+      expiresAt: '2026-07-25T12:00:00Z',
+      capturedSessionId: 'ev-sid',
+      sessionId: 's1'
+    })
+  })
+
+  it('parks background session telos request out of active view', () => {
+    setTelosApprovalRequest({
+      kind: 'telos',
+      requestId: 'tr-bg',
+      digest: 'a'.repeat(64),
+      action: 'rollback',
+      boundedSummary: 'bg',
+      nonce: 'n2',
+      expiresAt: '2026-07-25T12:00:00Z',
+      capturedSessionId: 'ev-sid',
+      sessionId: 's2'
+    })
+
+    expect($telosApprovalRequest.get()).toBeNull()
+
+    $activeSessionId.set('s2')
+    expect($telosApprovalRequest.get()?.requestId).toBe('tr-bg')
+  })
+
+  it('stale request-id clear does not wipe newer request', () => {
+    setTelosApprovalRequest({
+      kind: 'telos',
+      requestId: 'current',
+      digest: 'a'.repeat(64),
+      action: 'activate',
+      boundedSummary: 'current',
+      nonce: 'n1',
+      expiresAt: '2026-07-25T12:00:00Z',
+      capturedSessionId: 'ev-sid',
+      sessionId: 's1'
+    })
+
+    clearTelosApprovalRequest('s1', 'stale-id')
+    expect($telosApprovalRequest.get()).not.toBeNull()
+    expect($telosApprovalRequest.get()!.requestId).toBe('current')
+
+    clearTelosApprovalRequest('s1', 'current')
+    expect($telosApprovalRequest.get()).toBeNull()
+  })
+
+  it('clears unconditionally when no request id is given', () => {
+    setTelosApprovalRequest({
+      kind: 'telos',
+      requestId: 'tr-clear',
+      digest: 'a'.repeat(64),
+      action: 'activate',
+      boundedSummary: 'clear',
+      nonce: 'n1',
+      expiresAt: '2026-07-25T12:00:00Z',
+      capturedSessionId: 'ev-sid',
+      sessionId: 's1'
+    })
+
+    clearTelosApprovalRequest('s1')
+    expect($telosApprovalRequest.get()).toBeNull()
   })
 })

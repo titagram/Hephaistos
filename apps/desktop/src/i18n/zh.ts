@@ -147,6 +147,7 @@ export const zh: Translations = {
     },
     native: {
       approvalTitle: '需要批准',
+      telosTitle: 'Telos 主机批准需要',
       approveAction: '批准',
       rejectAction: '拒绝',
       inputTitle: '需要输入',
@@ -2204,6 +2205,18 @@ export const zh: Translations = {
       alwaysDescription: pattern =>
         `这会将“${pattern}”模式加入永久允许列表 (~/.hermes/config.yaml)。Hades 对类似命令将不再询问，包括当前会话和未来会话。`,
       alwaysAllow: '始终允许'
+    },
+    telos: {
+      activateTitle: 'Telos 激活',
+      rollbackTitle: 'Telos 回滚',
+      digest: '摘要',
+      summary: '概述',
+      nonce: '随机数',
+      expires: '过期时间',
+      approve: '批准',
+      deny: '拒绝',
+      gatewayDisconnected: 'Hades 网关未连接',
+      sendFailed: '无法发送 Telos 批准响应'
     },
     clarify: {
       notReady: '澄清请求尚未就绪',

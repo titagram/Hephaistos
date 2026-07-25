@@ -194,6 +194,7 @@ export interface Translations {
     // bodies (the agent's reply, a command, an error) are passed through raw.
     native: {
       approvalTitle: string
+      telosTitle: string
       approveAction: string
       rejectAction: string
       inputTitle: string
@@ -1683,6 +1684,18 @@ export interface Translations {
       alwaysTitle: string
       alwaysDescription: (pattern: string) => string
       alwaysAllow: string
+    }
+    telos: {
+      activateTitle: string
+      rollbackTitle: string
+      digest: string
+      summary: string
+      nonce: string
+      expires: string
+      approve: string
+      deny: string
+      gatewayDisconnected: string
+      sendFailed: string
     }
     clarify: {
       notReady: string
