@@ -38,6 +38,23 @@ def test_evolution_command_doctor(tmp_path: Path, monkeypatch):
     assert res == 0
 
 
+def test_evolution_doctor_reports_backend_independent_local_storage(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    res = evolution_command(
+        Namespace(action="doctor", json=True, org_root=tmp_path / "organism")
+    )
+
+    assert res == 0
+    diagnostic = json.loads(capsys.readouterr().out)
+    assert diagnostic["storage_mode"] == "local"
+    assert diagnostic["backend_required"] is False
+
+
 def test_evolution_command_telos_actions(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     org_root = tmp_path / "organism"

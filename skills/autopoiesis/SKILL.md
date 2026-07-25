@@ -1,6 +1,6 @@
 ---
 name: autopoiesis
-description: Goal-directed meta-observation, Telos workshop, and global suggestion management.
+description: Use when Hades evaluates itself, Telos, or Autopoiesis.
 ---
 
 # Autopoiesis Skill — Global Telos & Meta-Observation
@@ -14,6 +14,19 @@ This skill allows Hades to interact with the global Autopoiesis Observer, inspec
 - `/autopoiesis show <suggestion-id>`: Display detailed evidence, score, and explanation for a suggestion.
 - `/autopoiesis note`: Record a user-reviewed observation note into the global ledger.
 - `/autopoiesis telos`: View the current active Telos revision and status.
+
+## Local Mode
+
+Autopoiesis does not require the Hades backend. Telos, Observer, suggestions, and their audit ledger remain local to the global organism and must keep working when backend setup, connectivity, or synchronization is absent.
+
+Hades always retains its built-in `MEMORY.md` and `USER.md`. For stronger fully local retrieval, select the bundled SQLite/FTS5 holographic provider:
+
+```bash
+hades memory setup holographic
+hades memory status
+```
+
+The memory provider enriches general agent recall; it does not replace or synchronize the Autopoiesis ledger. Backend project memory and work-item synchronization are optional collaboration features, never prerequisites for local Telos or Observer correctness.
 
 ## Governance & Approval Rules
 

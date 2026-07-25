@@ -985,7 +985,7 @@ def test_oversized_generation_proof_fails_closed_without_crashing(
     if shape == "deep":
         descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
         try:
-            for _ in range(1_100):
+            for _ in range(store_module._MAX_PROOF_DEPTH + 1):
                 os.mkdir("d", 0o755, dir_fd=descriptor)
                 child = os.open(
                     "d",

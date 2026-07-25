@@ -173,6 +173,10 @@ def _doctor(org_root: Any = None) -> dict[str, Any]:
 
     diagnostic: dict[str, Any] = {
         "schema_version": 1,
+        # Project B persistence is intentionally local. Backend sync is an
+        # optional collaboration edge, not an Autopoiesis runtime dependency.
+        "storage_mode": "local",
+        "backend_required": False,
         "organism_root_exists": root.exists() if org_root else None,
         "autopoiesis_enabled": autopoiesis_enabled(),
         "config_observer_enabled": cfg.get("autopoiesis", {}).get("observer", {}).get("enabled", True),
