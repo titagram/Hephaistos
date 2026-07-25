@@ -23,6 +23,15 @@ def _setup_organism(tmp_path, monkeypatch):
     return org, ledger, gen.generation_id
 
 
+def _make_cap(surface="cli"):
+    """Create a host capability and register it in the host registry."""
+    from hermes_cli.evolution.telos_approval import (
+        HostApprovalCapability, set_host_capability,
+    )
+    cap = HostApprovalCapability._test_create(surface, "test_actor")
+    set_host_capability(cap)
+    return cap
+
 def test_no_host_receipt_approval_fails(tmp_path, monkeypatch):
     """Without a capability in the registry, approval must fail."""
     org, ledger, gen_id = _setup_organism(tmp_path, monkeypatch)

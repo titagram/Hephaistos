@@ -47,18 +47,25 @@ class TelosStore:
         receipt_id: str = "",
         *,
         grant_id: str | None = None,
+        capability: "HostApprovalCapability | None" = None,
         ledger: "EvolutionLedger | None" = None,
     ) -> None:
-        """Activate a Telos revision after host-approved grant consumption.
+        """Activate a Telos revision after live host-approved grant consumption.
 
-        Requires a valid consumed grant_id. Stages pointer atomically via
-        temp+rename. Recovery: if consumption row exists but pointer missing,
-        republish from consumption record (idempotent).
+        Requires a valid consumed grant_id AND a live HostApprovalCapability
+        verified by the host CapabilityRegistry. The capability proves that a
+        live host process (CLI, gateway, TUI) made the decision — SQLite rows
+        alone are never sufficient authorization.
         """
         if grant_id is None:
             raise TelosStoreError("host_approval_not_implemented")
+        if capability is None:
+            raise TelosStoreError("host_approval_not_implemented")
 
-        from .telos_approval import SqliteTelosApprovalBroker, CapabilityRegistry
+        from .telos_approval import (
+            SqliteTelosApprovalBroker, CapabilityRegistry,
+            verify_host_capability,
+        )
         from datetime import datetime, timezone
 
         if ledger is None:
@@ -66,6 +73,11 @@ class TelosStore:
             ledger = EvolutionLedger(self.organism_root / "evolution" / "evolution.db")
 
         try:
+            # Live host capability verification — SQLite rows alone are not authority
+            # Uses module-level HOST_REGISTRY populated only by host surfaces
+            if not verify_host_capability(capability):
+                raise TelosStoreError("telos_live_host_capability_required")
+
             # Verify grant exists and matches digest + action
             grant_row = ledger.connection.execute(
                 "SELECT organism_id, telos_digest, action FROM telos_approval_grants WHERE grant_id = ?",
@@ -138,13 +150,16 @@ class TelosStore:
         receipt_id: str = "",
         *,
         grant_id: str | None = None,
+        capability: "HostApprovalCapability | None" = None,
         ledger: "EvolutionLedger | None" = None,
     ) -> None:
         """Rollback to a previously verified Telos revision.
 
-        Requires a valid consumed grant_id. Moves active pointer to target.
+        Requires a valid consumed grant_id AND live host capability.
         """
         if grant_id is None:
+            raise TelosStoreError("host_approval_not_implemented")
+        if capability is None:
             raise TelosStoreError("host_approval_not_implemented")
 
         if ledger is None:
@@ -152,6 +167,10 @@ class TelosStore:
             ledger = EvolutionLedger(self.organism_root / "evolution" / "evolution.db")
 
         try:
+            from .telos_approval import verify_host_capability as _vhc
+            if not _vhc(capability):
+                raise TelosStoreError("telos_live_host_capability_required")
+
             grant_row = ledger.connection.execute(
                 "SELECT organism_id, telos_digest, action FROM telos_approval_grants WHERE grant_id = ?",
                 (grant_id,),

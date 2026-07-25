@@ -4,9 +4,55 @@ The model-controlled shell cannot forge a HostApprovalCapability because:
 - No public constructor exists — only the internal host adapter factory creates them
 - The CapabilityRegistry stores live objects and verifies by identity (``is``)
 - Capabilities are in-memory, non-serializable, single-use, and bound to context
+
+Host surfaces (CLI, gateway, TUI) register capabilities in the module-level
+_HOST_REGISTRY. activate_revision/rollback check against this registry.
 """
 
 from __future__ import annotations
+
+import hashlib
+import json
+import sqlite3
+import uuid as _uuid
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field, fields
+from datetime import datetime, timedelta, timezone
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .ledger import EvolutionLedger
+
+
+# -- Module-level host registry --
+# Only host surfaces (CLI, gateway, TUI) populate this. The model-controlled
+# process does not have access to a register() here -- it can construct its
+# own CapabilityRegistry but it will not be THIS one.
+
+_HOST_REGISTRY = None  # set after CapabilityRegistry class def below
+
+
+def set_host_capability(capability):
+    """Register a capability in the process-global host registry."""
+    global _HOST_REGISTRY
+    if _HOST_REGISTRY is None:
+        _HOST_REGISTRY = CapabilityRegistry()
+    _HOST_REGISTRY.register(capability)
+
+
+def clear_host_capability(capability):
+    """Revoke and clear a capability from the host registry."""
+    global _HOST_REGISTRY
+    if _HOST_REGISTRY is not None:
+        _HOST_REGISTRY.revoke(capability)
+
+
+def verify_host_capability(capability):
+    """Check whether a capability is registered in the host registry."""
+    if _HOST_REGISTRY is None:
+        return False
+    return _HOST_REGISTRY.verify(capability)
+
 
 import secrets
 import uuid

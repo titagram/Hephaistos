@@ -141,6 +141,15 @@ def _broker_approve(ledger, org_id, digest, action, surface="cli", actor="actor"
     broker.consume_grant(ledger, grant_id, org_id, digest, action)
     return grant_id
 
+def _make_cap(surface="cli"):
+    """Create a host capability and register it in the host registry."""
+    from hermes_cli.evolution.telos_approval import (
+        HostApprovalCapability, set_host_capability,
+    )
+    cap = HostApprovalCapability._test_create(surface, "test_actor")
+    set_host_capability(cap)
+    return cap
+
 
 # ── A1: Forged persistent rows cannot activate Telos ──
 
@@ -166,9 +175,12 @@ def test_forged_rows_cannot_activate_telos(tmp_path, monkeypatch):
     forged_grant = _forge_approval_rows(ledger, org_id, digest_a)
     ledger.connection.close()
 
-    # Attempt activation with forged grant
+    # Attempt activation with forged grant — use UNREGISTERED capability
+    # (the model cannot register in the host registry)
+    from hermes_cli.evolution.telos_approval import HostApprovalCapability
+    unreg = HostApprovalCapability._test_create("model", "model")
     with pytest.raises(TelosStoreError):
-        store.activate_revision(digest_a, grant_id=forged_grant)
+        store.activate_revision(digest_a, grant_id=forged_grant, capability=unreg)
 
     # No side effects
     assert store.get_active_digest() is None
@@ -198,12 +210,12 @@ def test_grant_for_a_cannot_activate_b(tmp_path, monkeypatch):
     ledger.connection.close()
 
     # Activate A legitimately — this opens its own ledger internally
-    store.activate_revision(digest_a, grant_id=grant_id_a)
+    store.activate_revision(digest_a, grant_id=grant_id_a, capability=_make_cap())
     assert store.get_active_digest() == digest_a
 
     # Try to use grant_id_a (for A) to activate B — must fail
     with pytest.raises(TelosStoreError):
-        store.activate_revision(digest_b, grant_id=grant_id_a)
+        store.activate_revision(digest_b, grant_id=grant_id_a, capability=_make_cap())
 
     # A must still be active
     assert store.get_active_digest() == digest_a
@@ -228,12 +240,12 @@ def test_activate_grant_cannot_authorize_rollback(tmp_path, monkeypatch):
     ledger.connection.close()
 
     # Activate succeeds
-    store.activate_revision(digest_a, grant_id=grant_id)
+    store.activate_revision(digest_a, grant_id=grant_id, capability=_make_cap())
     assert store.get_active_digest() == digest_a
 
     # Try to rollback with the ACTIVATE grant — must fail
     with pytest.raises(TelosStoreError):
-        store.rollback(digest_a, grant_id=grant_id)
+        store.rollback(digest_a, grant_id=grant_id, capability=_make_cap())
 
 
 # ── A4: Capability binding and lifecycle ──
