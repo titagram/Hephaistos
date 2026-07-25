@@ -234,3 +234,93 @@ def test_activate_grant_cannot_authorize_rollback(tmp_path, monkeypatch):
     # Try to rollback with the ACTIVATE grant — must fail
     with pytest.raises(TelosStoreError):
         store.rollback(digest_a, grant_id=grant_id)
+
+
+# ── A4: Capability binding and lifecycle ──
+
+def test_capability_must_match_registry(tmp_path, monkeypatch):
+    """Foreign registry — capability from registry A rejected by broker using registry B."""
+    org, org_id = _setup_organism(tmp_path, monkeypatch)
+    from hermes_cli.evolution.telos_approval import (
+        CapabilityRegistry, HostApprovalCapability, HostApprovalContext,
+        SqliteTelosApprovalBroker, TelosApprovalError,
+    )
+    ledger = _open_ledger(org)
+
+    reg_a = CapabilityRegistry()
+    reg_b = CapabilityRegistry()
+    cap = HostApprovalCapability._test_create("gateway", "actor")
+    reg_a.register(cap)
+    broker = SqliteTelosApprovalBroker(reg_b)
+
+    ctx = HostApprovalContext(
+        surface="gateway", actor_ref="actor", session_ref="s",
+        request_id="r1", telos_digest="a" * 64, action="activate",
+        nonce="n", context_digest=hashlib.sha256(b"x").hexdigest(),
+    )
+    with pytest.raises(TelosApprovalError, match="not_verified"):
+        broker.record_host_decision(ledger, cap, ctx, "approved")
+    ledger.connection.close()
+
+
+def test_unregistered_capability_fails(tmp_path, monkeypatch):
+    """Capability never registered anywhere must be rejected."""
+    org, org_id = _setup_organism(tmp_path, monkeypatch)
+    from hermes_cli.evolution.telos_approval import (
+        CapabilityRegistry, HostApprovalCapability, HostApprovalContext,
+        SqliteTelosApprovalBroker, TelosApprovalError,
+    )
+    ledger = _open_ledger(org)
+    registry = CapabilityRegistry()
+    cap = HostApprovalCapability._test_create("cli", "actor")
+    # NOT registered
+    broker = SqliteTelosApprovalBroker(registry)
+    ctx = HostApprovalContext(
+        surface="cli", actor_ref="actor", session_ref="s",
+        request_id="r2", telos_digest="b" * 64, action="activate",
+        nonce="n", context_digest=hashlib.sha256(b"y").hexdigest(),
+    )
+    with pytest.raises(TelosApprovalError, match="not_verified"):
+        broker.record_host_decision(ledger, cap, ctx, "approved")
+    ledger.connection.close()
+
+
+def test_revoked_capability_fails(tmp_path, monkeypatch):
+    """After revocation, a previously-valid capability fails."""
+    org, org_id = _setup_organism(tmp_path, monkeypatch)
+    from hermes_cli.evolution.telos_approval import (
+        CapabilityRegistry, HostApprovalCapability, HostApprovalContext,
+        SqliteTelosApprovalBroker, TelosApprovalError,
+    )
+    ledger = _open_ledger(org)
+    registry = CapabilityRegistry()
+    cap = HostApprovalCapability._test_create("cli", "actor")
+    registry.register(cap)
+    broker = SqliteTelosApprovalBroker(registry)
+
+    # Create a real request first
+    req_id_r3 = broker.create_request(ledger, org_id, "c" * 64, "activate",
+        HostApprovalContext(surface="cli", actor_ref="actor", session_ref="s",
+            request_id=None, telos_digest="c" * 64, action="activate",
+            nonce="n", context_digest=hashlib.sha256(b"z").hexdigest()), 3600)
+
+    ctx = HostApprovalContext(
+        surface="cli", actor_ref="actor", session_ref="s",
+        request_id=req_id_r3, telos_digest="c" * 64, action="activate",
+        nonce="n", context_digest=hashlib.sha256(b"z").hexdigest(),
+    )
+    broker.record_host_decision(ledger, cap, ctx, "approved")  # works
+
+    registry.revoke(cap)
+    req_id_r4 = broker.create_request(ledger, org_id, "d" * 64, "activate",
+        HostApprovalContext(surface="cli", actor_ref="actor", session_ref="s",
+            request_id=None, telos_digest="d" * 64, action="activate",
+            nonce="n2", context_digest=hashlib.sha256(b"w").hexdigest()), 3600)
+    ctx2 = HostApprovalContext(
+        surface="cli", actor_ref="actor", session_ref="s",
+        request_id=req_id_r4, telos_digest="d" * 64, action="activate",
+        nonce="n2", context_digest=hashlib.sha256(b"w").hexdigest(),
+    )
+    with pytest.raises(TelosApprovalError, match="not_verified"):
+        broker.record_host_decision(ledger, cap, ctx2, "approved")
+    ledger.connection.close()
