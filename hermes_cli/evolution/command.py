@@ -161,6 +161,60 @@ def _show(kind: str, record_id: str) -> dict[str, Any]:
     return {"schema_version": 1, "status": "missing", "kind": kind, "record": None}
 
 
+
+def _doctor(org_root: Any = None) -> dict[str, Any]:
+    """Read-only bounded diagnostic of autopoiesis state."""
+    from pathlib import Path
+    from .organism_home import get_organism_home
+    from .global_config import load_global_config, autopoiesis_enabled
+
+    root = Path(org_root) if org_root else get_organism_home()
+    cfg = load_global_config()
+
+    diagnostic: dict[str, Any] = {
+        "schema_version": 1,
+        "organism_root_exists": root.exists() if org_root else None,
+        "autopoiesis_enabled": autopoiesis_enabled(),
+        "config_observer_enabled": cfg.get("autopoiesis", {}).get("observer", {}).get("enabled", True),
+    }
+
+    try:
+        from .organism_identity import load_organism_identity
+        ident = load_organism_identity(root)
+        diagnostic["organism_id"] = ident.organism_id[:8] + "..."
+    except Exception:
+        diagnostic["organism_id"] = None
+
+    ledger_path = root / "evolution" / "evolution.db"
+    diagnostic["ledger_exists"] = ledger_path.exists()
+    if ledger_path.exists():
+        try:
+            from .ledger import EvolutionLedger
+            ledger = EvolutionLedger(ledger_path)
+            diagnostic["ledger_schema_version"] = ledger.schema_version
+            ledger.connection.close()
+        except Exception:
+            diagnostic["ledger_schema_version"] = "error"
+
+    try:
+        from .observer_service import ObserverService
+        svc = ObserverService(root)
+        diagnostic["observer_circuit_open"] = svc.circuit_open
+        diagnostic["observer_degraded_reason"] = svc.degraded_reason
+    except Exception:
+        diagnostic["observer_circuit_open"] = "error"
+
+    try:
+        from .telos_store import TelosStore
+        store = TelosStore(root)
+        digest = store.get_active_digest()
+        diagnostic["telos_active_digest"] = (digest[:16] + "...") if digest else None
+    except Exception:
+        diagnostic["telos_active_digest"] = "error"
+
+    return diagnostic
+
+
 def evolution_command(args: Any) -> int:
     try:
         action = args.action
@@ -178,6 +232,23 @@ def evolution_command(args: Any) -> int:
             value = _show(args.kind, args.record_id)
             _emit(value)
             return 0 if value["status"] == "found" else 1
+        if action == "pause":
+            from .global_config import load_global_config, save_global_config
+            cfg = load_global_config()
+            cfg["autopoiesis"]["enabled"] = False
+            save_global_config(cfg["autopoiesis"])
+            _emit({"schema_version": 1, "action": "pause", "autopoiesis_enabled": False})
+            return 0
+        if action == "resume":
+            from .global_config import load_global_config, save_global_config
+            cfg = load_global_config()
+            cfg["autopoiesis"]["enabled"] = True
+            save_global_config(cfg["autopoiesis"])
+            _emit({"schema_version": 1, "action": "resume", "autopoiesis_enabled": True})
+            return 0
+        if action == "doctor":
+            _emit(_doctor(getattr(args, "org_root", None)))
+            return 0
     except (
         EvolutionBootstrapError,
         EvolutionLedgerError,
