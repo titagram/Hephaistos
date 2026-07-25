@@ -30,13 +30,13 @@ from hermes_cli.evolution.telos_store import TelosStore, TelosStoreError
 # ---------------------------------------------------------------------------
 
 def _create_v3_database(path: Path) -> None:
-    """Create a v3 database with all Project A + Project B tables."""
+    """Create a v4 database with all Project A + Project B tables."""
     connection = sqlite3.connect(path)
     connection.execute("PRAGMA foreign_keys=ON")
     for statement in ledger_module._SCHEMA_STATEMENTS:
         connection.execute(statement)
     connection.execute(
-        "INSERT INTO schema_version(singleton, version) VALUES (1, 3)"
+        "INSERT INTO schema_version(singleton, version) VALUES (1, 4)"
     )
     connection.commit()
     connection.close()
@@ -44,7 +44,7 @@ def _create_v3_database(path: Path) -> None:
 
 
 def _create_v2_database(path: Path) -> None:
-    """Create a valid v2 database (Project A only, no v3 tables)."""
+    """Create a valid v2 database (Project A only, no v4 tables)."""
     connection = sqlite3.connect(path)
     connection.execute("PRAGMA foreign_keys=ON")
     for statement in ledger_module._SCHEMA_V2_STATEMENTS:
@@ -58,13 +58,13 @@ def _create_v2_database(path: Path) -> None:
 
 
 def _create_v3_missing_table(path: Path) -> None:
-    """Create a v3 database missing one Project B table."""
+    """Create a v4 database missing one Project B table."""
     connection = sqlite3.connect(path)
     connection.execute("PRAGMA foreign_keys=ON")
     for statement in ledger_module._SCHEMA_STATEMENTS:
         connection.execute(statement)
     connection.execute(
-        "INSERT INTO schema_version(singleton, version) VALUES (1, 3)"
+        "INSERT INTO schema_version(singleton, version) VALUES (1, 4)"
     )
     # Drop one Project B table
     connection.execute("DROP TABLE opportunity_suggestion_events")
@@ -590,10 +590,10 @@ def _create_malformed_v3_database(path: Path) -> None:
     connection.execute(
         "CREATE TABLE schema_version ("
         "  singleton INTEGER NOT NULL PRIMARY KEY CHECK(singleton = 1),"
-        "  version INTEGER NOT NULL CHECK(version = 3)"
+        "  version INTEGER NOT NULL CHECK(version = 4)"
         ") WITHOUT ROWID"
     )
-    connection.execute("INSERT INTO schema_version VALUES (1, 3)")
+    connection.execute("INSERT INTO schema_version VALUES (1, 4)")
     # Create Project B tables with arbitrary incomplete columns
     connection.execute("CREATE TABLE observation_envelopes (event_id TEXT)")
     connection.execute("CREATE TABLE opportunity_suggestions (suggestion_id TEXT)")
@@ -609,7 +609,7 @@ def _create_noncanonical_index_v3_database(path: Path) -> None:
     connection.execute("PRAGMA foreign_keys=ON")
     for statement in ledger_module._SCHEMA_STATEMENTS:
         connection.execute(statement)
-    connection.execute("INSERT INTO schema_version VALUES (1, 3)")
+    connection.execute("INSERT INTO schema_version VALUES (1, 4)")
     # Drop a Project B index
     connection.execute("DROP INDEX IF EXISTS opportunity_suggestions_opportunity_key_idx")
     connection.commit()
@@ -620,7 +620,7 @@ def _create_noncanonical_index_v3_database(path: Path) -> None:
 def test_repository_rejects_structurally_malformed_v3_database(
     tmp_path: Path,
 ) -> None:
-    """A database with v3 table names but wrong columns must be rejected."""
+    """A database with v4 table names but wrong columns must be rejected."""
     path = tmp_path / "fake.db"
     _create_malformed_v3_database(path)
 
@@ -636,7 +636,7 @@ def test_repository_rejects_structurally_malformed_v3_database(
 def test_repository_rejects_noncanonical_v3_index_layout(
     tmp_path: Path,
 ) -> None:
-    """A v3 database with a missing Project B index must be rejected."""
+    """A v4 database with a missing Project B index must be rejected."""
     path = tmp_path / "evolution.db"
     _create_noncanonical_index_v3_database(path)
 
