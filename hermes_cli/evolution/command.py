@@ -355,17 +355,18 @@ def _handle_telos_cli_transition(digest: str, action: str, org_root: Any = None)
     import uuid as _uuid_mod
     from pathlib import Path
     from .organism_home import get_organism_home
-    from .organism_identity import load_organism_identity
-    from .telos_store import TelosStore, TelosStoreError
+    from .telos_store import TelosStore
     from .telos_approval import (
         HostApprovalContext,
-        SqliteTelosApprovalBroker,
         TelosApprovalPrompt,
         TelosApprovalError,
         telos_approval_prompt,
     )
     from .ledger import EvolutionLedger
-    from .host_transition import perform_telos_transition
+    from .host_transition import (
+        perform_telos_transition,
+        prepare_telos_pending_request,
+    )
 
     if action not in ("activate", "rollback"):
         return {
@@ -387,134 +388,61 @@ def _handle_telos_cli_transition(digest: str, action: str, org_root: Any = None)
             "message": "invalid digest",
         }
 
-    root = Path(org_root) if org_root else get_organism_home()
-    store = TelosStore(root)
-
-    try:
-        ident = load_organism_identity(root)
-    except Exception:
-        return {
-            "schema_version": 1,
-            "action": action_name,
-            "status": "rejected",
-            "request_id": None,
-            "message": "organism identity not found — run autopoiesis init first",
-        }
-    organism_id = ident.organism_id
-
-    try:
-        revision = store.get_revision(digest)
-    except TelosStoreError:
-        return {
-            "schema_version": 1,
-            "action": action_name,
-            "status": "rejected",
-            "request_id": None,
-            "message": "revision not found for requested digest",
-        }
-
-    if revision.canonical_digest != digest:
-        return {
-            "schema_version": 1,
-            "action": action_name,
-            "status": "rejected",
-            "request_id": None,
-            "message": "revision digest mismatch",
-        }
-
-    if revision.organism_id != organism_id:
-        return {
-            "schema_version": 1,
-            "action": action_name,
-            "status": "rejected",
-            "request_id": None,
-            "message": "revision organism mismatch",
-        }
-
-    ledger_path = root / "evolution" / "evolution.db"
-    if not ledger_path.exists():
-        return {
-            "schema_version": 1,
-            "action": action_name,
-            "status": "rejected",
-            "request_id": None,
-            "message": "no organism ledger found — run autopoiesis init first",
-        }
-
-    broker = SqliteTelosApprovalBroker()
-    ledger = EvolutionLedger(ledger_path)
-
-    session_ref = str(_uuid_mod.uuid4())
-    actor_ref = "interactive-local-user"
     surface = "classic_cli"
-    nonce = str(_uuid_mod.uuid4())[:8]
+    actor_ref = "interactive-local-user"
+    session_ref = str(_uuid_mod.uuid4())
 
-    ctx = HostApprovalContext(
+    prepared = prepare_telos_pending_request(
+        digest=digest,
+        action=action,
         surface=surface,
         actor_ref=actor_ref,
         session_ref=session_ref,
-        request_id=None,
-        telos_digest=digest,
-        action=action,
-        nonce=nonce,
-        context_digest="",
+        ttl_seconds=3600,
+        organism_root=org_root,
     )
 
-    request_id = None
+    if prepared["status"] != "ok":
+        return {
+            "schema_version": 1,
+            "action": action_name,
+            "status": prepared["status"],
+            "request_id": prepared.get("request_id"),
+            "message": prepared.get("message", ""),
+        }
+
+    pf = prepared["prompt_fields"]
+    request_id = prepared["request_id"]
+
+    prompt = TelosApprovalPrompt(
+        request_id=pf["request_id"],
+        organism_id=pf["organism_id"],
+        telos_digest=pf["telos_digest"],
+        action=pf["action"],
+        display_nonce=pf["display_nonce"],
+        bounded_summary=pf["bounded_summary"],
+        host_context_digest=pf["expected_host_context_digest"],
+        expires_at=pf.get("expires_at"),
+    )
+
+    decision = telos_approval_prompt(prompt, timeout=120)
+
+    decision_ctx = HostApprovalContext(
+        surface=surface,
+        actor_ref=actor_ref,
+        session_ref=session_ref,
+        request_id=prompt.request_id,
+        telos_digest=pf["telos_digest"],
+        action=pf["action"],
+        nonce=pf["display_nonce"],
+        context_digest=prompt.host_context_digest,
+    )
+
+    root = Path(org_root) if org_root else get_organism_home()
+    ledger_path = root / "evolution" / "evolution.db"
+    ledger = EvolutionLedger(ledger_path)
+    store = TelosStore(root)
     try:
-        request_id = broker.create_request(ledger, organism_id, digest, action, ctx, 3600)
-
-        row = ledger.connection.execute(
-            """SELECT request_id, organism_id, telos_digest, action,
-                      display_nonce, bounded_summary,
-                      expected_host_context_digest, expires_at
-               FROM telos_approval_requests
-               WHERE request_id = ?""",
-            (request_id,),
-        ).fetchone()
-
-        if row is None:
-            return {
-                "schema_version": 1,
-                "action": action_name,
-                "status": "rejected",
-                "request_id": request_id[:8],
-                "message": "persisted request row not found",
-            }
-
-        if row["request_id"] != request_id:
-            return {
-                "schema_version": 1,
-                "action": action_name,
-                "status": "rejected",
-                "request_id": request_id[:8],
-                "message": "persisted request_id mismatch",
-            }
-
-        prompt = TelosApprovalPrompt(
-            request_id=row["request_id"],
-            organism_id=row["organism_id"],
-            telos_digest=row["telos_digest"],
-            action=row["action"],
-            display_nonce=row["display_nonce"],
-            bounded_summary=row["bounded_summary"],
-            host_context_digest=row["expected_host_context_digest"],
-            expires_at=row["expires_at"],
-        )
-
-        decision = telos_approval_prompt(prompt, timeout=120)
-
-        decision_ctx = HostApprovalContext(
-            surface=surface,
-            actor_ref=actor_ref,
-            session_ref=session_ref,
-            request_id=row["request_id"],
-            telos_digest=row["telos_digest"],
-            action=row["action"],
-            nonce=row["display_nonce"],
-            context_digest=prompt.host_context_digest,
-        )
-
         result = perform_telos_transition(ledger, store, decision_ctx, decision.decision)
 
         if result.status == "approved":

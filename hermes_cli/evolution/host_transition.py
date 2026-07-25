@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -306,3 +308,161 @@ def perform_telos_transition(
         request_id=request_id,
         message="completed",
     )
+
+
+def prepare_telos_pending_request(
+    digest: str,
+    action: str,
+    surface: str,
+    actor_ref: str,
+    session_ref: str,
+    ttl_seconds: int = 3600,
+    organism_root: str | os.PathLike[str] | None = None,
+) -> dict[str, object]:
+    """Prepare a pending Telos approval request for host interaction.
+
+    Resolves the global organism root, validates the revision, creates
+    a pending broker request, and returns the persisted row fields as a
+    bounded dict (no pointer or grant mutation).
+
+    Returns ``{"status": "ok", "request_id": ..., "prompt_fields": {...}}``
+    on success, or ``{"status": "rejected"|"invalid", "request_id": None,
+    "message": ...}`` on failure.
+
+    Used by both the Classic CLI host flow and the TUI/Desktop JSON-RPC
+    host flow to avoid duplicating organism-resolution and validation logic.
+    """
+    import uuid as _uuid_mod
+    from .organism_home import get_organism_home
+    from .organism_identity import load_organism_identity
+    from .telos_store import TelosStore, TelosStoreError
+    from .telos_approval import (
+        HostApprovalContext,
+        SqliteTelosApprovalBroker,
+        TelosApprovalError,
+    )
+    from .ledger import EvolutionLedger
+
+    if action not in ("activate", "rollback"):
+        return {
+            "status": "invalid",
+            "request_id": None,
+            "message": "unsupported action",
+        }
+
+    if not surface or not actor_ref or not session_ref:
+        return {
+            "status": "invalid",
+            "request_id": None,
+            "message": "incomplete host context — surface, actor, and session required",
+        }
+
+    if not digest or len(digest) != 64 or not all(c in "0123456789abcdef" for c in digest):
+        return {
+            "status": "invalid",
+            "request_id": None,
+            "message": "invalid digest",
+        }
+
+    root = Path(organism_root) if organism_root else get_organism_home()
+
+    try:
+        ident = load_organism_identity(root)
+    except Exception:
+        return {
+            "status": "rejected",
+            "request_id": None,
+            "message": "organism identity not found",
+        }
+    organism_id = ident.organism_id
+
+    store = TelosStore(root)
+    try:
+        revision = store.get_revision(digest)
+    except TelosStoreError:
+        return {
+            "status": "rejected",
+            "request_id": None,
+            "message": "revision not found for requested digest",
+        }
+
+    if revision.canonical_digest != digest:
+        return {
+            "status": "rejected",
+            "request_id": None,
+            "message": "revision digest mismatch",
+        }
+
+    if revision.organism_id != organism_id:
+        return {
+            "status": "rejected",
+            "request_id": None,
+            "message": "revision organism mismatch",
+        }
+
+    ledger_path = root / "evolution" / "evolution.db"
+    if not ledger_path.exists():
+        return {
+            "status": "rejected",
+            "request_id": None,
+            "message": "no organism ledger found",
+        }
+
+    broker = SqliteTelosApprovalBroker()
+    ledger = EvolutionLedger(ledger_path)
+
+    nonce = str(_uuid_mod.uuid4())[:8]
+
+    ctx = HostApprovalContext(
+        surface=surface,
+        actor_ref=actor_ref,
+        session_ref=session_ref,
+        request_id=None,
+        telos_digest=digest,
+        action=action,
+        nonce=nonce,
+        context_digest="",
+    )
+
+    request_id = None
+    try:
+        request_id = broker.create_request(ledger, organism_id, digest, action, ctx, ttl_seconds)
+
+        row = ledger.connection.execute(
+            """SELECT request_id, organism_id, telos_digest, action,
+                      display_nonce, bounded_summary,
+                      expected_host_context_digest, expires_at
+               FROM telos_approval_requests
+               WHERE request_id = ?""",
+            (request_id,),
+        ).fetchone()
+
+        if row is None:
+            return {
+                "status": "rejected",
+                "request_id": request_id,
+                "message": "persisted request row not found",
+            }
+
+        return {
+            "status": "ok",
+            "request_id": request_id,
+            "prompt_fields": {
+                "request_id": row["request_id"],
+                "organism_id": row["organism_id"],
+                "telos_digest": row["telos_digest"],
+                "action": row["action"],
+                "display_nonce": row["display_nonce"],
+                "bounded_summary": row["bounded_summary"],
+                "expected_host_context_digest": row["expected_host_context_digest"],
+                "expires_at": row["expires_at"],
+            },
+        }
+    except TelosApprovalError as exc:
+        return {
+            "status": "rejected",
+            "request_id": request_id if request_id else None,
+            "message": str(exc),
+        }
+    finally:
+        ledger.connection.close()

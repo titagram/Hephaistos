@@ -1209,8 +1209,10 @@ def test_make_agent_accepts_list_system_prompt(server, monkeypatch):
 
 
 def test_config_load_missing(server, tmp_path):
+    from hermes_cli.config import _normalize_evolution_config
+
     server._hermes_home = tmp_path
-    assert server._load_cfg() == {}
+    assert server._load_cfg() == _normalize_evolution_config({})
 
 
 def test_config_roundtrip(server, tmp_path):

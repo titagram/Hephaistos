@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
@@ -1001,6 +1002,34 @@ def _emit_approval_request(sid: str, data: dict | None) -> None:
 
         payload["command"] = _redact_approval_command(payload.get("command"))
     _emit("approval.request", sid, payload)
+
+
+_DIGEST_RE = re.compile(r"[0-9a-f]{64}\Z", re.ASCII)
+
+
+def _parse_autopoiesis_telos_transition(cmd_base: str, cmd_arg: str) -> tuple[str | None, str | None, str]:
+    """Parse autopoiesis telos approve|rollback <digest> with exact 3-token syntax.
+
+    Returns ``(action, digest, error)`` where exactly one of action/digest or
+    error is non-None.  ``action`` is ``"activate"`` or ``"rollback"``.
+    Extra tokens, missing digest, unknown verbs, or invalid digest format
+    are rejected without a request or event.
+    """
+    if cmd_base != "autopoiesis":
+        return None, None, ""
+    parts = cmd_arg.split()
+    if len(parts) < 2 or parts[0] != "telos":
+        return None, None, ""
+    verb = parts[1]
+    if verb not in ("approve", "rollback"):
+        return None, None, ""
+    if len(parts) != 3:
+        return None, None, "telos approve/rollback requires exactly a single 64-hex digest argument"
+    digest = parts[2]
+    if _DIGEST_RE.fullmatch(digest) is None:
+        return None, None, "invalid digest format — must be 64 lowercase hex characters"
+    action = "activate" if verb == "approve" else "rollback"
+    return action, digest, ""
 
 
 def _status_update(sid: str, kind: str, text: str | None = None):
@@ -9681,6 +9710,11 @@ def _(rid, params: dict) -> dict:
     session, err = _sess(params, rid)
     if err:
         return err
+
+    # ── Telos host-approval path ──
+    if params.get("domain") == "telos":
+        return _handle_telos_approval_respond(rid, params, session)
+
     try:
         from tools.approval import resolve_gateway_approval
 
@@ -9696,6 +9730,85 @@ def _(rid, params: dict) -> dict:
         )
     except Exception as e:
         return _err(rid, 5004, str(e))
+
+
+def _handle_telos_approval_respond(rid, params: dict, session: dict) -> dict:
+    """Handle approval.respond with domain=telos — complete the Telos transition.
+
+    Only ``"approved"`` and ``"denied"`` are valid choices.  Missing, ``"once"``,
+    ``"session"``, ``"always"``, and arbitrary values are rejected without
+    inserting any decision, consuming any grant, or publishing any pointer.
+    """
+    request_id = params.get("request_id", "")
+    choice = params.get("choice")  # deliberately not defaulting
+    session_key = session.get("session_key", "")
+
+    if not request_id:
+        return _err(rid, 4004, "request_id required for telos approval")
+    if not session_key:
+        return _err(rid, 4001, "no active session key")
+    if choice not in ("approved", "denied"):
+        return _ok(rid, {"status": "rejected", "message": "choice must be exactly approved or denied"})
+
+    decision = choice  # "approved" or "denied"
+
+    try:
+        from hermes_cli.evolution.organism_home import get_organism_home
+        from hermes_cli.evolution.ledger import EvolutionLedger
+        from hermes_cli.evolution.telos_store import TelosStore
+        from hermes_cli.evolution.host_transition import perform_telos_transition
+        from hermes_cli.evolution.telos_approval import HostApprovalContext, compute_context_digest
+
+        organism_root = get_organism_home()
+        ledger_path = organism_root / "evolution" / "evolution.db"
+        if not ledger_path.exists():
+            return _ok(rid, {"status": "rejected", "message": "no organism ledger"})
+
+        ledger = EvolutionLedger(ledger_path)
+        try:
+            req = ledger.connection.execute(
+                """SELECT request_id, organism_id, telos_digest, action,
+                          display_nonce, expected_host_context_digest, expires_at
+                   FROM telos_approval_requests
+                   WHERE request_id = ?""",
+                (request_id,),
+            ).fetchone()
+
+            if req is None:
+                return _ok(rid, {"status": "rejected", "message": "request not found"})
+
+            live_digest = compute_context_digest(
+                "tui_jsonrpc", "interactive-local-user", session_key,
+                request_id, req["display_nonce"],
+            )
+            if live_digest != req["expected_host_context_digest"]:
+                return _ok(rid, {"status": "rejected", "message": "context mismatch"})
+
+            context = HostApprovalContext(
+                surface="tui_jsonrpc",
+                actor_ref="interactive-local-user",
+                session_ref=session_key,
+                request_id=request_id,
+                telos_digest=req["telos_digest"],
+                action=req["action"],
+                nonce=req["display_nonce"],
+                context_digest=req["expected_host_context_digest"],
+            )
+
+            store = TelosStore(organism_root)
+            result = perform_telos_transition(ledger, store, context, decision)
+
+            if result.status == "approved":
+                return _ok(rid, {"status": "approved", "request_id": request_id[:8]})
+            elif result.status == "denied":
+                return _ok(rid, {"status": "denied", "request_id": request_id[:8]})
+            else:
+                return _ok(rid, {"status": "rejected", "message": result.message})
+        finally:
+            ledger.connection.close()
+    except Exception:
+        logger.warning("Telos respond failed", exc_info=True)
+        return _ok(rid, {"status": "rejected", "message": "internal error"})
 
 
 # ── Methods: config ──────────────────────────────────────────────────
@@ -11372,6 +11485,62 @@ def _(rid, params: dict) -> dict:
         pass
 
     try:
+        # ── Telos host-approval intercept ──
+        # Handled before generic skill/plugin discovery to avoid depending on
+        # scan_skill_commands succeeding.  Exact 3-token syntax enforced by
+        # _parse_autopoiesis_telos_transition.
+        _telos_action, _telos_digest, _telos_err = _parse_autopoiesis_telos_transition(name, arg)
+        if _telos_action is not None:
+            session_key = session.get("session_key", "") if session else ""
+            if not session_key:
+                return _err(rid, 4001, "no active session key — cannot create telos approval request")
+            sid = params.get("session_id", "")
+            try:
+                from hermes_cli.evolution.host_transition import prepare_telos_pending_request
+                prepared = prepare_telos_pending_request(
+                    digest=_telos_digest,
+                    action=_telos_action,
+                    surface="tui_jsonrpc",
+                    actor_ref="interactive-local-user",
+                    session_ref=session_key,
+                    ttl_seconds=3600,
+                )
+                if prepared["status"] != "ok":
+                    return _ok(rid, {
+                        "type": "telos_pending",
+                        "status": prepared["status"],
+                        "request_id": prepared.get("request_id"),
+                        "message": prepared.get("message", ""),
+                    })
+                pf = prepared["prompt_fields"]
+                telos_payload = {
+                    "domain": "telos",
+                    "request_id": pf["request_id"],
+                    "digest": pf["telos_digest"],
+                    "action": pf["action"],
+                    "bounded_summary": pf["bounded_summary"],
+                    "nonce": pf["display_nonce"],
+                    "expires_at": pf.get("expires_at"),
+                }
+                _emit("approval.request", sid, telos_payload)
+                return _ok(rid, {
+                    "type": "telos_pending",
+                    "status": "pending",
+                    "request_id": pf["request_id"],
+                })
+            except Exception:
+                logger.warning(
+                    "Telos pending request creation failed", exc_info=True,
+                )
+                return _ok(rid, {
+                    "type": "telos_pending",
+                    "status": "rejected",
+                    "request_id": None,
+                    "message": "internal error",
+                })
+        if _telos_err:
+            return _err(rid, 4004, _telos_err)
+
         from agent.skill_commands import (
             scan_skill_commands,
             build_skill_invocation_message,
@@ -11379,6 +11548,7 @@ def _(rid, params: dict) -> dict:
 
         cmds = scan_skill_commands()
         key = f"/{name}"
+
         if key in cmds:
             msg = build_skill_invocation_message(
                 key, arg, task_id=session.get("session_key", "") if session else ""
@@ -12537,6 +12707,22 @@ def _(rid, params: dict) -> dict:
                 4018,
                 "snapshot restore mutates live config/state; use command.dispatch for /snapshot restore",
             )
+
+    # ── Telos host-approval intercept: route autopoiesis telos approve/rollback ──
+    # to command.dispatch before the slash worker, so the pending request is
+    # created and an approval.request event is emitted to the same runtime session.
+    _telos_action, _telos_digest, _telos_err = _parse_autopoiesis_telos_transition(_cmd_base, _cmd_arg)
+    if _telos_action is not None:
+        return _methods["command.dispatch"](
+            rid,
+            {
+                "name": "autopoiesis",
+                "arg": _cmd_arg,
+                "session_id": params.get("session_id", ""),
+            },
+        )
+    if _telos_err:
+        return _err(rid, 4004, _telos_err)
 
     try:
         from agent.skill_commands import get_skill_commands
