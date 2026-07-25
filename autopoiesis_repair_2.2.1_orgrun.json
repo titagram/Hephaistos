@@ -1,0 +1,82 @@
+{
+  "schema": "hades.execution-portfolio.v1",
+  "org_run_id": "autopoiesis-repair-2-2-1-host-authority",
+  "project_id": "p_635370b6",
+  "repository_id": "github.com/titagram/Hephaistos",
+  "workspace_binding_id": "local-project:p_635370b6",
+  "base_commit": "5924446cd507c72c9edfb37f416f07c9e52ec54a",
+  "tasks": [
+    {
+      "remote_task_id": "AUTO-221-1",
+      "work_item_id": "autopoiesis-221-host-authority",
+      "title": "Bind Telos transitions to live host authority",
+      "body": "objective: Replace the generic Telos capability path with an exact, live host-owned transition boundary.\ndeliverable: TDD implementation and adversarial tests proving forged rows plus an unrelated live authority cannot activate or roll back Telos.\nin_scope: tools/approval.py, hermes_cli/evolution/telos_approval.py, hermes_cli/evolution/telos_store.py, exact Telos authority tests.\nout_of_scope: Gateway wiring, schema migration, TypeScript, remote backend, other Project B repairs.\nworkspace: current codex/autopoiesis-project-b-design worktree at base commit 5924446cd507c72c9edfb37f416f07c9e52ec54a.\nwrite_scope: tools/approval.py; hermes_cli/evolution/telos_approval.py; hermes_cli/evolution/telos_store.py; tests/hermes_cli/evolution/test_telos_adversarial.py; tests/hermes_cli/evolution/test_telos_approval_security.py; tests/hermes_cli/evolution/test_telos_contract_and_store.py.\ninput_evidence: autopoiesis_repair_2.2.1_prompt.md and the approved Project B specification.\ndependencies: none.\nacceptance_criteria: exact request, organism, digest, action, surface, actor, session/channel, nonce, context, expiry and single-use binding; persistent rows are audit-only; no pointer/LKG mutation on rejection; caller-owned ledgers remain open.\nrequired_verification: genuine RED then GREEN node receipts; focused Telos suites; no skips, xfails or weakened expectations.\nreturn_schema: changed_files, commits, red_green_receipts, verification_commands, residual_risks.",
+      "assignee": "leaf",
+      "priority": 100,
+      "risk": "high",
+      "depends_on": [],
+      "write_scope": [
+        "tools/approval.py",
+        "hermes_cli/evolution/telos_approval.py",
+        "hermes_cli/evolution/telos_store.py",
+        "tests/hermes_cli/evolution/test_telos_adversarial.py",
+        "tests/hermes_cli/evolution/test_telos_approval_security.py",
+        "tests/hermes_cli/evolution/test_telos_contract_and_store.py"
+      ]
+    },
+    {
+      "remote_task_id": "AUTO-221-2",
+      "work_item_id": "autopoiesis-221-schema-v5",
+      "title": "Migrate Telos approval audit chains to coherent v5",
+      "body": "objective: Make the persistent Telos approval audit chain relationally coherent without redefining v4.\ndeliverable: Explicit v4-to-v5 migration, fresh-v5 schema and direct-SQL adversarial coverage.\nin_scope: evolution ledger schema/migrations, repository current-version gate, migration and schema tests.\nout_of_scope: host adapters, TypeScript, remote backend, destructive rewriting of historical Project A rows.\nworkspace: current codex/autopoiesis-project-b-design worktree after AUTO-221-1.\nwrite_scope: hermes_cli/evolution/ledger.py; hermes_cli/evolution/suggestions.py; schema and migration test files named below.\ninput_evidence: cross-wired request-A/decision-B reproduction in autopoiesis_repair_2.2.1_prompt.md.\ndependencies: AUTO-221-1.\nacceptance_criteria: schema version 5; request-decision-grant-consumption coherence; context and expiry enforcement; append-only guarantees; incoherent v4 evidence preserved but excluded from authority; v1 through v5 migration chain remains atomic and idempotent.\nrequired_verification: genuine RED/GREEN direct-SQL nodes, fresh-v5, v4-to-v5, rollback-on-failure, repeated-open and Project A preservation tests.\nreturn_schema: changed_files, commits, migration_contract, red_green_receipts, verification_commands, residual_risks.",
+      "assignee": "leaf",
+      "priority": 90,
+      "risk": "high",
+      "depends_on": [
+        "AUTO-221-1"
+      ],
+      "write_scope": [
+        "hermes_cli/evolution/ledger.py",
+        "hermes_cli/evolution/suggestions.py",
+        "tests/hermes_cli/evolution/test_telos_schema_integrity.py",
+        "tests/hermes_cli/evolution/test_ledger_migrations.py",
+        "tests/hermes_cli/evolution/test_sqlite_schema_migration.py"
+      ]
+    },
+    {
+      "remote_task_id": "AUTO-221-3",
+      "work_item_id": "autopoiesis-221-gateway-host-flow",
+      "title": "Complete the Gateway Telos host transition",
+      "body": "objective: Wire the shared host authority through real Gateway slash dispatch.\ndeliverable: /approve telos and denial behavior that bind the real MessageEvent and complete exactly one activation or rollback.\nin_scope: Gateway slash-command routing and dedicated Gateway Telos tests.\nout_of_scope: classic CLI prompt, TUI Gateway, Ink, Desktop, remote backend.\nworkspace: current codex/autopoiesis-project-b-design worktree after AUTO-221-1 and AUTO-221-2.\nwrite_scope: gateway/slash_commands.py and tests/gateway/test_telos_approval_commands.py.\ninput_evidence: current handler records only a decision and falsely returns approved.\ndependencies: AUTO-221-1 and AUTO-221-2.\nacceptance_criteria: real MessageEvent actor/session/channel binding; exact pending request; approve and deny only; no all/session/always inheritance; success returned only after completed transition; authority revoked in finally; bounded failure text.\nrequired_verification: real-dispatch RED/GREEN nodes plus existing dangerous-command approval regression.\nreturn_schema: changed_files, commits, dispatch_test_receipts, regression_commands, residual_risks.",
+      "assignee": "leaf",
+      "priority": 80,
+      "risk": "high",
+      "depends_on": [
+        "AUTO-221-1",
+        "AUTO-221-2"
+      ],
+      "write_scope": [
+        "gateway/slash_commands.py",
+        "tests/gateway/test_telos_approval_commands.py"
+      ]
+    },
+    {
+      "remote_task_id": "AUTO-221-4",
+      "work_item_id": "autopoiesis-221-integration-blockers",
+      "title": "Remove suite-order and static-check blockers",
+      "body": "objective: Remove only the currently reproduced integration blockers required to verify Repair Pass 2.2.1.\ndeliverable: Order-independent default-root config test and clean Ruff/compileall/diff checks.\nin_scope: narrow global_config import/path fix, explicit UTF-8 encodings and its existing isolation test.\nout_of_scope: complete global-config semantics, command routing, Observer, session pinning, migration, TypeScript, remote backend.\nworkspace: current codex/autopoiesis-project-b-design worktree after AUTO-221-1 through AUTO-221-3.\nwrite_scope: hermes_cli/evolution/global_config.py and tests/hermes_cli/evolution/test_config_breaker_isolation.py.\ninput_evidence: full Evolution suite fails test_global_config_isolated_from_profile because the module caches get_default_hermes_root; Ruff reports two PLW1514 errors.\ndependencies: AUTO-221-1, AUTO-221-2 and AUTO-221-3.\nacceptance_criteria: test passes both alone and in full suite; profile bytes remain unchanged; explicit UTF-8; no expansion into pending global-config behavior.\nrequired_verification: focused config test, full Evolution suite, exact fourteen deferred tests, changed-file Ruff, compileall and git diff check.\nreturn_schema: changed_files, commits, focused_result, full_suite_result, static_check_results, residual_risks.",
+      "assignee": "leaf",
+      "priority": 70,
+      "risk": "medium",
+      "depends_on": [
+        "AUTO-221-1",
+        "AUTO-221-2",
+        "AUTO-221-3"
+      ],
+      "write_scope": [
+        "hermes_cli/evolution/global_config.py",
+        "tests/hermes_cli/evolution/test_config_breaker_isolation.py"
+      ]
+    }
+  ]
+}
