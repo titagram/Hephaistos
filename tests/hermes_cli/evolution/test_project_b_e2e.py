@@ -1,6 +1,6 @@
 """End-to-End Scenarios for Autopoiesis Project B (Global Telos and Opportunity Observer)."""
 
-import hashlib
+import asyncio
 import pytest
 from pathlib import Path
 
@@ -52,96 +52,104 @@ def _save_telos(store, org_id, purpose="Test", parent=None):
     return t
 
 
-def _broker_activate(ledger, org_id, digest, action="activate"):
-    """Full broker approval flow — approval is visible in the test, not hidden."""
+def _gateway_activate(ledger, org_id, digest):
+    """Activate a saved revision through the real Gateway /approve router."""
+    from gateway.config import Platform
+    from gateway.platforms.base import MessageEvent
+    from gateway.run import GatewayRunner
+    from gateway.session import SessionSource, build_session_key
+    from gateway.telos_coordinator import TelosCoordinator
     from hermes_cli.evolution.telos_approval import (
-        CapabilityRegistry, HostApprovalCapability, HostApprovalContext,
+        HostApprovalContext,
         SqliteTelosApprovalBroker,
     )
-    reg = CapabilityRegistry()
-    cap = HostApprovalCapability._test_create("cli", "actor")
-    reg.register(cap)
-    broker = SqliteTelosApprovalBroker(reg)
 
-    ctx = HostApprovalContext(
-        surface="cli", actor_ref="actor", session_ref="e2e",
-        request_id=None, telos_digest=digest, action=action,
-        nonce="e2e", context_digest=hashlib.sha256(b"e2e-ctx").hexdigest(),
+    source = SessionSource(
+        platform=Platform.TELEGRAM,
+        user_id="e2e-user",
+        chat_id="e2e-chat",
+        chat_type="dm",
     )
-    req_id = broker.create_request(ledger, org_id, digest, action, ctx, 3600)
+    context = HostApprovalContext(
+        surface="gateway",
+        actor_ref="telegram:e2e-user",
+        session_ref=build_session_key(source),
+        request_id=None,
+        telos_digest=digest,
+        action="activate",
+        nonce="e2e-approval",
+        context_digest="ignored",
+    )
+    request_id = SqliteTelosApprovalBroker().create_request(
+        ledger,
+        org_id,
+        digest,
+        "activate",
+        context,
+        3600,
+    )
+    ledger.connection.close()
 
-    # ── HOST DECISION (visible in test body) ──
-    ctx_r = HostApprovalContext(
-        surface="cli", actor_ref="actor", session_ref="e2e",
-        request_id=req_id, telos_digest=digest, action=action,
-        nonce="e2e", context_digest=hashlib.sha256(b"e2e-ctx").hexdigest(),
+    runner = object.__new__(GatewayRunner)
+    runner._telos_coordinator = TelosCoordinator()
+    runner._pending_approvals = {}
+    event = MessageEvent(
+        text=f"/approve telos {request_id}",
+        source=source,
+        message_id="e2e-message",
     )
-    dec_id = broker.record_host_decision(ledger, cap, ctx_r, "approved")
-    grant_id = broker.issue_grant(ledger, req_id, dec_id)
-    broker.consume_grant(ledger, grant_id, org_id, digest, action)
-    return grant_id
-
-def _make_cap(surface="cli"):
-    """Create a host capability and register it in the host registry."""
-    from hermes_cli.evolution.telos_approval import (
-        HostApprovalCapability, set_host_capability,
-    )
-    cap = HostApprovalCapability._test_create(surface, "test_actor")
-    set_host_capability(cap)
-    return cap
+    result = asyncio.run(runner._handle_approve_command(event))
+    assert "Telos activate completed" in result
 
 
 # ── Scenario 1: Initial Telos Approval Boundary ──
 
 def test_scenario_initial_telos_approval_boundary(tmp_path, monkeypatch):
-    """Draft exists but is inert. Direct activation fails. Host-approved activation succeeds. Replay fails."""
+    """Draft exists but is inert. Direct activation fails. Host-approved chain exists."""
     org, org_id, ledger, tstore = _setup_organism(tmp_path, monkeypatch)
 
     # 1. draft/revision exists but is inert
     telos = _save_telos(tstore, org_id, "Initial Telos")
     digest = telos.canonical_digest
-    assert tstore.get_active_digest() is None  # inert
+    assert tstore.get_active_digest() is None
 
-    # 2. direct activation fails
+    # 2. direct activation fails (public API always fails closed)
     from hermes_cli.evolution.telos_store import TelosStoreError
     with pytest.raises(TelosStoreError, match="host_approval_not_implemented"):
         tstore.activate_revision(digest)
 
-    # 3. model-facing command cannot self-approve (no capability)
+    # 3. model can create SQLite rows but cannot activate through public API
     from hermes_cli.evolution.telos_approval import (
-        CapabilityRegistry, HostApprovalCapability, HostApprovalContext,
-        SqliteTelosApprovalBroker, TelosApprovalError,
+        HostApprovalContext,
+        SqliteTelosApprovalBroker,
+        compute_context_digest,
     )
-    model_reg = CapabilityRegistry()  # empty registry = no host
-    model_broker = SqliteTelosApprovalBroker(model_reg)
-    model_cap = HostApprovalCapability._test_create("model", "model")
+    model_broker = SqliteTelosApprovalBroker()
     model_ctx = HostApprovalContext(
         surface="model", actor_ref="model", session_ref="m",
         request_id=None, telos_digest=digest, action="activate",
-        nonce="m", context_digest=hashlib.sha256(b"m").hexdigest(),
+        nonce="m", context_digest="ignored",
     )
     req_id = model_broker.create_request(ledger, org_id, digest, "activate", model_ctx, 3600)
+    correct_digest = compute_context_digest("model", "model", "m", req_id, "m")
     dec_ctx = HostApprovalContext(
         surface="model", actor_ref="model", session_ref="m",
         request_id=req_id, telos_digest=digest, action="activate",
-        nonce="m", context_digest=hashlib.sha256(b"m").hexdigest(),
+        nonce="m", context_digest=correct_digest,
     )
-    with pytest.raises(TelosApprovalError, match="not_verified"):
-        model_broker.record_host_decision(ledger, model_cap, dec_ctx, "approved")
+    model_broker.record_host_decision(ledger, dec_ctx, "approved")
+    # Model has SQLite rows but cannot publish pointers — no mutation
+    assert tstore.get_active_digest() is None
 
-    # 4. real host decision approves the exact digest
-    grant_id = _broker_activate(ledger, org_id, digest, "activate")
+    # 4. public API remains closed even with coherent model-created rows
+    with pytest.raises(TelosStoreError, match="host_approval_not_implemented"):
+        tstore.activate_revision(digest)
 
-    # 5. activation succeeds
-    tstore.activate_revision(digest, grant_id=grant_id, capability=_make_cap())
+    assert tstore.get_active_digest() is None
+
+    # 5. a real Gateway host event approves and activates the exact revision
+    _gateway_activate(ledger, org_id, digest)
     assert tstore.get_active_digest() == digest
-
-    # 6. replay fails — close ledger first (activate_revision opens its own)
-    ledger.connection.close()
-    with pytest.raises(TelosStoreError, match="already_used"):
-        tstore.activate_revision(digest, grant_id=grant_id, capability=_make_cap())
-
-    ledger.connection.close()
 
 
 # ── Scenario 2: Missing Webcam Capability ──
@@ -151,10 +159,7 @@ def test_scenario_missing_webcam_capability(tmp_path, monkeypatch):
     org, org_id, ledger, tstore = _setup_organism(tmp_path, monkeypatch)
     telos = _save_telos(tstore, org_id, "Webcam Telos")
     digest = telos.canonical_digest
-
-    # Activate via host approval
-    grant_id = _broker_activate(ledger, org_id, digest, "activate")
-    tstore.activate_revision(digest, grant_id=grant_id, capability=_make_cap())
+    _gateway_activate(ledger, org_id, digest)
 
     from hermes_cli.evolution.observation_contract import ObservationEnvelope
     from hermes_cli.evolution.observer_service import ObserverService
@@ -193,8 +198,7 @@ def test_scenario_performance_feedback_and_project_isolation(tmp_path, monkeypat
     org, org_id, ledger, tstore = _setup_organism(tmp_path, monkeypatch)
     telos = _save_telos(tstore, org_id, "Perf Telos")
     digest = telos.canonical_digest
-    grant_id = _broker_activate(ledger, org_id, digest, "activate")
-    tstore.activate_revision(digest, grant_id=grant_id, capability=_make_cap())
+    _gateway_activate(ledger, org_id, digest)
 
     from hermes_cli.evolution.observation_contract import ObservationEnvelope
     from hermes_cli.evolution.observer_service import ObserverService
@@ -239,8 +243,7 @@ def test_project_isolation_two_profiles_one_organism(tmp_path, monkeypatch):
     org_root, org_id, ledger, tstore = _setup_organism(tmp_path, monkeypatch)
     telos = _save_telos(tstore, org_id, "Project Isolation Telos")
     digest = telos.canonical_digest
-    grant_id = _broker_activate(ledger, org_id, digest, "activate")
-    tstore.activate_revision(digest, grant_id=grant_id, capability=_make_cap())
+    _gateway_activate(ledger, org_id, digest)
 
     # Two distinct profiles with separate workspace roots
     profile_a = tmp_path / "profile_a"

@@ -1,12 +1,8 @@
-"""Host approval capability, registry, and broker for Telos authorization.
+"""Host approval broker for Telos authorization.
 
-The model-controlled shell cannot forge a HostApprovalCapability because:
-- No public constructor exists — only the internal host adapter factory creates them
-- The CapabilityRegistry stores live objects and verifies by identity (``is``)
-- Capabilities are in-memory, non-serializable, single-use, and bound to context
-
-Host surfaces (CLI, gateway, TUI) register capabilities in the module-level
-_HOST_REGISTRY. activate_revision/rollback check against this registry.
+The SQLiteTelosApprovalBroker is an internal implementation detail used
+exclusively by the gateway-owned TelosCoordinator.  Coherent SQLite rows
+alone never invoke a pointer mutation.
 """
 
 from __future__ import annotations
@@ -24,48 +20,30 @@ if TYPE_CHECKING:
     from .ledger import EvolutionLedger
 
 
-# -- Module-level host registry --
-# Only host surfaces (CLI, gateway, TUI) populate this. The model-controlled
-# process does not have access to a register() here -- it can construct its
-# own CapabilityRegistry but it will not be THIS one.
-
-_HOST_REGISTRY = None  # set after CapabilityRegistry class def below
-
-
-def set_host_capability(capability):
-    """Register a capability in the process-global host registry."""
-    global _HOST_REGISTRY
-    if _HOST_REGISTRY is None:
-        _HOST_REGISTRY = CapabilityRegistry()
-    _HOST_REGISTRY.register(capability)
-
-
-def clear_host_capability(capability):
-    """Revoke and clear a capability from the host registry."""
-    global _HOST_REGISTRY
-    if _HOST_REGISTRY is not None:
-        _HOST_REGISTRY.revoke(capability)
-
-
-def verify_host_capability(capability):
-    """Check whether a capability is registered in the host registry."""
-    if _HOST_REGISTRY is None:
-        return False
-    return _HOST_REGISTRY.verify(capability)
-
-
-import secrets
-import uuid
-from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from .ledger import EvolutionLedger
-
-
 class TelosApprovalError(RuntimeError):
     """Bounded error during Telos approval workflow."""
+
+
+def compute_context_digest(
+    surface: str, actor: str, session: str,
+    request_id: str, nonce: str,
+) -> str:
+    """Canonical context digest binding host surface, actor, session, request_id, and nonce.
+
+    Uses canonical JSON (sorted-key, compact) with a fixed domain/version marker
+    to prevent structural delimiter collisions (e.g. ``::`` in any field value).
+
+    ``create_request`` stores this as ``expected_host_context_digest``.
+    The gateway-owned coordinator re-computes the same digest from the
+    live event and request row during ``approve`` / ``deny``.
+    """
+    raw = json.dumps(
+        ["telos-host-context-v1", surface, actor, session, request_id, nonce],
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -81,64 +59,6 @@ class HostApprovalContext:
     nonce: str
     context_digest: str
     expires_at: str | None = None
-
-
-class HostApprovalCapability:
-    """An in-process, non-serializable token proving host origin.
-
-    Created only by the host adapter factory (no public constructor).
-    Verified by identity (Python ``is``) against the active registry.
-    Never written to disk, DB, or transmitted to the model.
-    """
-
-    __slots__ = ("_token", "_surface", "_actor_ref")
-
-    def __init__(self, surface: str, actor_ref: str) -> None:
-        self._token = secrets.token_urlsafe(32)
-        self._surface = surface
-        self._actor_ref = actor_ref
-
-    @classmethod
-    def _test_create(cls, surface: str, actor_ref: str) -> HostApprovalCapability:
-        """Create a capability for testing only.
-
-        NOT available in production — host adapters use their own internal factory.
-        """
-        return cls(surface, actor_ref)
-
-    def __eq__(self, other: object) -> bool:
-        """Identity-based equality — value equality is not supported."""
-        return self is other
-
-    def __hash__(self) -> int:
-        return id(self)
-
-
-class CapabilityRegistry:
-    """Per-process registry of active capabilities.
-
-    Stores live capability objects. Verifies by identity (not value).
-    After restart, no capabilities survive.
-    """
-
-    def __init__(self) -> None:
-        self._caps: list[HostApprovalCapability] = []
-
-    def register(self, cap: HostApprovalCapability) -> None:
-        """Register a capability minted by a host adapter."""
-        self._caps.append(cap)
-
-    def verify(self, cap: HostApprovalCapability) -> bool:
-        """Check if *cap* is a registered live capability object."""
-        return any(stored is cap for stored in self._caps)
-
-    def revoke(self, cap: HostApprovalCapability) -> None:
-        """Revoke a capability — removes by identity."""
-        self._caps = [stored for stored in self._caps if stored is not cap]
-
-    @property
-    def active_count(self) -> int:
-        return len(self._caps)
 
 
 @dataclass(frozen=True)
@@ -170,13 +90,9 @@ class TelosApprovalBroker(ABC):
     """ABC for the Telos approval broker — connects host decisions to SQLite.
 
     The implementation must:
-    - Verify capabilities via a CapabilityRegistry before recording decisions
     - Insert into append-only Telos tables with triggers
     - Enforce single-use grants and consumptions
     """
-
-    def __init__(self, registry: CapabilityRegistry) -> None:
-        self._registry = registry
 
     @abstractmethod
     def create_request(
@@ -195,11 +111,10 @@ class TelosApprovalBroker(ABC):
     def record_host_decision(
         self,
         ledger: EvolutionLedger,
-        capability: HostApprovalCapability,
         context: HostApprovalContext,
         decision: str,
     ) -> str:
-        """Record a host approval decision. Requires verified capability. Returns decision_id."""
+        """Record a host approval decision. Returns decision_id."""
         ...
 
     @abstractmethod
@@ -237,8 +152,10 @@ class TelosApprovalBroker(ABC):
 class SqliteTelosApprovalBroker(TelosApprovalBroker):
     """SQLite-backed Telos approval broker.
 
-    Implements all broker methods using the Telos append-only tables
-    in the EvolutionLedger (created by v3→v4 migration).
+    Internal implementation detail — used by the gateway-owned TelosCoordinator.
+    Not guarded by a host capability, because the coordinator IS the host
+    authority.  Model callers can write SQLite rows through this broker,
+    but coherent rows alone never invoke a pointer mutation.
     """
 
     def create_request(
@@ -250,12 +167,41 @@ class SqliteTelosApprovalBroker(TelosApprovalBroker):
         context: HostApprovalContext,
         ttl_seconds: int,
     ) -> str:
-        import uuid
-        from datetime import datetime, timezone, timedelta
+        if action not in ("activate", "rollback"):
+            raise TelosApprovalError(
+                f"telos_invalid_action: expected activate or rollback, got {action!r}"
+            )
+        if not organism_id:
+            raise TelosApprovalError("telos_empty_organism_id")
+        if len(telos_digest) != 64 or not all(
+            c in "0123456789abcdefABCDEF" for c in telos_digest
+        ):
+            raise TelosApprovalError(
+                "telos_invalid_digest: must be 64 hex characters"
+            )
+        if ttl_seconds <= 0 or ttl_seconds > 86400:
+            raise TelosApprovalError(
+                "telos_invalid_ttl: must be between 1 and 86400 seconds"
+            )
+        if context.action != action or context.telos_digest != telos_digest:
+            raise TelosApprovalError("telos_request_context_mismatch")
+        if not all(
+            (
+                context.surface,
+                context.actor_ref,
+                context.session_ref,
+                context.nonce,
+            )
+        ):
+            raise TelosApprovalError("telos_request_context_incomplete")
 
-        request_id = str(uuid.uuid4())
+        request_id = str(_uuid.uuid4())
         now = datetime.now(timezone.utc)
         expires = now + timedelta(seconds=ttl_seconds)
+        actual_digest = compute_context_digest(
+            context.surface, context.actor_ref, context.session_ref,
+            request_id, context.nonce,
+        )
 
         with ledger.transaction() as conn:
             conn.execute(
@@ -266,7 +212,7 @@ class SqliteTelosApprovalBroker(TelosApprovalBroker):
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     request_id, organism_id, telos_digest, action,
-                    context.context_digest, context.nonce,
+                    actual_digest, context.nonce,
                     f"Telos {action} for {organism_id[:8]}...",
                     now.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
                     expires.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
@@ -277,14 +223,10 @@ class SqliteTelosApprovalBroker(TelosApprovalBroker):
     def record_host_decision(
         self,
         ledger: EvolutionLedger,
-        capability: HostApprovalCapability,
         context: HostApprovalContext,
         decision: str,
     ) -> str:
         from datetime import datetime, timezone
-
-        if not self._registry.verify(capability):
-            raise TelosApprovalError("telos_capability_not_verified")
 
         if decision not in ("approved", "denied"):
             raise TelosApprovalError("telos_invalid_decision")
@@ -319,15 +261,14 @@ class SqliteTelosApprovalBroker(TelosApprovalBroker):
         request_id: str,
         decision_id: str,
     ) -> str:
-        from datetime import datetime, timezone, timedelta
         import uuid
+        from datetime import datetime, timedelta, timezone
 
         grant_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc)
         expires = now + timedelta(hours=1)
 
         with ledger.transaction() as conn:
-            # Verify request exists
             req = conn.execute(
                 "SELECT organism_id, telos_digest, action FROM telos_approval_requests WHERE request_id = ?",
                 (request_id,),
@@ -362,14 +303,13 @@ class SqliteTelosApprovalBroker(TelosApprovalBroker):
         telos_digest: str,
         action: str,
     ) -> str:
-        from datetime import datetime, timezone
         import uuid
+        from datetime import datetime, timezone
 
         consumption_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc)
 
         with ledger.transaction() as conn:
-            # Verify grant exists and hasn't expired
             grant = conn.execute(
                 "SELECT organism_id, telos_digest, action, expires_at FROM telos_approval_grants WHERE grant_id = ?",
                 (grant_id,),

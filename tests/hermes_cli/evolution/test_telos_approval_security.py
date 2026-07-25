@@ -1,5 +1,4 @@
-"""Security tests for Telos approval boundary — broker and capability path."""
-
+"""Security tests for Telos approval boundary — broker and internal publication path."""
 import hashlib
 import pytest
 import uuid
@@ -17,106 +16,45 @@ def _setup_organism(tmp_path, monkeypatch):
     monkeypatch.setattr(_oh, "get_organism_home", lambda: org)
     monkeypatch.setattr(_hc, "get_default_hermes_root", lambda: tmp_path / ".hermes")
     from hermes_cli.evolution.lifecycle_global import ensure_global_lifecycle_initialized
-    gen = ensure_global_lifecycle_initialized()
     from hermes_cli.evolution.ledger import EvolutionLedger
+    gen = ensure_global_lifecycle_initialized()
     ledger = EvolutionLedger(org / "evolution" / "evolution.db")
     return org, ledger, gen.generation_id
 
 
-def _make_cap(surface="cli"):
-    """Create a host capability and register it in the host registry."""
-    from hermes_cli.evolution.telos_approval import (
-        HostApprovalCapability, set_host_capability,
-    )
-    cap = HostApprovalCapability._test_create(surface, "test_actor")
-    set_host_capability(cap)
-    return cap
-
-def test_no_host_receipt_approval_fails(tmp_path, monkeypatch):
-    """Without a capability in the registry, approval must fail."""
-    org, ledger, gen_id = _setup_organism(tmp_path, monkeypatch)
-
-    from hermes_cli.evolution.telos_approval import (
-        CapabilityRegistry, HostApprovalCapability, HostApprovalContext,
-        SqliteTelosApprovalBroker, TelosApprovalError,
-    )
-
-    registry = CapabilityRegistry()
-    # Capability NOT registered in registry
-    cap = HostApprovalCapability._test_create("attacker", "fake_actor")
-    broker = SqliteTelosApprovalBroker(registry)
-
-    ctx = HostApprovalContext(
-        surface="attacker", actor_ref="fake", session_ref="s",
-        request_id="req-1", telos_digest="a" * 64, action="activate",
-        nonce="1", context_digest=hashlib.sha256(b"x").hexdigest(),
-    )
-
-    with pytest.raises(TelosApprovalError, match="telos_capability_not_verified"):
-        broker.record_host_decision(ledger, cap, ctx, "approved")
-
-    ledger.connection.close()
-
-
-def test_invented_receipt_approval_fails(tmp_path, monkeypatch):
-    """A capability from a DIFFERENT registry must be rejected."""
-    org, ledger, gen_id = _setup_organism(tmp_path, monkeypatch)
-
-    from hermes_cli.evolution.telos_approval import (
-        CapabilityRegistry, HostApprovalCapability, HostApprovalContext,
-        SqliteTelosApprovalBroker, TelosApprovalError,
-    )
-
-    reg1 = CapabilityRegistry()
-    reg2 = CapabilityRegistry()
-    cap = HostApprovalCapability._test_create("gateway", "actor")
-
-    # Register in reg1, but broker uses reg2
-    reg1.register(cap)
-    broker = SqliteTelosApprovalBroker(reg2)
-
-    ctx = HostApprovalContext(
-        surface="gateway", actor_ref="actor", session_ref="s",
-        request_id="req-2", telos_digest="b" * 64, action="activate",
-        nonce="2", context_digest=hashlib.sha256(b"y").hexdigest(),
-    )
-
-    with pytest.raises(TelosApprovalError, match="telos_capability_not_verified"):
-        broker.record_host_decision(ledger, cap, ctx, "approved")
-
-    ledger.connection.close()
+def _canonical_digest(surface, actor, session, request_id, nonce):
+    """Compute the canonical context digest — delegate to the canonical implementation."""
+    from hermes_cli.evolution.telos_approval import compute_context_digest
+    return compute_context_digest(surface, actor, session, request_id, nonce)
 
 
 def test_valid_host_receipt_approval_succeeds(tmp_path, monkeypatch):
-    """A registered capability enables approval and grant consumption."""
+    """A registered host approval enables decision, grant, and consumption."""
     org, ledger, gen_id = _setup_organism(tmp_path, monkeypatch)
 
     from hermes_cli.evolution.telos_approval import (
-        CapabilityRegistry, HostApprovalCapability, HostApprovalContext,
-        SqliteTelosApprovalBroker, TelosApprovalError,
+        HostApprovalContext,
+        SqliteTelosApprovalBroker,
     )
 
-    registry = CapabilityRegistry()
-    cap = HostApprovalCapability._test_create("classic_cli", "test_actor")
-    registry.register(cap)
-    broker = SqliteTelosApprovalBroker(registry)
-
+    broker = SqliteTelosApprovalBroker()
     org_id = str(uuid.uuid4())
     digest = "c" * 64
 
     ctx_create = HostApprovalContext(
         surface="classic_cli", actor_ref="test_actor", session_ref="sess1",
         request_id=None, telos_digest=digest, action="activate",
-        nonce="1234", context_digest=hashlib.sha256(b"ctx").hexdigest(),
+        nonce="1234", context_digest="ignored",
     )
     req_id = broker.create_request(ledger, org_id, digest, "activate", ctx_create, 3600)
 
+    correct_digest = _canonical_digest("classic_cli", "test_actor", "sess1", req_id, "1234")
     ctx_decide = HostApprovalContext(
         surface="classic_cli", actor_ref="test_actor", session_ref="sess1",
         request_id=req_id, telos_digest=digest, action="activate",
-        nonce="1234", context_digest=hashlib.sha256(b"ctx").hexdigest(),
+        nonce="1234", context_digest=correct_digest,
     )
-    dec_id = broker.record_host_decision(ledger, cap, ctx_decide, "approved")
+    dec_id = broker.record_host_decision(ledger, ctx_decide, "approved")
     grant_id = broker.issue_grant(ledger, req_id, dec_id)
 
     # Consume grant
@@ -131,30 +69,28 @@ def test_replay_or_mismatched_receipt_fails(tmp_path, monkeypatch):
     org, ledger, gen_id = _setup_organism(tmp_path, monkeypatch)
 
     from hermes_cli.evolution.telos_approval import (
-        CapabilityRegistry, HostApprovalCapability, HostApprovalContext,
-        SqliteTelosApprovalBroker, TelosApprovalError,
+        HostApprovalContext,
+        SqliteTelosApprovalBroker,
+        TelosApprovalError,
     )
 
-    registry = CapabilityRegistry()
-    cap = HostApprovalCapability._test_create("classic_cli", "actor")
-    registry.register(cap)
-    broker = SqliteTelosApprovalBroker(registry)
-
+    broker = SqliteTelosApprovalBroker()
     org_id = str(uuid.uuid4())
     digest = "d" * 64
 
     ctx_create = HostApprovalContext(
         surface="classic_cli", actor_ref="actor", session_ref="s",
         request_id=None, telos_digest=digest, action="activate",
-        nonce="r1", context_digest=hashlib.sha256(b"rr").hexdigest(),
+        nonce="r1", context_digest="ignored",
     )
     req_id = broker.create_request(ledger, org_id, digest, "activate", ctx_create, 3600)
+    correct_digest = _canonical_digest("classic_cli", "actor", "s", req_id, "r1")
     ctx_dec = HostApprovalContext(
         surface="classic_cli", actor_ref="actor", session_ref="s",
         request_id=req_id, telos_digest=digest, action="activate",
-        nonce="r1", context_digest=hashlib.sha256(b"rr").hexdigest(),
+        nonce="r1", context_digest=correct_digest,
     )
-    dec_id = broker.record_host_decision(ledger, cap, ctx_dec, "approved")
+    dec_id = broker.record_host_decision(ledger, ctx_dec, "approved")
     grant_id = broker.issue_grant(ledger, req_id, dec_id)
 
     # First consumption: success

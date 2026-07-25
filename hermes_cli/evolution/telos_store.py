@@ -1,20 +1,15 @@
-"""Telos storage, pointer management, authorization, and rollback."""
-
+"""Telos storage and pointer-management — no host-authorised transition methods."""
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
 
 from .organism_home import ensure_organism_directories, secure_file_permissions
 from .telos_contract import TelosRevision, telos_revision_from_dict, validate_telos_revision
 
-if TYPE_CHECKING:
-    from .ledger import EvolutionLedger
-
 
 class TelosStoreError(Exception):
-    """Raised when Telos storage, activation, approval, or rollback operations fail."""
+    """Raised when Telos storage, activation, or rollback operations fail."""
 
 
 class TelosStore:
@@ -47,87 +42,15 @@ class TelosStore:
         receipt_id: str = "",
         *,
         grant_id: str | None = None,
-        capability: "HostApprovalCapability | None" = None,
-        ledger: "EvolutionLedger | None" = None,
     ) -> None:
-        """Activate a Telos revision after live host-approved grant consumption.
+        """Public activation — always fails closed.
 
-        Requires a valid consumed grant_id AND a live HostApprovalCapability
-        verified by the host CapabilityRegistry. The capability proves that a
-        live host process (CLI, gateway, TUI) made the decision — SQLite rows
-        alone are never sufficient authorization.
+        Model callers cannot invoke pointer mutation through any
+        TelosStore method, public or private.  Host-authorised
+        pointer publication lives in the gateway-owned
+        ``TelosCoordinator``.
         """
-        if grant_id is None:
-            raise TelosStoreError("host_approval_not_implemented")
-        if capability is None:
-            raise TelosStoreError("host_approval_not_implemented")
-
-        from .telos_approval import (
-            SqliteTelosApprovalBroker, CapabilityRegistry,
-            verify_host_capability,
-        )
-        from datetime import datetime, timezone
-
-        if ledger is None:
-            from .ledger import EvolutionLedger
-            ledger = EvolutionLedger(self.organism_root / "evolution" / "evolution.db")
-
-        try:
-            # Live host capability verification — SQLite rows alone are not authority
-            # Uses module-level HOST_REGISTRY populated only by host surfaces
-            if not verify_host_capability(capability):
-                raise TelosStoreError("telos_live_host_capability_required")
-
-            # Verify grant exists and matches digest + action
-            grant_row = ledger.connection.execute(
-                "SELECT organism_id, telos_digest, action FROM telos_approval_grants WHERE grant_id = ?",
-                (grant_id,),
-            ).fetchone()
-            if grant_row is None:
-                raise TelosStoreError("telos_grant_not_found")
-            if grant_row["telos_digest"] != digest:
-                raise TelosStoreError("telos_grant_digest_mismatch")
-            if grant_row["action"] != "activate":
-                raise TelosStoreError("telos_grant_wrong_action")
-
-            # Replay detection — a grant must be single-use for activation
-            if self.active_pointer.exists():
-                existing = json.loads(self.active_pointer.read_text(encoding="utf-8"))
-                if existing.get("grant_id") == grant_id:
-                    raise TelosStoreError("telos_grant_already_used")
-
-            # Verify consumption exists
-            consumption = ledger.connection.execute(
-                "SELECT organism_id, telos_digest, action FROM telos_approval_consumptions WHERE grant_id = ?",
-                (grant_id,),
-            ).fetchone()
-            if consumption is None:
-                raise TelosStoreError("telos_grant_not_consumed")
-
-            # Verify revision exists
-            revision_path = self.revisions_dir / f"{digest}.json"
-            if not revision_path.exists():
-                raise TelosStoreError("telos_content_not_found")
-
-            # Stage active pointer atomically
-            active_data = {
-                "digest": digest,
-                "activated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
-                "grant_id": grant_id,
-            }
-            tmp = self.active_pointer.with_suffix(".json.tmp")
-            tmp.write_text(json.dumps(active_data, sort_keys=True), encoding="utf-8")
-            tmp.chmod(0o600)
-            tmp.rename(self.active_pointer)
-
-            # Update LKG if this is first activation
-            if not self.lkg_pointer.exists():
-                lkg_data = {"digest": digest}
-                self.lkg_pointer.write_text(json.dumps(lkg_data, sort_keys=True), encoding="utf-8")
-
-        finally:
-            if ledger is not None:
-                ledger.connection.close()
+        raise TelosStoreError("host_approval_not_implemented")
 
     def get_active_digest(self) -> str | None:
         if not self.active_pointer.exists():
@@ -150,58 +73,6 @@ class TelosStore:
         receipt_id: str = "",
         *,
         grant_id: str | None = None,
-        capability: "HostApprovalCapability | None" = None,
-        ledger: "EvolutionLedger | None" = None,
     ) -> None:
-        """Rollback to a previously verified Telos revision.
-
-        Requires a valid consumed grant_id AND live host capability.
-        """
-        if grant_id is None:
-            raise TelosStoreError("host_approval_not_implemented")
-        if capability is None:
-            raise TelosStoreError("host_approval_not_implemented")
-
-        if ledger is None:
-            from .ledger import EvolutionLedger
-            ledger = EvolutionLedger(self.organism_root / "evolution" / "evolution.db")
-
-        try:
-            from .telos_approval import verify_host_capability as _vhc
-            if not _vhc(capability):
-                raise TelosStoreError("telos_live_host_capability_required")
-
-            grant_row = ledger.connection.execute(
-                "SELECT organism_id, telos_digest, action FROM telos_approval_grants WHERE grant_id = ?",
-                (grant_id,),
-            ).fetchone()
-            if grant_row is None:
-                raise TelosStoreError("telos_grant_not_found")
-            if grant_row["telos_digest"] != target_digest:
-                raise TelosStoreError("telos_grant_digest_mismatch")
-            if grant_row["action"] != "rollback":
-                raise TelosStoreError("telos_grant_wrong_action")
-
-            consumption = ledger.connection.execute(
-                "SELECT organism_id, telos_digest, action FROM telos_approval_consumptions WHERE grant_id = ?",
-                (grant_id,),
-            ).fetchone()
-            if consumption is None:
-                raise TelosStoreError("telos_grant_not_consumed")
-
-            from datetime import datetime, timezone
-
-            active_data = {
-                "digest": target_digest,
-                "activated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
-                "grant_id": grant_id,
-                "rollback": True,
-            }
-            tmp = self.active_pointer.with_suffix(".json.tmp")
-            tmp.write_text(json.dumps(active_data, sort_keys=True), encoding="utf-8")
-            tmp.chmod(0o600)
-            tmp.rename(self.active_pointer)
-
-        finally:
-            if ledger is not None:
-                ledger.connection.close()
+        """Public rollback — always fails closed for model callers."""
+        raise TelosStoreError("host_approval_not_implemented")

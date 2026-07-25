@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
 
-from .ledger import EvolutionLedgerError, _same_file, _validate_schema
+from .ledger import SCHEMA_VERSION, EvolutionLedgerError, _same_file, _validate_schema
 from .observation_contract import ObservationEnvelope, observation_envelope_from_dict, validate_observation_envelope
 from .observer_policy import OpportunityScore
 from .organism_home import ensure_organism_directories, secure_file_permissions
@@ -201,7 +201,7 @@ class SuggestionRepository:
             if row is None:
                 raise SuggestionRepositoryError("observer_schema_unavailable")
             s_version = int(row["version"])
-            if s_version != 4:
+            if s_version != SCHEMA_VERSION:
                 raise SuggestionRepositoryError("observer_schema_unsupported")
 
             # Verify Project B tables exist (fast pre-check)

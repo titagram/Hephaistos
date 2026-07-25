@@ -276,7 +276,12 @@ def evolution_command(args: Any) -> int:
 
 
 def _telos_command(sub: str, org_root: Any = None, digest: str | None = None) -> dict[str, Any]:
-    """Telos status and history read-only commands."""
+    """Telos status and history read-only commands.
+
+    Model-facing operations may save drafts, create/resume pending requests,
+    inspect status, and cancel pending requests.  They may NOT record host
+    decisions, issue/consume grants, activate, or rollback.
+    """
     from pathlib import Path
     from .organism_home import get_organism_home
     from .telos_store import TelosStore
@@ -293,7 +298,6 @@ def _telos_command(sub: str, org_root: Any = None, digest: str | None = None) ->
             "has_active": active is not None,
         }
     elif sub == "history":
-        # List all revision digests
         revisions_dir = root / "telos" / "revisions"
         digests = []
         if revisions_dir.is_dir():
@@ -305,6 +309,12 @@ def _telos_command(sub: str, org_root: Any = None, digest: str | None = None) ->
             "action": "telos_history",
             "revision_count": len(digests),
             "revisions": digests[:50],
+        }
+    elif sub in ("approve", "rollback"):
+        return {
+            "schema_version": 1,
+            "action": sub,
+            "error": "host_approval_required",
         }
     return {"schema_version": 1, "action": "telos", "error": "unknown_subcommand"}
 

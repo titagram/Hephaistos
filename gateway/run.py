@@ -2725,6 +2725,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # Key: Platform enum, Value: {"config": platform_config, "attempts": int, "next_retry": float}
         self._failed_platforms: Dict[Platform, Dict[str, Any]] = {}
 
+        # Telos transition coordinator — one in-memory instance per gateway
+        # process.  Created during init, never exposed to model commands or
+        # serialised.  Restart destroys coordinator state.
+        from gateway.telos_coordinator import TelosCoordinator
+        self._telos_coordinator = TelosCoordinator()
+
         # Track pending /update prompt responses per session.
         # Key: session_key, Value: True when a prompt is waiting for user input.
         self._update_prompt_pending: Dict[str, bool] = {}

@@ -29,14 +29,15 @@ from hermes_cli.evolution.telos_store import TelosStore, TelosStoreError
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _create_v3_database(path: Path) -> None:
-    """Create a v4 database with all Project A + Project B tables."""
+def _create_current_database(path: Path) -> None:
+    """Create a canonical current database with all evolution tables."""
     connection = sqlite3.connect(path)
     connection.execute("PRAGMA foreign_keys=ON")
     for statement in ledger_module._SCHEMA_STATEMENTS:
         connection.execute(statement)
     connection.execute(
-        "INSERT INTO schema_version(singleton, version) VALUES (1, 4)"
+        "INSERT INTO schema_version(singleton, version) VALUES (1, ?)",
+        (ledger_module.SCHEMA_VERSION,),
     )
     connection.commit()
     connection.close()
@@ -57,14 +58,29 @@ def _create_v2_database(path: Path) -> None:
     os.chmod(path, 0o600)
 
 
-def _create_v3_missing_table(path: Path) -> None:
-    """Create a v4 database missing one Project B table."""
+def _create_v4_database(path: Path) -> None:
+    """Create the last pre-v5 database without migrating it."""
+    connection = sqlite3.connect(path)
+    connection.execute("PRAGMA foreign_keys=ON")
+    for statement in ledger_module._SCHEMA_V4_STATEMENTS:
+        connection.execute(statement)
+    connection.execute(
+        "INSERT INTO schema_version(singleton, version) VALUES (1, 4)"
+    )
+    connection.commit()
+    connection.close()
+    os.chmod(path, 0o600)
+
+
+def _create_current_missing_table(path: Path) -> None:
+    """Create a current database missing one Project B table."""
     connection = sqlite3.connect(path)
     connection.execute("PRAGMA foreign_keys=ON")
     for statement in ledger_module._SCHEMA_STATEMENTS:
         connection.execute(statement)
     connection.execute(
-        "INSERT INTO schema_version(singleton, version) VALUES (1, 4)"
+        "INSERT INTO schema_version(singleton, version) VALUES (1, ?)",
+        (ledger_module.SCHEMA_VERSION,),
     )
     # Drop one Project B table
     connection.execute("DROP TABLE opportunity_suggestion_events")
@@ -80,7 +96,7 @@ def _create_v3_missing_table(path: Path) -> None:
 def test_opportunity_key_has_exactly_one_unique_mechanism(tmp_path: Path) -> None:
     """Column is NOT NULL only; the named unique index provides semantic uniqueness."""
     path = tmp_path / "evolution.db"
-    _create_v3_database(path)
+    _create_current_database(path)
 
     conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     try:
@@ -115,7 +131,7 @@ def test_no_autoindex_on_opportunity_key(tmp_path: Path) -> None:
     """sqlite_autoindex for PRIMARY KEY (suggestion_id) is allowed,
     but no autoindex UNIQUE should exist for opportunity_key."""
     path = tmp_path / "evolution.db"
-    _create_v3_database(path)
+    _create_current_database(path)
 
     conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     try:
@@ -156,7 +172,7 @@ def test_repository_missing_database_raises_without_creating(tmp_path: Path) -> 
 def test_repository_rejects_symlink(tmp_path: Path) -> None:
     """B. Symlink → SuggestionRepositoryError, target non aperto."""
     target = tmp_path / "actual.db"
-    _create_v3_database(target)
+    _create_current_database(target)
     symlink = tmp_path / "link.db"
     symlink.symlink_to(target)
 
@@ -212,10 +228,28 @@ def test_repository_rejects_v2_database_without_migrating(tmp_path: Path) -> Non
         conn.close()
 
 
-def test_repository_accepts_valid_v3_database(tmp_path: Path) -> None:
-    """E. v3 valido → accettato, letture e scritture funzionano."""
+def test_repository_rejects_v4_database_without_migrating(tmp_path: Path) -> None:
+    """The repository accepts only the lifecycle-migrated current schema."""
     path = tmp_path / "evolution.db"
-    _create_v3_database(path)
+    _create_v4_database(path)
+
+    with pytest.raises(SuggestionRepositoryError, match="observer_schema_unsupported"):
+        SuggestionRepository(path)
+
+    connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        version = connection.execute(
+            "SELECT version FROM schema_version WHERE singleton = 1"
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    assert version == 4
+
+
+def test_repository_accepts_current_database(tmp_path: Path) -> None:
+    """E. Current canonical schema supports repository reads and writes."""
+    path = tmp_path / "evolution.db"
+    _create_current_database(path)
 
     repo = SuggestionRepository(path)
     assert repo.db_path == path
@@ -229,10 +263,10 @@ def test_repository_accepts_valid_v3_database(tmp_path: Path) -> None:
     assert envelopes == []
 
 
-def test_repository_rejects_v3_missing_table(tmp_path: Path) -> None:
-    """F. v3 privo di una tabella Project B → SuggestionRepositoryError."""
+def test_repository_rejects_current_missing_table(tmp_path: Path) -> None:
+    """F. Current schema missing a Project B table is rejected."""
     path = tmp_path / "evolution.db"
-    _create_v3_missing_table(path)
+    _create_current_missing_table(path)
 
     with pytest.raises(SuggestionRepositoryError) as exc_info:
         SuggestionRepository(path)
@@ -243,7 +277,7 @@ def test_repository_rejects_v3_missing_table(tmp_path: Path) -> None:
 def test_repository_race_after_construction(tmp_path: Path) -> None:
     """G. Race: DB eliminato dopo costruzione → fail, non ricreato."""
     path = tmp_path / "evolution.db"
-    _create_v3_database(path)
+    _create_current_database(path)
 
     repo = SuggestionRepository(path)
 
@@ -374,7 +408,7 @@ def test_activate_revision_with_existing_database_still_fail_closed(tmp_path: Pa
     evo_dir = organism / "evolution"
     evo_dir.mkdir()
     db_path = evo_dir / "evolution.db"
-    _create_v3_database(db_path)
+    _create_current_database(db_path)
 
     store = TelosStore(organism)
     # Pre-create active.json to verify it's not modified
@@ -397,7 +431,7 @@ def test_rollback_with_existing_database_still_fail_closed(tmp_path: Path) -> No
     evo_dir = organism / "evolution"
     evo_dir.mkdir()
     db_path = evo_dir / "evolution.db"
-    _create_v3_database(db_path)
+    _create_current_database(db_path)
 
     store = TelosStore(organism)
     store.telos_dir.mkdir(parents=True, exist_ok=True)
@@ -458,7 +492,7 @@ def test_save_and_get_revision_still_work(tmp_path: Path) -> None:
 def test_connect_existing_raises_on_deleted_db(tmp_path: Path) -> None:
     """_connect_existing fallisce se il database è stato eliminato."""
     path = tmp_path / "evolution.db"
-    _create_v3_database(path)
+    _create_current_database(path)
 
     # Should work when DB exists
     conn = _connect_existing(path)
@@ -482,8 +516,8 @@ def test_repository_rejects_symlink_replacement_after_construction(
     """A symlink swapped in after construction must be rejected on next open."""
     db1 = tmp_path / "db1.db"
     db2 = tmp_path / "db2.db"
-    _create_v3_database(db1)
-    _create_v3_database(db2)
+    _create_current_database(db1)
+    _create_current_database(db2)
 
     repo = SuggestionRepository(db1)
 
@@ -523,7 +557,7 @@ def test_connect_existing_rejects_non_regular_path_directly(tmp_path: Path) -> N
 
     # Symlink
     target = tmp_path / "target.db"
-    _create_v3_database(target)
+    _create_current_database(target)
     link = tmp_path / "link.db"
     link.symlink_to(target)
     with pytest.raises(SuggestionRepositoryError) as exc_info:
@@ -546,7 +580,7 @@ def test_connect_existing_rejects_non_regular_path_directly(tmp_path: Path) -> N
 def test_get_connection_enables_foreign_keys(tmp_path: Path) -> None:
     """_get_connection must enable PRAGMA foreign_keys."""
     path = tmp_path / "evolution.db"
-    _create_v3_database(path)
+    _create_current_database(path)
     repo = SuggestionRepository(path)
 
     conn = repo._get_connection()
@@ -561,7 +595,7 @@ def test_repository_reserved_uri_characters_do_not_redirect_or_create_database(
 ) -> None:
     """A filename containing ? or # must not be interpreted as a URI query/fragment."""
     path = tmp_path / "evolution.db?alias"
-    _create_v3_database(path)
+    _create_current_database(path)
 
     # Verify the plain name does not exist
     plain = tmp_path / "evolution.db"
@@ -579,21 +613,24 @@ def test_repository_reserved_uri_characters_do_not_redirect_or_create_database(
 
 
 # ---------------------------------------------------------------------------
-# Repair 1A.2 — Task 3: canonical v3 schema validation via ledger
+# Repair 1A.2 — Task 3: canonical current-schema validation via ledger
 # ---------------------------------------------------------------------------
 
-def _create_malformed_v3_database(path: Path) -> None:
-    """Create a fake v3 with correct table names but wrong column structure."""
+def _create_malformed_current_database(path: Path) -> None:
+    """Create a fake current DB with expected names but wrong columns."""
     connection = sqlite3.connect(path)
     connection.execute("PRAGMA foreign_keys=ON")
     # Create a schema_version with correct values
     connection.execute(
         "CREATE TABLE schema_version ("
         "  singleton INTEGER NOT NULL PRIMARY KEY CHECK(singleton = 1),"
-        "  version INTEGER NOT NULL CHECK(version = 4)"
+        f"  version INTEGER NOT NULL CHECK(version = {ledger_module.SCHEMA_VERSION})"
         ") WITHOUT ROWID"
     )
-    connection.execute("INSERT INTO schema_version VALUES (1, 4)")
+    connection.execute(
+        "INSERT INTO schema_version VALUES (1, ?)",
+        (ledger_module.SCHEMA_VERSION,),
+    )
     # Create Project B tables with arbitrary incomplete columns
     connection.execute("CREATE TABLE observation_envelopes (event_id TEXT)")
     connection.execute("CREATE TABLE opportunity_suggestions (suggestion_id TEXT)")
@@ -603,13 +640,16 @@ def _create_malformed_v3_database(path: Path) -> None:
     os.chmod(path, 0o600)
 
 
-def _create_noncanonical_index_v3_database(path: Path) -> None:
-    """Create a canonical v3 then alter an index to make it non-canonical."""
+def _create_noncanonical_index_current_database(path: Path) -> None:
+    """Create a current DB, then alter an index to make it non-canonical."""
     connection = sqlite3.connect(path)
     connection.execute("PRAGMA foreign_keys=ON")
     for statement in ledger_module._SCHEMA_STATEMENTS:
         connection.execute(statement)
-    connection.execute("INSERT INTO schema_version VALUES (1, 4)")
+    connection.execute(
+        "INSERT INTO schema_version VALUES (1, ?)",
+        (ledger_module.SCHEMA_VERSION,),
+    )
     # Drop a Project B index
     connection.execute("DROP INDEX IF EXISTS opportunity_suggestions_opportunity_key_idx")
     connection.commit()
@@ -617,12 +657,12 @@ def _create_noncanonical_index_v3_database(path: Path) -> None:
     os.chmod(path, 0o600)
 
 
-def test_repository_rejects_structurally_malformed_v3_database(
+def test_repository_rejects_structurally_malformed_current_database(
     tmp_path: Path,
 ) -> None:
-    """A database with v4 table names but wrong columns must be rejected."""
+    """A current-version DB with wrong columns must be rejected."""
     path = tmp_path / "fake.db"
-    _create_malformed_v3_database(path)
+    _create_malformed_current_database(path)
 
     with pytest.raises(SuggestionRepositoryError) as exc_info:
         SuggestionRepository(path)
@@ -633,12 +673,12 @@ def test_repository_rejects_structurally_malformed_v3_database(
     assert db_files == [path]
 
 
-def test_repository_rejects_noncanonical_v3_index_layout(
+def test_repository_rejects_noncanonical_current_index_layout(
     tmp_path: Path,
 ) -> None:
-    """A v4 database with a missing Project B index must be rejected."""
+    """A current database with a missing Project B index is rejected."""
     path = tmp_path / "evolution.db"
-    _create_noncanonical_index_v3_database(path)
+    _create_noncanonical_index_current_database(path)
 
     with pytest.raises(SuggestionRepositoryError) as exc_info:
         SuggestionRepository(path)
@@ -655,7 +695,7 @@ def test_repository_constructor_closes_validation_connection(
 ) -> None:
     """The constructor must explicitly close its validation connection."""
     path = tmp_path / "evolution.db"
-    _create_v3_database(path)
+    _create_current_database(path)
 
     # Track connections returned by _connect_existing
     tracked_connections = []

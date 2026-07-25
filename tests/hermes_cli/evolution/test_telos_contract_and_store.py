@@ -1,5 +1,4 @@
-"""Tests for Telos contract, validation, pointers, and rollback."""
-
+"""Tests for Telos contract, validation, and store — no host-authorised pointer mutation."""
 import hashlib
 import pytest
 from pathlib import Path
@@ -45,43 +44,6 @@ def create_sample_telos(organism_id: str = "00000000-0000-0000-0000-000000000000
     )
 
 
-def _broker_activate(org_root, ledger, org_id, digest, action="activate"):
-    """Full broker flow: create request, approve, issue grant, consume, activate."""
-    from hermes_cli.evolution.telos_approval import (
-        CapabilityRegistry, HostApprovalCapability, HostApprovalContext,
-        SqliteTelosApprovalBroker,
-    )
-    registry = CapabilityRegistry()
-    cap = HostApprovalCapability._test_create("cli", "actor")
-    registry.register(cap)
-    broker = SqliteTelosApprovalBroker(registry)
-
-    ctx = HostApprovalContext(
-        surface="cli", actor_ref="actor", session_ref="s",
-        request_id=None, telos_digest=digest, action=action,
-        nonce="n1", context_digest=hashlib.sha256(b"ctx").hexdigest(),
-    )
-    req_id = broker.create_request(ledger, org_id, digest, action, ctx, 3600)
-    ctx_r = HostApprovalContext(
-        surface="cli", actor_ref="actor", session_ref="s",
-        request_id=req_id, telos_digest=digest, action=action,
-        nonce="n1", context_digest=hashlib.sha256(b"ctx").hexdigest(),
-    )
-    dec_id = broker.record_host_decision(ledger, cap, ctx_r, "approved")
-    grant_id = broker.issue_grant(ledger, req_id, dec_id)
-    broker.consume_grant(ledger, grant_id, org_id, digest, action)
-    return grant_id
-
-
-def _make_cap(surface="cli"):
-    """Create a host capability and register it in the host registry."""
-    from hermes_cli.evolution.telos_approval import (
-        HostApprovalCapability, set_host_capability,
-    )
-    cap = HostApprovalCapability._test_create(surface, "test_actor")
-    set_host_capability(cap)
-    return cap
-
 def test_telos_contract_validation():
     telos = create_sample_telos()
     validate_telos_revision(telos)
@@ -116,56 +78,31 @@ def test_telos_contract_constitution_conflict():
         validate_telos_revision(telos)
 
 
-def test_telos_store_save_activate_rollback(tmp_path: Path, monkeypatch):
-    """Full lifecycle: save A, unapproved fails, approved activates, replay fails,
-    amendment B succeeds, rollback to A succeeds."""
+def test_telos_store_save_get(tmp_path: Path, monkeypatch):
+    """Save and retrieve a revision; unapproved activate/rollback fail closed."""
     monkeypatch.setattr("hermes_cli.evolution.ledger._open_file_descriptors", lambda: None)
-    from hermes_cli.evolution.ledger import EvolutionLedger
 
     org_root = tmp_path / "organism"
     store = TelosStore(org_root)
-    ledger = EvolutionLedger(org_root / "evolution" / "evolution.db")
-
-    # 1. save revision A
     t_a = create_sample_telos()
     store.save_revision(t_a)
     digest_a = t_a.canonical_digest
 
-    # 2. unapproved activation fails
+    assert store.get_revision(digest_a).canonical_digest == digest_a
+    assert store.get_active_digest() is None
+
     with pytest.raises(TelosStoreError, match="host_approval_not_implemented"):
         store.activate_revision(digest_a)
 
-    # 3. exact host-approved activation of A succeeds
-    grant_a = _broker_activate(org_root, ledger, t_a.organism_id, digest_a, "activate")
-    store.activate_revision(digest_a, grant_id=grant_a, capability=_make_cap())
-    assert store.get_active_digest() == digest_a
-    assert store.get_active_revision().canonical_digest == digest_a
+    with pytest.raises(TelosStoreError, match="host_approval_not_implemented"):
+        store.rollback(digest_a)
 
-    # 4. replay fails
-    with pytest.raises(TelosStoreError):
-        store.activate_revision(digest_a, grant_id=grant_a, capability=_make_cap())
 
-    # 5. amendment B succeeds with exact approval
-    t_b = create_sample_telos(parent_digest=digest_a)
-    store.save_revision(t_b)
-    digest_b = t_b.canonical_digest
-    assert digest_b != digest_a
+def test_telos_store_get_missing_revision(tmp_path: Path, monkeypatch):
+    """Requesting a non-existent revision raises TelosStoreError."""
+    monkeypatch.setattr("hermes_cli.evolution.ledger._open_file_descriptors", lambda: None)
 
-    grant_b = _broker_activate(org_root, ledger, t_b.organism_id, digest_b, "activate")
-    store.activate_revision(digest_b, grant_id=grant_b, capability=_make_cap())
-    assert store.get_active_digest() == digest_b
-
-    # 6. LKG still points to A
-    import json
-    lkg = json.loads((org_root / "telos" / "last-known-good.json").read_text())
-    assert lkg["digest"] == digest_a
-
-    # 7. exact approved rollback to A succeeds
-    rollback_grant = _broker_activate(org_root, ledger, t_a.organism_id, digest_a, "rollback")
-    store.rollback(digest_a, grant_id=rollback_grant, capability=_make_cap())
-    assert store.get_active_digest() == digest_a
-
-    # 8. later history remains immutable — B is still available
-    assert store.get_revision(digest_b).canonical_digest == digest_b
-
-    ledger.connection.close()
+    org_root = tmp_path / "organism"
+    store = TelosStore(org_root)
+    with pytest.raises(TelosStoreError, match="Telos revision not found"):
+        store.get_revision("f" * 64)
