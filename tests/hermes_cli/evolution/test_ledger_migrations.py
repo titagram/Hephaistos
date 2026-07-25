@@ -31,6 +31,11 @@ REQUIRED_TABLES = {
     "observation_envelopes",
     "opportunity_suggestions",
     "opportunity_suggestion_events",
+    "telos_approval_requests",
+    "telos_approval_decisions",
+    "telos_approval_grants",
+    "telos_approval_consumptions",
+    "telos_approval_quarantine_v4",
 }
 
 
@@ -866,7 +871,7 @@ def test_suggestions_and_opportunity_suggestions_coexist(tmp_path) -> None:
     ).fetchone()[0] == "y" * 64
 
 
-def test_future_schema_v4_fails_closed(tmp_path) -> None:
+def test_future_schema_v5_fails_closed(tmp_path) -> None:
     path = tmp_path / "evolution.db"
     connection = sqlite3.connect(path)
     connection.execute("CREATE TABLE schema_version (version INTEGER NOT NULL)")
@@ -880,3 +885,300 @@ def test_future_schema_v4_fails_closed(tmp_path) -> None:
 
     with pytest.raises(EvolutionLedgerError, match="unsupported_schema_version"):
         EvolutionLedger(path)
+
+
+# ── v4→v5 migration chain ──────────────────────────────────────────────────
+
+def _create_valid_v4_database(path: Path) -> None:
+    """Create a complete v4 database with Project A + Project B + Telos rows."""
+    from hermes_cli.evolution import ledger as _ledger
+    connection = sqlite3.connect(path)
+    connection.execute("PRAGMA foreign_keys=ON")
+    for statement in _ledger._SCHEMA_V4_STATEMENTS:
+        connection.execute(statement)
+    connection.execute("INSERT INTO schema_version VALUES (1, 4)")
+    connection.execute(
+        "INSERT INTO attempts VALUES ('att-v4', 'manual', 'ticket-v4', 'draft', '2026-07-24T00:00:00.000000Z')"
+    )
+    connection.execute(
+        "INSERT INTO suggestions VALUES ('sug-v4', 'att-v4', ?, 'draft', '2026-07-24T00:00:00.000000Z')",
+        ("v" * 64,),
+    )
+    connection.commit()
+    connection.close()
+    os.chmod(path, 0o600)
+
+
+def test_v1_to_v2_to_v3_to_v4_to_v5_full_chain(tmp_path) -> None:
+    path = tmp_path / "evolution.db"
+    _create_valid_v1_database(path)
+    ledger = EvolutionLedger(path)
+    assert ledger.schema_version == ledger_module.SCHEMA_VERSION == 5
+    assert ledger.connection.execute(
+        "SELECT source_ref FROM attempts WHERE attempt_id = 'attempt-v1'"
+    ).fetchone()[0] == "ticket-v1"
+    tables = {row[0] for row in ledger.connection.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table'"
+    )}
+    assert "observation_envelopes" in tables
+    assert "telos_approval_requests" in tables
+    assert "telos_approval_quarantine_v4" in tables
+
+
+def test_v4_to_v5_migration_preserves_v4_rows_byte_for_byte(tmp_path) -> None:
+    path = tmp_path / "evolution.db"
+    _create_valid_v4_database(path)
+
+    conn = sqlite3.connect(path)
+    before = {
+        "attempts": conn.execute("SELECT * FROM attempts ORDER BY 1").fetchall(),
+        "suggestions": conn.execute("SELECT * FROM suggestions ORDER BY 1").fetchall(),
+    }
+    conn.close()
+
+    ledger = EvolutionLedger(path)
+    assert ledger.schema_version == 5
+
+    for table in ("attempts", "suggestions"):
+        after = ledger.connection.execute(
+            f'SELECT * FROM "{table}" ORDER BY 1'
+        ).fetchall()
+        assert [tuple(r) for r in after] == [tuple(r) for r in before[table]]
+
+
+def test_v4_to_v5_migration_idempotent_reopen(tmp_path) -> None:
+    path = tmp_path / "evolution.db"
+    _create_valid_v4_database(path)
+    l1 = EvolutionLedger(path)
+    assert l1.schema_version == 5
+    l1.connection.close()
+    for _ in range(2):
+        ledger = EvolutionLedger(path)
+        assert ledger.schema_version == 5
+        ledger.connection.close()
+
+
+def test_v4_to_v5_rollback_on_failure(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "evolution.db"
+    _create_valid_v4_database(path)
+
+    original = ledger_module._execute_migration_statement
+    calls = [0]
+
+    def fail_after_first_additive(connection, statement):
+        calls[0] += 1
+        if calls[0] == 2:
+            raise sqlite3.OperationalError("injected rollback")
+        return original(connection, statement)
+
+    monkeypatch.setattr(
+        ledger_module, "_execute_migration_statement", fail_after_first_additive
+    )
+
+    with pytest.raises(EvolutionLedgerError):
+        EvolutionLedger(path)
+
+    check = sqlite3.connect(path)
+    assert check.execute("SELECT version FROM schema_version").fetchone()[0] == 4
+    assert check.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'telos_approval_quarantine_v4'"
+    ).fetchone() is None
+    assert check.execute(
+        "SELECT source_ref FROM attempts WHERE attempt_id = 'att-v4'"
+    ).fetchone()[0] == "ticket-v4"
+    check.close()
+
+
+# ── v4→v5 migration — quarantine + view coherence ──────────────────────────
+
+def test_v4_to_v5_cross_wired_quarantined_and_excluded_from_view(tmp_path):
+    """Cross-wired v4 history is preserved and quarantined but never in telos_valid_approval_chains."""
+    from hermes_cli.evolution import ledger as _ledger
+    path = tmp_path / "evolution.db"
+    conn = sqlite3.connect(str(path))
+    conn.execute("PRAGMA foreign_keys=ON")
+    for stmt in _ledger._SCHEMA_V4_STATEMENTS:
+        conn.execute(stmt)
+    conn.execute("INSERT INTO schema_version VALUES (1, 4)")
+    d = "a" * 64
+    conn.execute(
+        "INSERT INTO telos_approval_requests VALUES (?,?,?,?,?,?,?,?,?)",
+        ("req-A", "org-A", d, "activate", "ctx-A", "n1", "summary-A",
+         "2026-01-01T00:00:00.000000Z", "2099-01-01T00:00:00.000000Z"),
+    )
+    conn.execute(
+        "INSERT INTO telos_approval_requests VALUES (?,?,?,?,?,?,?,?,?)",
+        ("req-B", "org-B", d, "activate", "ctx-B", "n2", "summary-B",
+         "2026-01-01T00:00:00.000000Z", "2099-01-01T00:00:00.000000Z"),
+    )
+    conn.execute(
+        "INSERT INTO telos_approval_decisions VALUES (?,?,?,?,?,?,?)",
+        ("dec-B", "req-B", "approved", "cli", "actor", "ctx-B",
+         "2026-01-01T00:00:00.000000Z"),
+    )
+    # Cross-wired: grant for req-A but decision for req-B
+    conn.execute(
+        "INSERT INTO telos_approval_grants VALUES (?,?,?,?,?,?,?,?)",
+        ("g1", "req-A", "dec-B", "org-A", d, "activate",
+         "2026-01-01T00:00:00.000000Z", "2099-01-01T00:00:00.000000Z"),
+    )
+    conn.execute(
+        "INSERT INTO telos_approval_consumptions VALUES (?,?,?,?,?,?)",
+        ("c1", "g1", "org-A", d, "activate", "2026-06-01T00:00:00.000000Z"),
+    )
+    conn.commit()
+    conn.close()
+    path.chmod(0o600)
+
+    ledger = EvolutionLedger(path)
+    assert ledger.schema_version == 5
+
+    # Original audit rows preserved
+    assert ledger.connection.execute(
+        "SELECT COUNT(*) FROM telos_approval_requests"
+    ).fetchone()[0] == 2
+    assert ledger.connection.execute(
+        "SELECT COUNT(*) FROM telos_approval_grants"
+    ).fetchone()[0] == 1
+    assert ledger.connection.execute(
+        "SELECT COUNT(*) FROM telos_approval_consumptions"
+    ).fetchone()[0] == 1
+
+    # Quarantine has the cross-wired grant
+    q = ledger.connection.execute(
+        "SELECT table_name, row_id, reason FROM telos_approval_quarantine_v4"
+    ).fetchall()
+    assert any(
+        r["reason"] == "cross_wired_decision_request"
+        and r["table_name"] == "telos_approval_grants"
+        and r["row_id"] == "g1"
+        for r in q
+    )
+
+    # View must be empty — no valid chain
+    assert ledger.connection.execute(
+        "SELECT COUNT(*) FROM telos_valid_approval_chains"
+    ).fetchone()[0] == 0
+
+
+def test_v4_to_v5_wrong_context_quarantined_and_excluded_from_view(tmp_path):
+    """Wrong-context v4 history preserved and quarantined but never in the view."""
+    from hermes_cli.evolution import ledger as _ledger
+    path = tmp_path / "evolution.db"
+    conn = sqlite3.connect(str(path))
+    conn.execute("PRAGMA foreign_keys=ON")
+    for stmt in _ledger._SCHEMA_V4_STATEMENTS:
+        conn.execute(stmt)
+    conn.execute("INSERT INTO schema_version VALUES (1, 4)")
+    d = "a" * 64
+    conn.execute(
+        "INSERT INTO telos_approval_requests VALUES (?,?,?,?,?,?,?,?,?)",
+        ("req-A", "org-A", d, "activate", "expected-ctx", "n1", "summary",
+         "2026-01-01T00:00:00.000000Z", "2099-01-01T00:00:00.000000Z"),
+    )
+    # Decision has wrong host_context_digest (mismatches expected-ctx)
+    conn.execute(
+        "INSERT INTO telos_approval_decisions VALUES (?,?,?,?,?,?,?)",
+        ("dec-A", "req-A", "approved", "cli", "actor", "wrong-ctx",
+         "2026-01-01T00:00:00.000000Z"),
+    )
+    conn.execute(
+        "INSERT INTO telos_approval_grants VALUES (?,?,?,?,?,?,?,?)",
+        ("g1", "req-A", "dec-A", "org-A", d, "activate",
+         "2026-01-01T00:00:00.000000Z", "2099-01-01T00:00:00.000000Z"),
+    )
+    conn.execute(
+        "INSERT INTO telos_approval_consumptions VALUES (?,?,?,?,?,?)",
+        ("c1", "g1", "org-A", d, "activate", "2026-06-01T00:00:00.000000Z"),
+    )
+    conn.commit()
+    conn.close()
+    path.chmod(0o600)
+
+    ledger = EvolutionLedger(path)
+    assert ledger.schema_version == 5
+
+    # Original rows preserved
+    assert ledger.connection.execute(
+        "SELECT COUNT(*) FROM telos_approval_requests"
+    ).fetchone()[0] == 1
+    assert ledger.connection.execute(
+        "SELECT COUNT(*) FROM telos_approval_decisions"
+    ).fetchone()[0] == 1
+    assert ledger.connection.execute(
+        "SELECT COUNT(*) FROM telos_approval_consumptions"
+    ).fetchone()[0] == 1
+
+    # Quarantine has the wrong-context decision
+    q = ledger.connection.execute(
+        "SELECT table_name, row_id, reason FROM telos_approval_quarantine_v4"
+    ).fetchall()
+    assert any(
+        r["reason"] == "wrong_host_context"
+        and r["table_name"] == "telos_approval_decisions"
+        and r["row_id"] == "dec-A"
+        for r in q
+    )
+
+    # View must be empty — context mismatch makes chain invalid
+    assert ledger.connection.execute(
+        "SELECT COUNT(*) FROM telos_valid_approval_chains"
+    ).fetchone()[0] == 0
+
+
+def test_v4_to_v5_coherent_v4_survives_in_view(tmp_path):
+    """Coherent v4 history survives migration and appears in telos_valid_approval_chains."""
+    from hermes_cli.evolution import ledger as _ledger
+    path = tmp_path / "evolution.db"
+    conn = sqlite3.connect(str(path))
+    conn.execute("PRAGMA foreign_keys=ON")
+    for stmt in _ledger._SCHEMA_V4_STATEMENTS:
+        conn.execute(stmt)
+    conn.execute("INSERT INTO schema_version VALUES (1, 4)")
+    d = "a" * 64
+    conn.execute(
+        "INSERT INTO telos_approval_requests VALUES (?,?,?,?,?,?,?,?,?)",
+        ("req-A", "org-A", d, "activate", "ctx-match", "n1", "summary",
+         "2026-01-01T00:00:00.000000Z", "2099-01-01T00:00:00.000000Z"),
+    )
+    conn.execute(
+        "INSERT INTO telos_approval_decisions VALUES (?,?,?,?,?,?,?)",
+        ("dec-A", "req-A", "approved", "cli", "actor", "ctx-match",
+         "2026-06-01T00:00:00.000000Z"),
+    )
+    conn.execute(
+        "INSERT INTO telos_approval_grants VALUES (?,?,?,?,?,?,?,?)",
+        ("g1", "req-A", "dec-A", "org-A", d, "activate",
+         "2026-06-01T00:00:00.000000Z", "2099-01-01T00:00:00.000000Z"),
+    )
+    conn.execute(
+        "INSERT INTO telos_approval_consumptions VALUES (?,?,?,?,?,?)",
+        ("c1", "g1", "org-A", d, "activate", "2026-07-01T00:00:00.000000Z"),
+    )
+    conn.commit()
+    conn.close()
+    path.chmod(0o600)
+
+    ledger = EvolutionLedger(path)
+    assert ledger.schema_version == 5
+
+    # No quarantined rows
+    assert ledger.connection.execute(
+        "SELECT COUNT(*) FROM telos_approval_quarantine_v4"
+    ).fetchone()[0] == 0
+
+    # View has exactly one valid chain
+    rows = ledger.connection.execute(
+        "SELECT * FROM telos_valid_approval_chains"
+    ).fetchall()
+    assert len(rows) == 1, f"Expected 1 chain in view, got {len(rows)}"
+    row = rows[0]
+    assert row["request_id"] == "req-A"
+    assert row["decision_id"] == "dec-A"
+    assert row["grant_id"] == "g1"
+    assert row["consumption_id"] == "c1"
+    assert row["organism_id"] == "org-A"
+    assert row["telos_digest"] == d
+    assert row["action"] == "activate"
+    assert row["expected_host_context_digest"] == "ctx-match"
+    assert row["host_context_digest"] == "ctx-match"

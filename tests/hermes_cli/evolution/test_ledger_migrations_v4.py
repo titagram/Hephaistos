@@ -25,7 +25,7 @@ def test_v3_to_v4_migration_adds_telos_tables_and_triggers(tmp_path):
     path = tmp_path / "evolution.db"
     _create_valid_v3_database(path)
     ledger = EvolutionLedger(path)
-    assert ledger.schema_version == 4
+    assert ledger.schema_version == 5
 
     tables = {
         row[0]
@@ -37,6 +37,7 @@ def test_v3_to_v4_migration_adds_telos_tables_and_triggers(tmp_path):
     assert "telos_approval_decisions" in tables
     assert "telos_approval_grants" in tables
     assert "telos_approval_consumptions" in tables
+    assert "telos_approval_quarantine_v4" in tables
 
     triggers = {
         row[0]
@@ -53,6 +54,18 @@ def test_v3_to_v4_migration_adds_telos_tables_and_triggers(tmp_path):
     assert "trg_telos_grants_no_delete" in triggers
     assert "trg_telos_consumptions_no_delete" in triggers
     assert "trg_telos_grant_requires_approved_decision" in triggers
+    assert "trg_telos_v5_context_mismatch" in triggers
+    assert "trg_telos_v5_decision_request_mismatch" in triggers
+    assert "trg_telos_quarantine_no_update" in triggers
+    assert "trg_telos_quarantine_no_delete" in triggers
+
+    views = {
+        row[0]
+        for row in ledger.connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='view'"
+        )
+    }
+    assert "telos_valid_approval_chains" in views
     ledger.connection.close()
 
 
@@ -63,7 +76,7 @@ def test_v3_to_v4_preserves_v3_rows(tmp_path):
     _create_valid_v3_database(path)
 
     ledger = EvolutionLedger(path)
-    assert ledger.schema_version == 4
+    assert ledger.schema_version == 5
     # Verify the migrated database has all v4 tables
     tables = {
         row[0]

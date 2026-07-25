@@ -23,7 +23,7 @@ from .contract import canonical_json_bytes, content_digest, require_digest
 from .state_machine import TransitionRequest, validate_transition
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 _MAX_DIGESTS = 64
 _VERIFY_BATCH_SIZE = 256
 _PATH_SCHEME_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*:")
@@ -873,6 +873,126 @@ _TABLES_V4 = _TABLES_V3 + (
     "telos_approval_consumptions",
 )
 
+# Snapshot of the v4 full schema for preflight validation and migration source.
+_SCHEMA_V4_STATEMENTS = (
+    """
+    CREATE TABLE schema_version (
+        singleton INTEGER NOT NULL PRIMARY KEY CHECK(singleton = 1),
+        version INTEGER NOT NULL CHECK(version = 4)
+    ) WITHOUT ROWID
+    """,
+    *(
+        statement
+        for statement in _SCHEMA_V2_STATEMENTS
+        if not _statement_starts_with(
+            statement,
+            ("CREATE TABLE schema_version ",),
+        )
+    ),
+    *_SCHEMA_V3_ADDITIVE_STATEMENTS,
+    *_SCHEMA_V4_ADDITIVE_STATEMENTS,
+)
+
+_SCHEMA_V5_ADDITIVE_STATEMENTS = (
+    # Decision host_context_digest must match request expected_host_context_digest
+    """
+    CREATE TRIGGER trg_telos_v5_context_mismatch
+    BEFORE INSERT ON telos_approval_decisions
+    BEGIN
+        SELECT CASE WHEN (
+            SELECT expected_host_context_digest FROM telos_approval_requests
+            WHERE request_id = NEW.request_id
+        ) != NEW.host_context_digest
+        THEN RAISE(FAIL, 'telos_v5_context_mismatch') END;
+    END
+    """,
+    # Grant decision must belong to the same request (cross-wiring fix)
+    """
+    CREATE TRIGGER trg_telos_v5_decision_request_mismatch
+    BEFORE INSERT ON telos_approval_grants
+    BEGIN
+        SELECT CASE WHEN (
+            SELECT request_id FROM telos_approval_decisions
+            WHERE decision_id = NEW.decision_id
+        ) != NEW.request_id
+        THEN RAISE(FAIL, 'telos_v5_decision_request_mismatch') END;
+    END
+    """,
+    # Quarantine table for incoherent v4 audit rows
+    """
+    CREATE TABLE telos_approval_quarantine_v4 (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        quarantined_at TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        table_name TEXT NOT NULL,
+        row_id TEXT NOT NULL,
+        UNIQUE(table_name, row_id, reason)
+    )
+    """,
+    # No-update trigger for quarantine
+    """
+    CREATE TRIGGER trg_telos_quarantine_no_update
+    BEFORE UPDATE ON telos_approval_quarantine_v4
+    BEGIN
+        SELECT RAISE(FAIL, 'telos_quarantine_immutable');
+    END
+    """,
+    # No-delete trigger for quarantine
+    """
+    CREATE TRIGGER trg_telos_quarantine_no_delete
+    BEFORE DELETE ON telos_approval_quarantine_v4
+    BEGIN
+        SELECT RAISE(FAIL, 'telos_quarantine_immutable');
+    END
+    """,
+    # Canonical view of valid approval chains — excludes quarantined rows
+    """
+    CREATE VIEW telos_valid_approval_chains AS
+    SELECT
+        r.request_id,
+        d.decision_id,
+        g.grant_id,
+        c.consumption_id,
+        r.organism_id,
+        r.telos_digest,
+        r.action,
+        r.expected_host_context_digest,
+        r.display_nonce,
+        r.expires_at AS request_expires_at,
+        d.host_surface,
+        d.host_actor_ref,
+        d.host_context_digest,
+        d.decided_at,
+        g.expires_at AS grant_expires_at,
+        c.consumed_at
+    FROM telos_approval_requests r
+    JOIN telos_approval_decisions d ON d.request_id = r.request_id
+    JOIN telos_approval_grants g ON g.request_id = r.request_id AND g.decision_id = d.decision_id
+    JOIN telos_approval_consumptions c ON c.grant_id = g.grant_id
+    WHERE d.decision = 'approved'
+      AND d.host_context_digest = r.expected_host_context_digest
+      AND d.decided_at <= r.expires_at
+      AND g.organism_id = r.organism_id
+      AND g.telos_digest = r.telos_digest
+      AND g.action = r.action
+      AND c.organism_id = g.organism_id
+      AND c.telos_digest = g.telos_digest
+      AND c.action = g.action
+      AND c.consumed_at <= g.expires_at
+      AND NOT EXISTS (
+          SELECT 1 FROM telos_approval_quarantine_v4 q
+          WHERE (
+              (q.table_name = 'telos_approval_decisions' AND q.row_id = d.decision_id)
+              OR (q.table_name = 'telos_approval_grants' AND q.row_id = g.grant_id)
+              OR (q.table_name = 'telos_approval_requests' AND q.row_id = r.request_id)
+              OR (q.table_name = 'telos_approval_consumptions' AND q.row_id = c.consumption_id)
+          )
+      )
+    """,
+)
+
+_TABLES_V5 = _TABLES_V4 + ("telos_approval_quarantine_v4",)
+
 _SCHEMA_V3_STATEMENTS = (
     """
     CREATE TABLE schema_version (
@@ -895,7 +1015,7 @@ _SCHEMA_STATEMENTS = (
     """
     CREATE TABLE schema_version (
         singleton INTEGER NOT NULL PRIMARY KEY CHECK(singleton = 1),
-        version INTEGER NOT NULL CHECK(version = 4)
+        version INTEGER NOT NULL CHECK(version = 5)
     ) WITHOUT ROWID
     """,
     *(
@@ -908,9 +1028,10 @@ _SCHEMA_STATEMENTS = (
     ),
     *_SCHEMA_V3_ADDITIVE_STATEMENTS,
     *_SCHEMA_V4_ADDITIVE_STATEMENTS,
+    *_SCHEMA_V5_ADDITIVE_STATEMENTS,
 )
 
-_TABLES = _TABLES_V4
+_TABLES = _TABLES_V5
 
 
 def _execute_schema_statement(
@@ -1391,6 +1512,13 @@ def _validate_preflight_schema(connection: sqlite3.Connection) -> int:
             statements=_SCHEMA_V3_STATEMENTS,
             tables=_TABLES_V3,
         )
+    elif version == 4:
+        _validate_schema_version(
+            connection,
+            version=4,
+            statements=_SCHEMA_V4_STATEMENTS,
+            tables=_TABLES_V4,
+        )
     elif version == SCHEMA_VERSION:
         _validate_schema(connection)
     elif version > SCHEMA_VERSION:
@@ -1506,6 +1634,9 @@ class EvolutionLedger:
                     existing_version = _declared_version(connection)
                 if existing_version == 3:
                     self._migrate_v3_to_v4(connection)
+                    existing_version = _declared_version(connection)
+                if existing_version == 4:
+                    self._migrate_v4_to_v5(connection)
                 _validate_schema(connection)
             _verify_retained_identity(
                 self.path,
@@ -1727,13 +1858,88 @@ class EvolutionLedger:
             for statement in _SCHEMA_V4_ADDITIVE_STATEMENTS:
                 _execute_migration_statement(connection, statement)
             _execute_migration_statement(connection, "DROP TABLE schema_version")
-            _execute_migration_statement(connection, _SCHEMA_STATEMENTS[0])
+            _execute_migration_statement(connection, _SCHEMA_V4_STATEMENTS[0])
             connection.execute(
                 """
                 INSERT INTO schema_version(singleton, version)
                 VALUES (1, ?)
                 """,
                 (4,),
+            )
+            for table, before in before_counts.items():
+                after = connection.execute(
+                    f'SELECT COUNT(*) FROM "{table}"'
+                ).fetchone()[0]
+                if after != before:
+                    raise EvolutionLedgerError("migration_data_mismatch")
+            _validate_schema_version(
+                connection,
+                version=4,
+                statements=_SCHEMA_V4_STATEMENTS,
+                tables=_TABLES_V4,
+            )
+            connection.commit()
+        except BaseException:
+            if began and connection.in_transaction:
+                try:
+                    connection.rollback()
+                except BaseException:
+                    connection.close()
+            raise
+
+    @staticmethod
+    def _migrate_v4_to_v5(connection: sqlite3.Connection) -> None:
+        began = False
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            began = True
+            locked_version = _declared_version(connection)
+            if locked_version == SCHEMA_VERSION:
+                _validate_schema(connection)
+                connection.commit()
+                return
+            if locked_version != 4:
+                if locked_version > SCHEMA_VERSION:
+                    raise EvolutionLedgerError("unsupported_schema_version")
+                raise EvolutionLedgerError("invalid_ledger_database")
+            _validate_schema_version(
+                connection,
+                version=4,
+                statements=_SCHEMA_V4_STATEMENTS,
+                tables=_TABLES_V4,
+            )
+            before_counts = {}
+            for table in _TABLES_V4:
+                if table == "schema_version":
+                    continue
+                count = connection.execute(
+                    f'SELECT COUNT(*) FROM "{table}"'
+                ).fetchone()[0]
+                before_counts[table] = count
+            for statement in _SCHEMA_V5_ADDITIVE_STATEMENTS:
+                _execute_migration_statement(connection, statement)
+            now = _now()
+            connection.execute(
+                """INSERT OR IGNORE INTO telos_approval_quarantine_v4(quarantined_at, reason, table_name, row_id)
+                SELECT ?, 'cross_wired_decision_request', 'telos_approval_grants', g.grant_id
+                FROM telos_approval_grants g
+                JOIN telos_approval_decisions d ON d.decision_id = g.decision_id
+                WHERE d.request_id != g.request_id""",
+                (now,),
+            )
+            connection.execute(
+                """INSERT OR IGNORE INTO telos_approval_quarantine_v4(quarantined_at, reason, table_name, row_id)
+                SELECT ?, 'wrong_host_context', 'telos_approval_decisions', d.decision_id
+                FROM telos_approval_decisions d
+                JOIN telos_approval_requests r ON r.request_id = d.request_id
+                WHERE d.host_context_digest != r.expected_host_context_digest""",
+                (now,),
+            )
+            _execute_migration_statement(connection, "DROP TABLE schema_version")
+            _execute_migration_statement(connection, _SCHEMA_STATEMENTS[0])
+            connection.execute(
+                "INSERT INTO schema_version(singleton, version) VALUES (1, ?)",
+                (5,),
             )
             for table, before in before_counts.items():
                 after = connection.execute(
