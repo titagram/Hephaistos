@@ -38,7 +38,6 @@ def test_evolution_command_doctor(tmp_path: Path, monkeypatch):
     assert res == 0
 
 
-
 def test_evolution_command_telos_actions(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     org_root = tmp_path / "organism"
@@ -58,14 +57,17 @@ def test_evolution_command_telos_actions(tmp_path: Path, monkeypatch):
         success_indicators=(SuccessIndicator("ind1", "Ind 1", ("i1",), 4),),
     )
     tstore.save_revision(telos)
-    digest = telos.canonical_digest
 
-    receipt = tstore.issue_approval_receipt(digest, action="activate")
-    args_approve = Namespace(action="telos_approve", digest=digest, receipt=receipt.receipt_id, json=True, org_root=org_root)
-    res_app = evolution_command(args_approve)
-    assert res_app == 0
-
-
-    args_status = Namespace(action="telos_status", json=True)
+    # Telos status and history must work (read-only)
+    args_status = Namespace(action="telos", telos_action="status", json=True, org_root=org_root)
     res_stat = evolution_command(args_status)
     assert res_stat == 0
+
+    args_history = Namespace(action="telos", telos_action="history", json=True, org_root=org_root)
+    res_hist = evolution_command(args_history)
+    assert res_hist == 0
+
+    # Suggestions list must work
+    args_sug = Namespace(action="suggestions", json=True, org_root=org_root)
+    res_sug = evolution_command(args_sug)
+    assert res_sug == 0

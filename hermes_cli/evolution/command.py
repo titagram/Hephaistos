@@ -249,6 +249,13 @@ def evolution_command(args: Any) -> int:
         if action == "doctor":
             _emit(_doctor(getattr(args, "org_root", None)))
             return 0
+        if action == "telos":
+            sub = getattr(args, "telos_action", "status")
+            _emit(_telos_command(sub, getattr(args, "org_root", None), getattr(args, "digest", None)))
+            return 0
+        if action == "suggestions":
+            _emit(_suggestions_list(getattr(args, "org_root", None)))
+            return 0
     except (
         EvolutionBootstrapError,
         EvolutionLedgerError,
@@ -266,3 +273,63 @@ def evolution_command(args: Any) -> int:
                    "last_known_good_generation_id": None, "diagnostics": ["evolution_unavailable"]})
         return 1
     return 2
+
+
+def _telos_command(sub: str, org_root: Any = None, digest: str | None = None) -> dict[str, Any]:
+    """Telos status and history read-only commands."""
+    from pathlib import Path
+    from .organism_home import get_organism_home
+    from .telos_store import TelosStore
+
+    root = Path(org_root) if org_root else get_organism_home()
+    store = TelosStore(root)
+
+    if sub == "status":
+        active = store.get_active_digest()
+        return {
+            "schema_version": 1,
+            "action": "telos_status",
+            "active_digest": active,
+            "has_active": active is not None,
+        }
+    elif sub == "history":
+        # List all revision digests
+        revisions_dir = root / "telos" / "revisions"
+        digests = []
+        if revisions_dir.is_dir():
+            for f in sorted(revisions_dir.iterdir()):
+                if f.suffix == ".json":
+                    digests.append(f.stem)
+        return {
+            "schema_version": 1,
+            "action": "telos_history",
+            "revision_count": len(digests),
+            "revisions": digests[:50],
+        }
+    return {"schema_version": 1, "action": "telos", "error": "unknown_subcommand"}
+
+
+def _suggestions_list(org_root: Any = None) -> dict[str, Any]:
+    """List current suggestions from the observer."""
+    from pathlib import Path
+    from .organism_home import get_organism_home
+
+    root = Path(org_root) if org_root else get_organism_home()
+    db_path = root / "evolution" / "evolution.db"
+
+    if not db_path.exists():
+        return {"schema_version": 1, "action": "suggestions", "error": "no_ledger", "items": []}
+
+    try:
+        from .ledger import EvolutionLedger
+        ledger = EvolutionLedger(db_path)
+        rows = ledger.connection.execute(
+            "SELECT suggestion_id, opportunity_key, state, score, summary_reason FROM opportunity_suggestions ORDER BY score DESC LIMIT 20"
+        ).fetchall()
+        items = [{"id": r["suggestion_id"], "key": r["opportunity_key"], "state": r["state"], "score": r["score"], "reason": r["summary_reason"]} for r in rows]
+        ledger.connection.close()
+        return {"schema_version": 1, "action": "suggestions", "count": len(items), "items": items}
+    except Exception:
+        return {"schema_version": 1, "action": "suggestions", "error": "ledger_error", "items": []}
+
+
