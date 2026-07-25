@@ -8,19 +8,15 @@ from hermes_cli.evolution.ledger import EvolutionLedger, SCHEMA_VERSION
 
 
 def test_fresh_ledger_creates_v3_with_project_a_and_project_b_tables(tmp_path: Path):
-    """A fresh EvolutionLedger must be at schema v3 with both Project A and Project B tables."""
+    """A fresh EvolutionLedger must be at schema v4 with both Project A and Project B tables."""
     db_path = tmp_path / "evolution.db"
     ledger = EvolutionLedger(db_path)
-    assert ledger.schema_version == SCHEMA_VERSION == 3
-
-    with ledger.transaction() as conn:
-        tables = {
-            row[0]
-            for row in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()
-        }
+    assert ledger.schema_version == SCHEMA_VERSION == 4
+    tables = {row[0] for row in ledger.connection.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    )}
     assert "observation_envelopes" in tables
+    assert "telos_approval_requests" in tables
     assert "opportunity_suggestions" in tables
     assert "opportunity_suggestion_events" in tables
     assert "suggestions" in tables  # Project A table still present

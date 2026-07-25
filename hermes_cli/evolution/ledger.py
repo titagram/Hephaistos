@@ -23,7 +23,7 @@ from .contract import canonical_json_bytes, content_digest, require_digest
 from .state_machine import TransitionRequest, validate_transition
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 _MAX_DIGESTS = 64
 _VERIFY_BATCH_SIZE = 256
 _PATH_SCHEME_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*:")
@@ -653,6 +653,129 @@ _SCHEMA_V3_ADDITIVE_STATEMENTS = (
     """,
 )
 
+_SCHEMA_V4_ADDITIVE_STATEMENTS = (
+    """
+    CREATE TABLE telos_approval_requests (
+        request_id TEXT NOT NULL PRIMARY KEY,
+        organism_id TEXT NOT NULL,
+        telos_digest TEXT NOT NULL,
+        action TEXT NOT NULL CHECK(action IN ('activate','rollback')),
+        expected_host_context_digest TEXT NOT NULL,
+        display_nonce TEXT NOT NULL,
+        bounded_summary TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE telos_approval_decisions (
+        decision_id TEXT NOT NULL PRIMARY KEY,
+        request_id TEXT NOT NULL UNIQUE
+            REFERENCES telos_approval_requests(request_id),
+        decision TEXT NOT NULL CHECK(decision IN ('approved','denied')),
+        host_surface TEXT NOT NULL,
+        host_actor_ref TEXT NOT NULL,
+        host_context_digest TEXT NOT NULL,
+        decided_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE telos_approval_grants (
+        grant_id TEXT NOT NULL PRIMARY KEY,
+        request_id TEXT NOT NULL UNIQUE
+            REFERENCES telos_approval_requests(request_id),
+        decision_id TEXT NOT NULL UNIQUE
+            REFERENCES telos_approval_decisions(decision_id),
+        organism_id TEXT NOT NULL,
+        telos_digest TEXT NOT NULL,
+        action TEXT NOT NULL CHECK(action IN ('activate','rollback')),
+        issued_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE telos_approval_consumptions (
+        consumption_id TEXT NOT NULL PRIMARY KEY,
+        grant_id TEXT NOT NULL UNIQUE
+            REFERENCES telos_approval_grants(grant_id),
+        organism_id TEXT NOT NULL,
+        telos_digest TEXT NOT NULL,
+        action TEXT NOT NULL CHECK(action IN ('activate','rollback')),
+        consumed_at TEXT NOT NULL
+    )
+    """,
+    # No-update triggers
+    """
+    CREATE TRIGGER trg_telos_requests_no_update
+    BEFORE UPDATE ON telos_approval_requests
+    BEGIN
+        SELECT RAISE(FAIL, 'telos_requests_immutable');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_telos_decisions_no_update
+    BEFORE UPDATE ON telos_approval_decisions
+    BEGIN
+        SELECT RAISE(FAIL, 'telos_decisions_immutable');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_telos_grants_no_update
+    BEFORE UPDATE ON telos_approval_grants
+    BEGIN
+        SELECT RAISE(FAIL, 'telos_grants_immutable');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_telos_consumptions_no_update
+    BEFORE UPDATE ON telos_approval_consumptions
+    BEGIN
+        SELECT RAISE(FAIL, 'telos_consumptions_immutable');
+    END
+    """,
+    # No-delete triggers
+    """
+    CREATE TRIGGER trg_telos_requests_no_delete
+    BEFORE DELETE ON telos_approval_requests
+    BEGIN
+        SELECT RAISE(FAIL, 'telos_requests_immutable');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_telos_decisions_no_delete
+    BEFORE DELETE ON telos_approval_decisions
+    BEGIN
+        SELECT RAISE(FAIL, 'telos_decisions_immutable');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_telos_grants_no_delete
+    BEFORE DELETE ON telos_approval_grants
+    BEGIN
+        SELECT RAISE(FAIL, 'telos_grants_immutable');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_telos_consumptions_no_delete
+    BEFORE DELETE ON telos_approval_consumptions
+    BEGIN
+        SELECT RAISE(FAIL, 'telos_consumptions_immutable');
+    END
+    """,
+    # Grant only from approved decision
+    """
+    CREATE TRIGGER trg_telos_grant_requires_approved_decision
+    BEFORE INSERT ON telos_approval_grants
+    BEGIN
+        SELECT CASE WHEN (
+            SELECT decision FROM telos_approval_decisions
+            WHERE decision_id = NEW.decision_id
+        ) != 'approved'
+        THEN RAISE(FAIL, 'telos_grant_requires_approved_decision') END;
+    END
+    """,
+)
+
 _TABLES_V3 = (
     "schema_version",
     "attempts",
@@ -675,7 +798,14 @@ _TABLES_V3 = (
 )
 
 
-_SCHEMA_STATEMENTS = (
+_TABLES_V4 = _TABLES_V3 + (
+    "telos_approval_requests",
+    "telos_approval_decisions",
+    "telos_approval_grants",
+    "telos_approval_consumptions",
+)
+
+_SCHEMA_V3_STATEMENTS = (
     """
     CREATE TABLE schema_version (
         singleton INTEGER NOT NULL PRIMARY KEY CHECK(singleton = 1),
@@ -693,7 +823,26 @@ _SCHEMA_STATEMENTS = (
     *_SCHEMA_V3_ADDITIVE_STATEMENTS,
 )
 
-_TABLES = _TABLES_V3
+_SCHEMA_STATEMENTS = (
+    """
+    CREATE TABLE schema_version (
+        singleton INTEGER NOT NULL PRIMARY KEY CHECK(singleton = 1),
+        version INTEGER NOT NULL CHECK(version = 4)
+    ) WITHOUT ROWID
+    """,
+    *(
+        statement
+        for statement in _SCHEMA_V2_STATEMENTS
+        if not _statement_starts_with(
+            statement,
+            ("CREATE TABLE schema_version ",),
+        )
+    ),
+    *_SCHEMA_V3_ADDITIVE_STATEMENTS,
+    *_SCHEMA_V4_ADDITIVE_STATEMENTS,
+)
+
+_TABLES = _TABLES_V4
 
 
 def _execute_schema_statement(
@@ -1167,6 +1316,13 @@ def _validate_preflight_schema(connection: sqlite3.Connection) -> int:
             statements=_SCHEMA_V2_STATEMENTS,
             tables=_TABLES_V2,
         )
+    elif version == 3:
+        _validate_schema_version(
+            connection,
+            version=3,
+            statements=_SCHEMA_V3_STATEMENTS,
+            tables=_TABLES_V3,
+        )
     elif version == SCHEMA_VERSION:
         _validate_schema(connection)
     elif version > SCHEMA_VERSION:
@@ -1279,6 +1435,9 @@ class EvolutionLedger:
                     existing_version = _declared_version(connection)
                 if existing_version == 2:
                     self._migrate_v2_to_v3(connection)
+                    existing_version = _declared_version(connection)
+                if existing_version == 3:
+                    self._migrate_v3_to_v4(connection)
                 _validate_schema(connection)
             _verify_retained_identity(
                 self.path,
@@ -1437,13 +1596,13 @@ class EvolutionLedger:
             for statement in _SCHEMA_V3_ADDITIVE_STATEMENTS:
                 _execute_migration_statement(connection, statement)
             _execute_migration_statement(connection, "DROP TABLE schema_version")
-            _execute_migration_statement(connection, _SCHEMA_STATEMENTS[0])
+            _execute_migration_statement(connection, _SCHEMA_V3_STATEMENTS[0])
             connection.execute(
                 """
                 INSERT INTO schema_version(singleton, version)
                 VALUES (1, ?)
                 """,
-                (SCHEMA_VERSION,),
+                (3,),
             )
             for table, before in before_counts.items():
                 after = connection.execute(
@@ -1453,6 +1612,67 @@ class EvolutionLedger:
                     raise EvolutionLedgerError(
                         "migration_data_mismatch"
                     )
+            _validate_schema_version(
+                connection,
+                version=3,
+                statements=_SCHEMA_V3_STATEMENTS,
+                tables=_TABLES_V3,
+            )
+            connection.commit()
+        except BaseException:
+            if began and connection.in_transaction:
+                try:
+                    connection.rollback()
+                except BaseException:
+                    connection.close()
+            raise
+
+    @staticmethod
+    def _migrate_v3_to_v4(connection: sqlite3.Connection) -> None:
+        began = False
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            began = True
+            locked_version = _declared_version(connection)
+            if locked_version == SCHEMA_VERSION:
+                _validate_schema(connection)
+                connection.commit()
+                return
+            if locked_version != 3:
+                if locked_version > SCHEMA_VERSION:
+                    raise EvolutionLedgerError("unsupported_schema_version")
+                raise EvolutionLedgerError("invalid_ledger_database")
+            _validate_schema_version(
+                connection,
+                version=3,
+                statements=_SCHEMA_V3_STATEMENTS,
+                tables=_TABLES_V3,
+            )
+            before_counts = {}
+            for table in _TABLES_V3:
+                if table == "schema_version":
+                    continue
+                count = connection.execute(
+                    f'SELECT COUNT(*) FROM "{table}"'
+                ).fetchone()[0]
+                before_counts[table] = count
+            for statement in _SCHEMA_V4_ADDITIVE_STATEMENTS:
+                _execute_migration_statement(connection, statement)
+            _execute_migration_statement(connection, "DROP TABLE schema_version")
+            _execute_migration_statement(connection, _SCHEMA_STATEMENTS[0])
+            connection.execute(
+                """
+                INSERT INTO schema_version(singleton, version)
+                VALUES (1, ?)
+                """,
+                (4,),
+            )
+            for table, before in before_counts.items():
+                after = connection.execute(
+                    f'SELECT COUNT(*) FROM "{table}"'
+                ).fetchone()[0]
+                if after != before:
+                    raise EvolutionLedgerError("migration_data_mismatch")
             _validate_schema(connection)
             connection.commit()
         except BaseException:
