@@ -31,6 +31,35 @@ def test_global_config_isolated_from_profile(tmp_path, monkeypatch):
     assert autopoiesis_enabled() is False
 
 
+def test_global_config_resolves_root_dynamically(tmp_path, monkeypatch):
+    """Import before monkeypatch must not cache a stale get_default_hermes_root.
+
+    global_config.py previously imported ``get_default_hermes_root`` as a
+    module-level name binding.  When another test imported the module first,
+    the local reference became stale — monkeypatch.setattr on the canonical
+    hermes_constants attribute had no effect.  This test imports
+    load_global_config BEFORE patching, so it fails on the old code and
+    passes once the function is resolved dynamically at call time.
+    """
+    import hermes_constants as _hc
+
+    default_root = tmp_path / ".hermes"
+    default_root.mkdir()
+    (default_root / "config.yaml").write_text(
+        "autopoiesis:\n  enabled: IMPORTED_BEFORE_PATCH\n"
+    )
+
+    # Step 1 — import BEFORE monkeypatch (order-dependent defect trigger)
+    from hermes_cli.evolution.global_config import load_global_config
+
+    # Step 2 — monkeypatch AFTER import
+    monkeypatch.setattr(_hc, "get_default_hermes_root", lambda: default_root)
+
+    # Step 3 — must use the monkeypatched root, not the stale import-time ref
+    cfg = load_global_config()
+    assert cfg["autopoiesis"]["enabled"] == "IMPORTED_BEFORE_PATCH"
+
+
 def test_save_global_config_preserves_other_keys(tmp_path, monkeypatch):
     """save_global_config must not destroy unrelated default-root keys."""
     import hermes_constants as _hc

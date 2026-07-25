@@ -10,14 +10,14 @@ from pathlib import Path
 from typing import Any
 
 from hermes_cli.config import DEFAULT_CONFIG
-from hermes_constants import get_default_hermes_root
+import hermes_constants
 
 
 def _read_yaml(path: Path) -> dict[str, Any]:
     """Read a YAML file, returning empty dict on any error."""
     try:
         import yaml
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             data = yaml.safe_load(f)
             return data if isinstance(data, dict) else {}
     except Exception:
@@ -28,7 +28,7 @@ def _write_yaml(path: Path, data: dict[str, Any]) -> None:
     """Write a YAML file atomically via temp+rename."""
     import yaml
     tmp = path.with_suffix(".tmp")
-    with open(tmp, "w") as f:
+    with open(tmp, "w", encoding="utf-8") as f:
         yaml.safe_dump(data, f, default_flow_style=False, allow_unicode=True)
     tmp.chmod(0o600)
     tmp.rename(path)
@@ -36,7 +36,7 @@ def _write_yaml(path: Path, data: dict[str, Any]) -> None:
 
 def load_global_config() -> dict[str, Any]:
     """Load autopoiesis config from default-root config.yaml, merged with defaults."""
-    root = get_default_hermes_root()
+    root = hermes_constants.get_default_hermes_root()
     config_path = root / "config.yaml"
     user_config = _read_yaml(config_path)
 
@@ -49,7 +49,7 @@ def load_global_config() -> dict[str, Any]:
 
 def save_global_config(autopoiesis_config: dict[str, Any]) -> None:
     """Save autopoiesis config to default-root config.yaml, preserving other sections."""
-    root = get_default_hermes_root()
+    root = hermes_constants.get_default_hermes_root()
     config_path = root / "config.yaml"
 
     full_config = _read_yaml(config_path)
