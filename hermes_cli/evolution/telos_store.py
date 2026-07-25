@@ -66,7 +66,7 @@ class TelosStore:
             ledger = EvolutionLedger(self.organism_root / "evolution" / "evolution.db")
 
         try:
-            # Verify the grant was consumed (broker validates grant exists + consumed)
+            # Verify grant exists and matches digest + action
             grant_row = ledger.connection.execute(
                 "SELECT organism_id, telos_digest, action FROM telos_approval_grants WHERE grant_id = ?",
                 (grant_id,),
@@ -77,6 +77,12 @@ class TelosStore:
                 raise TelosStoreError("telos_grant_digest_mismatch")
             if grant_row["action"] != "activate":
                 raise TelosStoreError("telos_grant_wrong_action")
+
+            # Replay detection — a grant must be single-use for activation
+            if self.active_pointer.exists():
+                existing = json.loads(self.active_pointer.read_text(encoding="utf-8"))
+                if existing.get("grant_id") == grant_id:
+                    raise TelosStoreError("telos_grant_already_used")
 
             # Verify consumption exists
             consumption = ledger.connection.execute(
