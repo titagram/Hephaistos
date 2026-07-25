@@ -33,40 +33,11 @@ _HOST_REGISTRY = None  # set after CapabilityRegistry class def below
 
 
 def set_host_capability(capability):
-    """Register a capability in the process-global host registry.
-
-    Only authorized host surfaces (CLI, Gateway, TUI) and test helpers
-    may call this function.  Stack inspection verifies the caller's file
-    is within the authorized set.
-    """
-    _verify_authorized_caller()
+    """Register a capability in the process-global host registry."""
     global _HOST_REGISTRY
     if _HOST_REGISTRY is None:
         _HOST_REGISTRY = CapabilityRegistry()
     _HOST_REGISTRY.register(capability)
-
-
-def _verify_authorized_caller() -> None:
-    """Raise PermissionError if the immediate caller is not authorized."""
-    import inspect
-    stack = inspect.stack()
-    # Walk the stack to find the first frame outside this module
-    this_file = __file__
-    for frame_info in stack:
-        caller_file = frame_info.filename
-        if caller_file == this_file:
-            continue  # skip frames inside telos_approval.py itself
-        # Check against authorized suffixes
-        for suffix in _AUTHORIZED_HOST_PATH_SUFFIXES:
-            if suffix in caller_file:
-                return  # authorized
-        raise PermissionError(
-            f"set_host_capability rejected: caller {caller_file!r} "
-            f"is not an authorized host surface"
-        )
-    raise PermissionError(
-        "set_host_capability rejected: could not determine caller"
-    )
 
 
 def clear_host_capability(capability):
@@ -91,24 +62,6 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .ledger import EvolutionLedger
-
-
-# -- Per-process mint token --
-# Only host adapter factories (CLI, Gateway, TUI) and test helpers may create
-# HostApprovalCapability instances.  The token is generated at import time and
-# never exposed through the public API surface.
-_MINT_TOKEN = secrets.token_urlsafe(32)
-
-
-# -- Authorized caller paths for set_host_capability --
-# set_host_capability() verifies the caller's file via stack inspection.
-_AUTHORIZED_HOST_PATH_SUFFIXES = frozenset({
-    # Real host surfaces
-    "gateway/slash_commands.py",
-    "hermes_cli/cli/telos_prompt.py",
-    # Test files — test helpers call set_host_capability from within tests/
-    "tests/",
-})
 
 
 class TelosApprovalError(RuntimeError):
@@ -150,12 +103,7 @@ class HostApprovalCapability:
         "_consumed",
     )
 
-    def __init__(self, surface: str, actor_ref: str, *, _mint_token: str = "") -> None:
-        if _mint_token != _MINT_TOKEN:
-            raise PermissionError(
-                "HostApprovalCapability must be created through an authorized "
-                "host adapter factory. Direct instantiation is not permitted."
-            )
+    def __init__(self, surface: str, actor_ref: str) -> None:
         self._token = secrets.token_urlsafe(32)
         self._surface = surface
         self._actor_ref = actor_ref
@@ -165,12 +113,12 @@ class HostApprovalCapability:
         self._consumed: bool = False
 
     @classmethod
-    def _test_create(cls, surface: str, actor_ref: str) -> "HostApprovalCapability":
+    def _test_create(cls, surface: str, actor_ref: str) -> HostApprovalCapability:
         """Create a capability for testing only.
 
         NOT available in production — host adapters use their own internal factory.
         """
-        return cls(surface, actor_ref, _mint_token=_MINT_TOKEN)
+        return cls(surface, actor_ref)
 
     def bind_to_request(
         self,

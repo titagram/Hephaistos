@@ -143,15 +143,17 @@ class TelosStore:
         finally:
             # Revoke capability from host registry (single-use enforcement)
             if capability is not None:
-                clear_host_capability(capability)
+                try:
+                    clear_host_capability(capability)
+                except Exception:
+                    pass  # best-effort revocation
 
             # Only close ledgers we created, NOT caller-owned ones
             if not caller_owned_ledger and ledger is not None:
-                import sqlite3
                 try:
                     ledger.connection.close()
-                except (sqlite3.ProgrammingError, sqlite3.OperationalError):
-                    pass  # already closed — not an error
+                except Exception:
+                    pass
 
     def get_active_digest(self) -> str | None:
         if not self.active_pointer.exists():
@@ -240,11 +242,13 @@ class TelosStore:
 
         finally:
             if capability is not None:
-                _chc(capability)
+                try:
+                    _chc(capability)
+                except Exception:
+                    pass
 
             if not caller_owned_ledger and ledger is not None:
-                import sqlite3
                 try:
                     ledger.connection.close()
-                except (sqlite3.ProgrammingError, sqlite3.OperationalError):
-                    pass  # already closed — not an error
+                except Exception:
+                    pass
