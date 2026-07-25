@@ -74,8 +74,11 @@ class ObserverService:
                 "consecutive_errors": self.consecutive_errors,
                 "circuit_open": self.circuit_open,
             }
-            self.state_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
-            secure_file_permissions(self.state_file)
+            raw = json.dumps(data, sort_keys=True)
+            tmp = self.state_file.with_suffix(".json.tmp")
+            tmp.write_text(raw, encoding="utf-8")
+            tmp.chmod(0o600)
+            tmp.rename(self.state_file)
         except Exception as e:
             logger.warning(f"Failed to save observer state: {e}")
 
