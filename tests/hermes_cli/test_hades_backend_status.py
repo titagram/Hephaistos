@@ -358,6 +358,60 @@ def test_loaded_status_uses_all_linked_routes_but_keeps_default_identity(
     assert payload["persephone"]["unread"] == 1
 
 
+def test_loaded_status_uses_identity_bound_to_current_workspace(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    current_workspace = tmp_path / "current"
+    default_workspace = tmp_path / "default"
+    current_workspace.mkdir()
+    default_workspace.mkdir()
+
+    from hermes_cli import hades_backend_db as db
+    from hermes_cli.hades_backend_status import load_backend_status_payload
+
+    with db.connect_closing() as conn:
+        db.save_agent(
+            conn, agent_id="workspace_agent", project_id="workspace_project",
+            base_url="https://example.invalid", label="workspace",
+            token_env_key="TOKEN_WORKSPACE", capabilities={},
+        )
+        db.upsert_workspace_binding(
+            conn, project_id="workspace_project", agent_id="workspace_agent",
+            local_project_id="workspace", workspace_fingerprint="workspace",
+            display_path=str(current_workspace), repo_root=str(current_workspace),
+            git_remote_display="", git_remote_hash="", head_commit="",
+            backend_workspace_binding_id="wb_workspace",
+        )
+        db.save_agent(
+            conn, agent_id="newer_default", project_id="default_project",
+            base_url="https://example.invalid", label="default",
+            token_env_key="TOKEN_DEFAULT", capabilities={},
+        )
+        db.upsert_workspace_binding(
+            conn, project_id="default_project", agent_id="newer_default",
+            local_project_id="default", workspace_fingerprint="default",
+            display_path=str(default_workspace), repo_root=str(default_workspace),
+            git_remote_display="", git_remote_hash="", head_commit="",
+            backend_workspace_binding_id="wb_default",
+        )
+
+    monkeypatch.chdir(current_workspace)
+    monkeypatch.setattr(
+        "hermes_cli.hades_backend_status._load_remote_awarenesses",
+        lambda agent, bindings: {},
+    )
+
+    payload = load_backend_status_payload()
+
+    assert payload["agent"]["agent_id"] == "workspace_agent"
+    assert payload["agent"]["project_id"] == "workspace_project"
+    assert [item["workspace_binding_id"] for item in payload["bindings"]] == [
+        "wb_workspace"
+    ]
+    assert payload["identity"]["workspace_binding"]["current_status"] == "partial"
+
+
 def test_loaded_status_reports_auth_quarantine_without_counting_receiver_routes(
     monkeypatch, tmp_path
 ) -> None:

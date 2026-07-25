@@ -8,6 +8,7 @@ import time
 from typing import Any
 
 from hermes_cli import hades_backend_db as db
+from hermes_cli import hades_backend_runtime as runtime
 from hermes_cli.config import load_config
 from hermes_cli.hades_backend_client import redact_secret
 from hermes_cli.hades_backend_sync import BACKGROUND_SYNC_STATE_KEY
@@ -34,7 +35,6 @@ def load_backend_status_payload() -> dict[str, Any]:
     memory_provider = str(memory_config.get("provider") or "local").strip() or "local"
     plugin_local_workspace_id = str(backend_config.get("plugin_local_workspace_id") or "").strip()
     with db.connect_closing() as conn:
-        agent = db.get_default_agent(conn)
         quarantined_bindings = db.list_workspace_bindings(
             conn, status="auth_failed"
         )
@@ -45,16 +45,28 @@ def load_backend_status_payload() -> dict[str, Any]:
             }),
             "bindings": len(quarantined_bindings),
         }
-        # The gateway receiver is profile-scoped, not default-agent-scoped: it
+        # The gateway receiver is profile-scoped, not workspace-agent-scoped: it
         # owns one worker for every exact (project_id, agent_id) route that has
-        # at least one currently linked workspace.  Keep the ordinary status
-        # identity/bindings anchored to the default agent, but give queue
-        # health the same complete route inventory as the receiver.
+        # at least one currently linked workspace. Ordinary status follows the
+        # current cwd's exact binding; outside a linked workspace it falls back
+        # to the most recently configured agent.
         profile_linked_bindings = db.list_workspace_bindings(conn, status="linked")
+        default_agent = db.get_default_agent(conn)
+        current_binding = runtime.select_workspace_binding(
+            profile_linked_bindings,
+            Path.cwd(),
+            preferred_agent=default_agent,
+        )
+        agent = (
+            db.get_agent(conn, current_binding.agent_id)
+            if current_binding is not None
+            else default_agent
+        )
         if agent:
             bindings = conn.execute(
-                "SELECT * FROM workspace_bindings WHERE agent_id = ? ORDER BY updated_at DESC",
-                (agent.agent_id,),
+                "SELECT * FROM workspace_bindings "
+                "WHERE agent_id = ? AND project_id = ? ORDER BY updated_at DESC",
+                (agent.agent_id, agent.project_id),
             ).fetchall()
             memory_caches = {
                 str(workspace_binding_id): db.get_memory_cache(conn, str(workspace_binding_id))

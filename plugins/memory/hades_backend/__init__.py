@@ -1775,29 +1775,8 @@ class HadesBackendMemoryProvider(MemoryProvider):
             )
 
     def _current_owned_binding(self, cwd: Path) -> db.WorkspaceBinding | None:
-        try:
-            resolved = cwd.resolve()
-        except OSError:
-            return None
-        best: db.WorkspaceBinding | None = None
-        with db.connect_closing() as conn:
-            current_agent = db.get_default_agent(conn)
-            if current_agent is None:
-                return None
-            for binding in db.list_workspace_bindings(conn, status="linked"):
-                if (
-                    binding.agent_id != current_agent.agent_id
-                    or binding.project_id != current_agent.project_id
-                ):
-                    continue
-                root = Path(binding.repo_root)
-                try:
-                    resolved.relative_to(root)
-                except ValueError:
-                    continue
-                if best is None or len(str(root)) > len(best.repo_root):
-                    best = binding
-        return best
+        scoped = runtime.current_workspace_agent_binding(cwd)
+        return scoped[1] if scoped is not None else None
 
     def _backend_memory_search(
         self,

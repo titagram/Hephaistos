@@ -34,7 +34,11 @@ from hermes_cli.hades_backend_actions import (
     promote_diagnosis_report,
     refuse_backend_job,
 )
-from hermes_cli.hades_backend_runtime import default_agent_id, default_agent_label
+from hermes_cli.hades_backend_runtime import (
+    current_workspace_agent_binding,
+    default_agent_id,
+    default_agent_label,
+)
 from hermes_cli.hades_backend_status import (
     QUALITY_REPORT_HISTORY_KEY,
     QUALITY_REPORT_HISTORY_LIMIT,
@@ -1777,23 +1781,14 @@ def _string_list(value: Any) -> list[str]:
 
 
 def _current_workspace_binding() -> tuple[db.BackendAgent, db.WorkspaceBinding]:
-    cwd = Path.cwd().resolve()
-    with db.connect_closing() as conn:
-        agent = db.get_default_agent(conn)
-        if agent is None:
+    scoped = current_workspace_agent_binding()
+    if scoped is None:
+        with db.connect_closing() as conn:
+            configured = db.get_default_agent(conn) is not None
+        if not configured:
             raise RuntimeError("Hades backend is not configured")
-        bindings = db.list_workspace_bindings(conn, status="linked")
-    matches: list[db.WorkspaceBinding] = []
-    for binding in bindings:
-        try:
-            cwd.relative_to(Path(binding.repo_root).resolve())
-        except (OSError, ValueError):
-            continue
-        matches.append(binding)
-    if not matches:
         raise RuntimeError("Current directory is not linked to a Hades backend workspace")
-    matches.sort(key=lambda item: len(str(Path(item.repo_root))), reverse=True)
-    return agent, matches[0]
+    return scoped
 
 
 def _read_evidence_file(path: str, *, max_bytes: int = 64_000) -> tuple[str, bool]:

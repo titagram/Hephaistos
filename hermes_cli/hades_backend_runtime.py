@@ -23,7 +23,67 @@ def backend_config() -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def select_workspace_binding(
+    bindings: list[db.WorkspaceBinding],
+    path: str | Path,
+    *,
+    preferred_agent: db.BackendAgent | None = None,
+) -> db.WorkspaceBinding | None:
+    """Return the most specific linked binding containing ``path``.
+
+    ``list_workspace_bindings`` is ordered newest-first, so the stable sort
+    below preserves recency when two live bindings have the same repository
+    root while still allowing a nested project to override its parent.
+    """
+    try:
+        resolved = Path(path).expanduser().resolve()
+    except OSError:
+        return None
+    matches: list[tuple[int, db.WorkspaceBinding]] = []
+    for binding in bindings:
+        try:
+            root = Path(binding.repo_root).expanduser().resolve()
+            resolved.relative_to(root)
+        except (OSError, ValueError):
+            continue
+        matches.append((len(str(root)), binding))
+    if preferred_agent is not None:
+        preferred_matches = [
+            item
+            for item in matches
+            if item[1].agent_id == preferred_agent.agent_id
+            and item[1].project_id == preferred_agent.project_id
+        ]
+        if preferred_matches:
+            matches = preferred_matches
+    matches.sort(key=lambda item: item[0], reverse=True)
+    return matches[0][1] if matches else None
+
+
+def current_workspace_agent_binding(
+    path: str | Path | None = None,
+) -> tuple[db.BackendAgent, db.WorkspaceBinding] | None:
+    """Resolve the backend identity owned by the current workspace."""
+    probe = Path.cwd() if path is None else path
+    with db.connect_closing() as conn:
+        default_agent = db.get_default_agent(conn)
+        binding = select_workspace_binding(
+            db.list_workspace_bindings(conn, status="linked"),
+            probe,
+            preferred_agent=default_agent,
+        )
+        if binding is None:
+            return None
+        agent = db.get_agent(conn, binding.agent_id)
+    if agent is None or agent.project_id != binding.project_id:
+        return None
+    return agent, binding
+
+
 def current_agent() -> db.BackendAgent | None:
+    scoped = current_workspace_agent_binding()
+    if scoped is not None:
+        return scoped[0]
     with db.connect_closing() as conn:
         return db.get_default_agent(conn)
 

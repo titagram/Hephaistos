@@ -1130,15 +1130,11 @@ def _matching_workspace_binding_ids(
     if not probes:
         return []
     with db.connect_closing() as conn:
-        agent = db.get_default_agent(conn)
-        bindings = db.list_workspace_bindings(conn, status="linked") if agent else []
-    if agent is None:
-        return []
-    bindings = [
-        binding
-        for binding in bindings
-        if binding.agent_id == agent.agent_id and binding.project_id == agent.project_id
-    ]
+        bindings = [
+            binding
+            for binding in db.list_workspace_bindings(conn, status="linked")
+            if db.get_agent(conn, binding.agent_id) is not None
+        ]
     matches: list[db.WorkspaceBinding] = []
     seen: set[str] = set()
     for binding in bindings:

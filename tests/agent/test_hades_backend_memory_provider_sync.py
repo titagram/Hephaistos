@@ -76,6 +76,72 @@ def test_hades_backend_memory_provider_does_not_sync_without_binding(monkeypatch
     assert calls == []
 
 
+def test_hades_backend_memory_provider_uses_binding_for_current_workspace_not_default_agent(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    current_workspace = tmp_path / "current"
+    default_workspace = tmp_path / "default"
+    current_workspace.mkdir()
+    default_workspace.mkdir()
+    monkeypatch.chdir(current_workspace)
+
+    from hermes_cli import hades_backend_db as db
+    import plugins.memory.hades_backend as provider_mod
+
+    with db.connect_closing() as conn:
+        db.save_agent(
+            conn,
+            agent_id="agent_current_workspace",
+            project_id="project_current_workspace",
+            base_url="https://backend.example",
+            label="current-workspace",
+            token_env_key="TOKEN_CURRENT_WORKSPACE",
+            capabilities={"memory": True},
+        )
+        db.upsert_workspace_binding(
+            conn,
+            project_id="project_current_workspace",
+            agent_id="agent_current_workspace",
+            local_project_id="local_current_workspace",
+            workspace_fingerprint="fingerprint_current_workspace",
+            display_path=str(current_workspace),
+            repo_root=str(current_workspace),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="",
+            backend_workspace_binding_id="binding_current_workspace",
+        )
+        db.save_agent(
+            conn,
+            agent_id="agent_newer_default",
+            project_id="project_newer_default",
+            base_url="https://backend.example",
+            label="newer-default",
+            token_env_key="TOKEN_NEWER_DEFAULT",
+            capabilities={"memory": True},
+        )
+        db.upsert_workspace_binding(
+            conn,
+            project_id="project_newer_default",
+            agent_id="agent_newer_default",
+            local_project_id="local_newer_default",
+            workspace_fingerprint="fingerprint_newer_default",
+            display_path=str(default_workspace),
+            repo_root=str(default_workspace),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="",
+            backend_workspace_binding_id="binding_newer_default",
+        )
+
+    provider = provider_mod.HadesBackendMemoryProvider()
+    provider.initialize("session_1", hermes_home=str(tmp_path / "home"), platform="cli")
+
+    assert provider._binding is not None
+    assert provider._binding.backend_workspace_binding_id == "binding_current_workspace"
+
+
 def test_hades_backend_memory_provider_ignores_newer_more_specific_historical_binding(
     monkeypatch, tmp_path
 ):
