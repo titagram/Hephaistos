@@ -24,6 +24,7 @@ import { composerPromptWidth } from '../lib/inputMetrics.js'
 import { appendTranscriptMessage } from '../lib/messages.js'
 import { DEFAULT_VOICE_RECORD_KEY, isMac, type ParsedVoiceRecordKey } from '../lib/platform.js'
 import { asRpcResult, rpcErrorMessage } from '../lib/rpc.js'
+import { buildApprovalRespondParams } from '../lib/telosApproval.js'
 import { terminalParityHints } from '../lib/terminalParity.js'
 import { buildToolTrailLine, formatAbandonedClarify, sameToolTrailGroup, toolTrailLabel } from '../lib/text.js'
 import { estimatedMsgHeight, messageHeightKey } from '../lib/virtualHeights.js'
@@ -34,7 +35,7 @@ import { createSlashHandler } from './createSlashHandler.js'
 import { planGatewayRecovery } from './gatewayRecovery.js'
 import { getInputSelection } from './inputSelectionStore.js'
 import { type GatewayRpc, type TranscriptRow } from './interfaces.js'
-import { $overlayState, patchOverlayState } from './overlayStore.js'
+import { $overlayState, getOverlayState, patchOverlayState } from './overlayStore.js'
 import { scrollWithSelectionBy } from './scroll.js'
 import { turnController } from './turnController.js'
 import { patchTurnState, useTurnSelector } from './turnStore.js'
@@ -890,12 +891,31 @@ export function useMainApp(gw: GatewayClient) {
   )
 
   const answerApproval = useCallback(
-    (choice: string) =>
-      respondWith('approval.respond', { choice, session_id: ui.sid }, () => {
+    (choice: string) => {
+      const overlay = getOverlayState().approval
+
+      if (!overlay) {
+        return
+      }
+
+      const params = buildApprovalRespondParams(overlay, choice, ui.sid ?? '')
+
+      if (!params) {
+        return
+      }
+
+      return respondWith('approval.respond', params, () => {
         patchOverlayState({ approval: null })
-        patchTurnState({ outcome: choice === 'deny' ? 'denied' : `approved (${choice})` })
+
+        if (overlay.kind === 'telos') {
+          patchTurnState({ outcome: choice === 'approved' ? 'approved' : 'denied' })
+        } else {
+          patchTurnState({ outcome: choice === 'deny' ? 'denied' : `approved (${choice})` })
+        }
+
         patchUiState({ status: 'running…' })
-      }),
+      })
+    },
     [respondWith, ui.sid]
   )
 

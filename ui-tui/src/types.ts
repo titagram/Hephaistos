@@ -90,11 +90,27 @@ export interface DelegationStatus {
 }
 
 export interface ApprovalReq {
+  kind: 'dangerous'
   // false when the backend won't honor a permanent allow (tirith warning) → hide "Always allow".
   allowPermanent?: boolean
   command: string
   description: string
 }
+
+/** Telos-specific approval request — domain="telos" on the wire. */
+export interface TelosApprovalReq {
+  kind: 'telos'
+  requestId: string
+  digest: string
+  action: 'activate' | 'rollback'
+  boundedSummary: string
+  nonce: string
+  expiresAt: string
+  capturedSessionId: string
+}
+
+/** Discriminated overlay: dangerous-command or Telos host-approval. */
+export type ApprovalOverlay = ApprovalReq | TelosApprovalReq
 
 export interface ConfirmReq {
   cancelLabel?: string

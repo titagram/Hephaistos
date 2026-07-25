@@ -14,7 +14,7 @@ import { ModelPicker } from './modelPicker.js'
 import { OverlayHint } from './overlayControls.js'
 import { PetPicker } from './petPicker.js'
 import { PluginsHub } from './pluginsHub.js'
-import { ApprovalPrompt, ClarifyPrompt, ConfirmPrompt } from './prompts.js'
+import { ApprovalPrompt, ClarifyPrompt, ConfirmPrompt, TelosPrompt } from './prompts.js'
 import { SkillsHub } from './skillsHub.js'
 
 const COMPLETION_WINDOW = 16
@@ -30,11 +30,21 @@ export function PromptZone({
   const theme = useStore($uiTheme)
 
   if (overlay.approval) {
-    return (
-      <Box flexDirection="column" flexShrink={0} paddingX={1} paddingY={1}>
-        <ApprovalPrompt cols={cols} onChoice={onApprovalChoice} req={overlay.approval} t={theme} />
-      </Box>
-    )
+    switch (overlay.approval.kind) {
+      case 'telos':
+        return (
+          <Box flexDirection="column" flexShrink={0} paddingX={1} paddingY={1}>
+            <TelosPrompt cols={cols} onChoice={onApprovalChoice} req={overlay.approval} t={theme} />
+          </Box>
+        )
+
+      case 'dangerous':
+        return (
+          <Box flexDirection="column" flexShrink={0} paddingX={1} paddingY={1}>
+            <ApprovalPrompt cols={cols} onChoice={onApprovalChoice} req={overlay.approval} t={theme} />
+          </Box>
+        )
+    }
   }
 
   if (overlay.billing) {

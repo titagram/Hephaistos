@@ -773,12 +773,57 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
 
         return
       case 'approval.request': {
+        // ── Telos host-approval path ──
+        if ('domain' in ev.payload) {
+          const { domain, request_id, digest, action, bounded_summary, nonce, expires_at } = ev.payload
+          const eventSid = ev.session_id ?? ''
+
+          if (
+            domain === 'telos' &&
+            typeof request_id === 'string' &&
+            request_id.length > 0 &&
+            typeof digest === 'string' &&
+            /^[0-9a-f]{64}$/.test(digest) &&
+            (action === 'activate' || action === 'rollback') &&
+            typeof bounded_summary === 'string' &&
+            bounded_summary.length > 0 &&
+            typeof nonce === 'string' &&
+            nonce.length > 0 &&
+            typeof expires_at === 'string' &&
+            expires_at.length > 0 &&
+            eventSid.length > 0
+          ) {
+            patchOverlayState({
+              approval: {
+                kind: 'telos',
+                requestId: request_id,
+                digest,
+                action,
+                boundedSummary: bounded_summary,
+                nonce,
+                expiresAt: expires_at,
+                capturedSessionId: eventSid
+              }
+            })
+            setStatus('approval needed')
+
+            return
+          }
+
+          // Malformed or missing fields — do NOT open an approval overlay.
+          return
+        }
+
         const description = String(ev.payload.description ?? 'dangerous command')
-        // Only an explicit false (tirith warning) drops the permanent-allow option.
         const allowPermanent = ev.payload.allow_permanent !== false
 
         patchOverlayState({
-          approval: { allowPermanent, command: String(ev.payload.command ?? ''), description }
+          approval: {
+            kind: 'dangerous',
+            allowPermanent,
+            command: String(ev.payload.command ?? ''),
+            description
+          }
         })
         setStatus('approval needed')
 

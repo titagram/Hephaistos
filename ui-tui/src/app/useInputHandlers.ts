@@ -13,6 +13,7 @@ import type {
 } from '../gatewayTypes.js'
 import { isAction, isCopyShortcut, isMac, isVoiceToggleKey } from '../lib/platform.js'
 import { computePrecisionWheelStep, initPrecisionWheel } from '../lib/precisionWheel.js'
+import { buildApprovalRespondParams } from '../lib/telosApproval.js'
 import { computeWheelStep, initWheelAccelForHost } from '../lib/wheelAccel.js'
 
 import { getInputSelection } from './inputSelectionStore.js'
@@ -144,8 +145,16 @@ export function useInputHandlers(ctx: InputHandlerContext): InputHandlerResult {
     }
 
     if (overlay.approval) {
+      const sid = getUiState().sid || ''
+      const choice = overlay.approval.kind === 'telos' ? 'denied' : 'deny'
+      const params = buildApprovalRespondParams(overlay.approval, choice, sid)
+
+      if (!params) {
+        return
+      }
+
       return gateway
-        .rpc<ApprovalRespondResponse>('approval.respond', { choice: 'deny', session_id: getUiState().sid })
+        .rpc<ApprovalRespondResponse>('approval.respond', params)
         .then(r => r && (patchOverlayState({ approval: null }), patchTurnState({ outcome: 'denied' })))
     }
 

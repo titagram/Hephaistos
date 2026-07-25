@@ -3,7 +3,7 @@ import { useState } from 'react'
 
 import { isMac } from '../lib/platform.js'
 import type { Theme } from '../theme.js'
-import type { ApprovalReq, ClarifyReq, ConfirmReq } from '../types.js'
+import type { ApprovalReq, ClarifyReq, ConfirmReq, TelosApprovalReq } from '../types.js'
 
 import { TextInput } from './textInput.js'
 
@@ -124,6 +124,89 @@ export function ApprovalPrompt({ cols = 80, onChoice, req, t }: ApprovalPromptPr
       ))}
 
       <Text color={t.color.muted}>↑/↓ select · Enter confirm · 1-{opts.length} quick pick · Esc/Ctrl+C deny</Text>
+    </Box>
+  )
+}
+
+type TelosKey = {
+  ctrl?: boolean
+  escape?: boolean
+  return?: boolean
+}
+
+type TelosAction = { kind: 'approve' } | { kind: 'deny' } | { kind: 'noop' }
+
+/**
+ * Pure key-dispatch for the Telos approval prompt.  Only Approve/Deny:
+ *   1, y, Y, Enter → approve
+ *   2, n, N, Esc, Ctrl+C → deny
+ * Unrelated keystrokes → noop.
+ */
+export function telosApprovalAction(ch: string, key: TelosKey): TelosAction {
+  if (key.escape) {
+    return { kind: 'deny' }
+  }
+
+  if (key.ctrl && ch.toLowerCase() === 'c') {
+    return { kind: 'deny' }
+  }
+
+  if (key.return || ch === '1' || ch.toLowerCase() === 'y') {
+    return { kind: 'approve' }
+  }
+
+  if (ch === '2' || ch.toLowerCase() === 'n') {
+    return { kind: 'deny' }
+  }
+
+  return { kind: 'noop' }
+}
+
+export function TelosPrompt({ cols = 80, onChoice, req, t }: TelosPromptProps) {
+  useInput((ch, key) => {
+    const action = telosApprovalAction(ch, key)
+
+    if (action.kind === 'approve') {
+      onChoice('approved')
+    } else if (action.kind === 'deny') {
+      onChoice('denied')
+    }
+  })
+
+  const innerWidth = Math.max(20, cols - 8)
+
+  return (
+    <Box borderColor={t.color.warn} borderStyle="double" flexDirection="column" paddingX={1}>
+      <Text bold color={t.color.warn}>
+        ⚙ Telos {req.action.toUpperCase()} Approval
+      </Text>
+
+      <Box flexDirection="column" paddingLeft={1}>
+        <Text color={t.color.muted}>Digest: </Text>
+        <Text color={t.color.text}>{req.digest.slice(0, innerWidth - 8)}</Text>
+
+        {req.boundedSummary ? (
+          <Text color={t.color.muted}>
+            Reason: <Text color={t.color.text}>{req.boundedSummary}</Text>
+          </Text>
+        ) : null}
+
+        {req.nonce ? (
+          <Text color={t.color.muted}>
+            Nonce: <Text color={t.color.text}>{req.nonce}</Text>
+          </Text>
+        ) : null}
+      </Box>
+
+      <Text />
+      <Text bold color={t.color.warn}>
+        {'  '}1. Approve
+      </Text>
+      <Text>
+        {'  '}2. Deny
+      </Text>
+
+      <Text color={t.color.muted}>1/Y/Enter approve · 2/N/Esc/Ctrl+C deny</Text>
     </Box>
   )
 }
@@ -273,6 +356,13 @@ interface ApprovalPromptProps {
   cols?: number
   onChoice: (s: string) => void
   req: ApprovalReq
+  t: Theme
+}
+
+interface TelosPromptProps {
+  cols?: number
+  onChoice: (s: string) => void
+  req: TelosApprovalReq
   t: Theme
 }
 

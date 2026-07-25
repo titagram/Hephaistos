@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { approvalAction } from '../components/prompts.js'
+import { approvalAction, telosApprovalAction } from '../components/prompts.js'
 
 describe('approvalAction — pure key dispatch for ApprovalPrompt', () => {
   it('maps Esc to deny — parity with global Ctrl+C cancellation', () => {
@@ -57,5 +57,57 @@ describe('approvalAction — pure key dispatch for ApprovalPrompt', () => {
     expect(approvalAction('4', {}, 0, opts)).toEqual({ kind: 'noop' })
     expect(approvalAction('', { downArrow: true }, 2, opts)).toEqual({ kind: 'noop' })
     expect(approvalAction('', { return: true }, 2, opts)).toEqual({ kind: 'choose', choice: 'deny' })
+  })
+})
+
+describe('telosApprovalAction — pure key dispatch for TelosPrompt', () => {
+  it('maps Enter to approve', () => {
+    expect(telosApprovalAction('', { return: true })).toEqual({ kind: 'approve' })
+  })
+
+  it('maps y and Y to approve', () => {
+    expect(telosApprovalAction('y', {})).toEqual({ kind: 'approve' })
+    expect(telosApprovalAction('Y', {})).toEqual({ kind: 'approve' })
+  })
+
+  it('maps Esc to deny', () => {
+    expect(telosApprovalAction('', { escape: true })).toEqual({ kind: 'deny' })
+  })
+
+  it('maps Ctrl+C to deny', () => {
+    expect(telosApprovalAction('c', { ctrl: true })).toEqual({ kind: 'deny' })
+  })
+
+  it('maps n and N to deny', () => {
+    expect(telosApprovalAction('n', {})).toEqual({ kind: 'deny' })
+    expect(telosApprovalAction('N', {})).toEqual({ kind: 'deny' })
+  })
+
+  it('maps 1 to approve', () => {
+    expect(telosApprovalAction('1', {})).toEqual({ kind: 'approve' })
+  })
+
+  it('maps 2 to deny', () => {
+    expect(telosApprovalAction('2', {})).toEqual({ kind: 'deny' })
+  })
+
+  it('Esc beats Enter — deny wins', () => {
+    expect(telosApprovalAction('', { escape: true, return: true })).toEqual({ kind: 'deny' })
+  })
+
+  it('returns noop for unrelated keystrokes', () => {
+    expect(telosApprovalAction('x', {})).toEqual({ kind: 'noop' })
+    expect(telosApprovalAction(' ', {})).toEqual({ kind: 'noop' })
+  })
+
+  it.each(['once', 'session', 'always'])('never emits dangerous choice %s', choice => {
+    const actions = [
+      telosApprovalAction('1', {}),
+      telosApprovalAction('2', {}),
+      telosApprovalAction('', { return: true }),
+      telosApprovalAction('', { escape: true })
+    ]
+
+    expect(actions).not.toContainEqual({ kind: 'choose', choice })
   })
 })

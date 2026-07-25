@@ -8,7 +8,7 @@ import type { ParsedVoiceRecordKey } from '../lib/platform.js'
 import type { RpcResult } from '../lib/rpc.js'
 import type { Theme } from '../theme.js'
 import type {
-  ApprovalReq,
+  ApprovalOverlay,
   ClarifyReq,
   ConfirmReq,
   DetailsMode,
@@ -130,7 +130,7 @@ export interface BillingOverlayState {
 export interface OverlayState {
   agents: boolean
   agentsInitialHistoryIndex: number
-  approval: ApprovalReq | null
+  approval: ApprovalOverlay | null
   billing: BillingOverlayState | null
   clarify: ClarifyReq | null
   confirm: ConfirmReq | null
