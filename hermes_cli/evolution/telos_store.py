@@ -73,6 +73,10 @@ class TelosStore:
             ).fetchone()
             if grant_row is None:
                 raise TelosStoreError("telos_grant_not_found")
+            if grant_row["telos_digest"] != digest:
+                raise TelosStoreError("telos_grant_digest_mismatch")
+            if grant_row["action"] != "activate":
+                raise TelosStoreError("telos_grant_wrong_action")
 
             # Verify consumption exists
             consumption = ledger.connection.execute(
@@ -148,6 +152,10 @@ class TelosStore:
             ).fetchone()
             if grant_row is None:
                 raise TelosStoreError("telos_grant_not_found")
+            if grant_row["telos_digest"] != target_digest:
+                raise TelosStoreError("telos_grant_digest_mismatch")
+            if grant_row["action"] != "rollback":
+                raise TelosStoreError("telos_grant_wrong_action")
 
             consumption = ledger.connection.execute(
                 "SELECT organism_id, telos_digest, action FROM telos_approval_consumptions WHERE grant_id = ?",
