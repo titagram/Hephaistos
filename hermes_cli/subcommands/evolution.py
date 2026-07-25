@@ -78,11 +78,9 @@ def build_evolution_parser(subparsers, *, cmd_evolution: Callable) -> None:
 
     telos_approve = telos_actions.add_parser("approve", help="Approve and activate a Telos revision digest")
     telos_approve.add_argument("digest", type=_identifier("digest"))
-    telos_approve.add_argument("--receipt", help="Single-use host approval receipt ID")
 
     telos_rollback = telos_actions.add_parser("rollback", help="Roll back to a verified Telos revision digest")
     telos_rollback.add_argument("digest", type=_identifier("digest"))
-    telos_rollback.add_argument("--receipt", help="Single-use host approval receipt ID")
 
 
     all_commands = [

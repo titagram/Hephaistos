@@ -1,8 +1,8 @@
 """Host approval broker for Telos authorization.
 
-The SQLiteTelosApprovalBroker is an internal implementation detail used
-exclusively by the gateway-owned TelosCoordinator.  Coherent SQLite rows
-alone never invoke a pointer mutation.
+The SQLiteTelosApprovalBroker is an internal implementation detail used by
+host-owned adapters such as the gateway coordinator and interactive Classic
+CLI. Coherent SQLite rows alone never invoke a pointer mutation.
 """
 
 from __future__ import annotations
@@ -363,9 +363,17 @@ class SqliteTelosApprovalBroker(TelosApprovalBroker):
 def telos_approval_prompt(prompt: TelosApprovalPrompt, timeout: int = 120) -> HostApprovalDecision:
     """Show a prompt_toolkit-based Telos approval prompt to the user.
 
-    Returns a HostApprovalDecision. Timeout, Ctrl-C, EOF, and invalid input
-    all result in 'denied'. Only explicit 'y' or 'yes' is 'approved'.
+    Uses ``PromptSession.prompt_async`` (the documented async API) with
+    ``asyncio.wait_for`` for a bounded timeout.  The synchronous classic-CLI
+    wrapper uses ``asyncio.run`` to bridge into the event loop.
+
+    Timeout, Ctrl-C, EOF, and invalid input all result in 'denied'.
+    Only explicit 'y' or 'yes' is 'approved'.
+
+    ``PromptSession.prompt`` does **not** accept a ``timeout`` kwarg;
+    this function uses the supported async path only.
     """
+    import asyncio
     from datetime import datetime, timezone
 
     lines = [
@@ -379,14 +387,35 @@ def telos_approval_prompt(prompt: TelosApprovalPrompt, timeout: int = 120) -> Ho
         "Type 'y' to approve or 'n' to deny.",
     ]
 
-    try:
+    async def _read_prompt() -> str:
         from prompt_toolkit.shortcuts import PromptSession
         session = PromptSession()
-        answer = session.prompt(
-            "\n".join(lines) + "\n> ",
-            timeout=timeout,
-        )
-    except (TimeoutError, EOFError, KeyboardInterrupt):
+        try:
+            return await asyncio.wait_for(
+                session.prompt_async("\n".join(lines) + "\n> "),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            raise TimeoutError("Telos approval prompt timed out")
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        running_loop = False
+    else:
+        running_loop = True
+
+    if running_loop:
+        # ``asyncio.run`` cannot nest inside a live event loop. This synchronous
+        # Classic CLI adapter therefore fails closed without creating a coroutine.
+        answer = None
+    else:
+        try:
+            answer = asyncio.run(_read_prompt())
+        except (TimeoutError, EOFError, KeyboardInterrupt):
+            answer = None
+
+    if answer is None:
         answer = "n"
 
     decision = "approved" if answer.strip().lower() in ("y", "yes") else "denied"

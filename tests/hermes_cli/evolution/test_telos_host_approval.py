@@ -215,7 +215,9 @@ def test_cli_telos_approval_prompt_timeout_is_deny():
         bounded_summary="Test Telos activation",
         host_context_digest="c" * 64,
     )
-    with mock.patch("prompt_toolkit.shortcuts.PromptSession.prompt", side_effect=TimeoutError):
+    async def _mock_timeout(_self, _msg):
+        raise TimeoutError()
+    with mock.patch("prompt_toolkit.shortcuts.PromptSession.prompt_async", _mock_timeout):
         decision = telos_approval_prompt(prompt, timeout=1)
         assert decision.decision == "denied"
 
@@ -230,7 +232,9 @@ def test_cli_telos_approval_accepts_y():
         action="activate", display_nonce="1234",
         bounded_summary="Test", host_context_digest="c" * 64,
     )
-    with mock.patch("prompt_toolkit.shortcuts.PromptSession.prompt", return_value="y"):
+    async def _mock_y(_self, _msg):
+        return "y"
+    with mock.patch("prompt_toolkit.shortcuts.PromptSession.prompt_async", _mock_y):
         decision = telos_approval_prompt(prompt, timeout=30)
         assert decision.decision == "approved"
 
@@ -245,6 +249,8 @@ def test_cli_telos_approval_rejects_invalid_input():
         action="activate", display_nonce="1234",
         bounded_summary="Test", host_context_digest="c" * 64,
     )
-    with mock.patch("prompt_toolkit.shortcuts.PromptSession.prompt", return_value="maybe"):
+    async def _mock_maybe(_self, _msg):
+        return "maybe"
+    with mock.patch("prompt_toolkit.shortcuts.PromptSession.prompt_async", _mock_maybe):
         decision = telos_approval_prompt(prompt, timeout=30)
         assert decision.decision == "denied"

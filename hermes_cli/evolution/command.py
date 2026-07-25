@@ -249,9 +249,28 @@ def evolution_command(args: Any) -> int:
         if action == "doctor":
             _emit(_doctor(getattr(args, "org_root", None)))
             return 0
-        if action == "telos":
-            sub = getattr(args, "telos_action", "status")
-            _emit(_telos_command(sub, getattr(args, "org_root", None), getattr(args, "digest", None)))
+        if action == "telos_status":
+            _emit(_telos_command("status", getattr(args, "org_root", None)))
+            return 0
+        if action == "telos_history":
+            _emit(_telos_command("history", getattr(args, "org_root", None)))
+            return 0
+        if action == "telos_draft":
+            _emit(_telos_command("draft", getattr(args, "org_root", None)))
+            return 0
+        if action == "telos_approve":
+            result = _handle_telos_cli_transition(getattr(args, "digest", ""), "activate", getattr(args, "org_root", None))
+            _emit(result)
+            return 0 if result["status"] == "approved" else 1
+        if action == "telos_rollback":
+            result = _handle_telos_cli_transition(getattr(args, "digest", ""), "rollback", getattr(args, "org_root", None))
+            _emit(result)
+            return 0 if result["status"] == "approved" else 1
+        if action == "observer_status":
+            _emit(_observer_status(getattr(args, "org_root", None)))
+            return 0
+        if action == "observer_scan":
+            _emit(_observer_scan(getattr(args, "org_root", None)))
             return 0
         if action == "suggestions":
             _emit(_suggestions_list(getattr(args, "org_root", None)))
@@ -275,12 +294,13 @@ def evolution_command(args: Any) -> int:
     return 2
 
 
-def _telos_command(sub: str, org_root: Any = None, digest: str | None = None) -> dict[str, Any]:
-    """Telos status and history read-only commands.
+def _telos_command(sub: str, org_root: Any = None) -> dict[str, Any]:
+    """Telos status, history, and draft commands.
 
-    Model-facing operations may save drafts, create/resume pending requests,
-    inspect status, and cancel pending requests.  They may NOT record host
-    decisions, issue/consume grants, activate, or rollback.
+    Model-facing operations may save drafts, inspect status, and inspect
+    history.  They may NOT record host decisions, issue/consume grants,
+    activate, or rollback.  The interactive approve/rollback CLI flow
+    is handled by ``_handle_telos_approve_cli`` / ``_handle_telos_rollback_cli``.
     """
     from pathlib import Path
     from .organism_home import get_organism_home
@@ -310,13 +330,285 @@ def _telos_command(sub: str, org_root: Any = None, digest: str | None = None) ->
             "revision_count": len(digests),
             "revisions": digests[:50],
         }
-    elif sub in ("approve", "rollback"):
+    elif sub == "draft":
         return {
             "schema_version": 1,
-            "action": sub,
-            "error": "host_approval_required",
+            "action": "telos_draft",
+            "status": "unsupported",
+            "reason": "draft requires a defined input contract; use telos workshop",
         }
     return {"schema_version": 1, "action": "telos", "error": "unknown_subcommand"}
+
+
+def _handle_telos_cli_transition(digest: str, action: str, org_root: Any = None) -> dict[str, Any]:
+    """Interactive Classic CLI host flow for ``hermes evolution telos <action> <digest>``.
+
+    Resolves the global organism root, verifies the revision exists and
+    matches the organism, creates a pending request via the broker, prompts
+    the user via ``telos_approval_prompt``, then delegates to the shared
+    ``perform_telos_transition`` service for the actual transition.
+
+    ``action`` must be exactly ``"activate"`` or ``"rollback"``; output
+    ``action`` maps ``activate`` → ``telos_approve`` and ``rollback`` →
+    ``telos_rollback``.  Never emits ``telos_activate``.
+    """
+    import uuid as _uuid_mod
+    from pathlib import Path
+    from .organism_home import get_organism_home
+    from .organism_identity import load_organism_identity
+    from .telos_store import TelosStore, TelosStoreError
+    from .telos_approval import (
+        HostApprovalContext,
+        SqliteTelosApprovalBroker,
+        TelosApprovalPrompt,
+        TelosApprovalError,
+        telos_approval_prompt,
+    )
+    from .ledger import EvolutionLedger
+    from .host_transition import perform_telos_transition
+
+    if action not in ("activate", "rollback"):
+        return {
+            "schema_version": 1,
+            "action": f"telos_{action}",
+            "status": "invalid",
+            "request_id": None,
+            "message": "unsupported action",
+        }
+
+    action_name = "telos_approve" if action == "activate" else "telos_rollback"
+
+    if not digest or _DIGEST.fullmatch(digest) is None:
+        return {
+            "schema_version": 1,
+            "action": action_name,
+            "status": "invalid",
+            "request_id": None,
+            "message": "invalid digest",
+        }
+
+    root = Path(org_root) if org_root else get_organism_home()
+    store = TelosStore(root)
+
+    try:
+        ident = load_organism_identity(root)
+    except Exception:
+        return {
+            "schema_version": 1,
+            "action": action_name,
+            "status": "rejected",
+            "request_id": None,
+            "message": "organism identity not found — run autopoiesis init first",
+        }
+    organism_id = ident.organism_id
+
+    try:
+        revision = store.get_revision(digest)
+    except TelosStoreError:
+        return {
+            "schema_version": 1,
+            "action": action_name,
+            "status": "rejected",
+            "request_id": None,
+            "message": "revision not found for requested digest",
+        }
+
+    if revision.canonical_digest != digest:
+        return {
+            "schema_version": 1,
+            "action": action_name,
+            "status": "rejected",
+            "request_id": None,
+            "message": "revision digest mismatch",
+        }
+
+    if revision.organism_id != organism_id:
+        return {
+            "schema_version": 1,
+            "action": action_name,
+            "status": "rejected",
+            "request_id": None,
+            "message": "revision organism mismatch",
+        }
+
+    ledger_path = root / "evolution" / "evolution.db"
+    if not ledger_path.exists():
+        return {
+            "schema_version": 1,
+            "action": action_name,
+            "status": "rejected",
+            "request_id": None,
+            "message": "no organism ledger found — run autopoiesis init first",
+        }
+
+    broker = SqliteTelosApprovalBroker()
+    ledger = EvolutionLedger(ledger_path)
+
+    session_ref = str(_uuid_mod.uuid4())
+    actor_ref = "interactive-local-user"
+    surface = "classic_cli"
+    nonce = str(_uuid_mod.uuid4())[:8]
+
+    ctx = HostApprovalContext(
+        surface=surface,
+        actor_ref=actor_ref,
+        session_ref=session_ref,
+        request_id=None,
+        telos_digest=digest,
+        action=action,
+        nonce=nonce,
+        context_digest="",
+    )
+
+    request_id = None
+    try:
+        request_id = broker.create_request(ledger, organism_id, digest, action, ctx, 3600)
+
+        row = ledger.connection.execute(
+            """SELECT request_id, organism_id, telos_digest, action,
+                      display_nonce, bounded_summary,
+                      expected_host_context_digest, expires_at
+               FROM telos_approval_requests
+               WHERE request_id = ?""",
+            (request_id,),
+        ).fetchone()
+
+        if row is None:
+            return {
+                "schema_version": 1,
+                "action": action_name,
+                "status": "rejected",
+                "request_id": request_id[:8],
+                "message": "persisted request row not found",
+            }
+
+        if row["request_id"] != request_id:
+            return {
+                "schema_version": 1,
+                "action": action_name,
+                "status": "rejected",
+                "request_id": request_id[:8],
+                "message": "persisted request_id mismatch",
+            }
+
+        prompt = TelosApprovalPrompt(
+            request_id=row["request_id"],
+            organism_id=row["organism_id"],
+            telos_digest=row["telos_digest"],
+            action=row["action"],
+            display_nonce=row["display_nonce"],
+            bounded_summary=row["bounded_summary"],
+            host_context_digest=row["expected_host_context_digest"],
+            expires_at=row["expires_at"],
+        )
+
+        decision = telos_approval_prompt(prompt, timeout=120)
+
+        decision_ctx = HostApprovalContext(
+            surface=surface,
+            actor_ref=actor_ref,
+            session_ref=session_ref,
+            request_id=row["request_id"],
+            telos_digest=row["telos_digest"],
+            action=row["action"],
+            nonce=row["display_nonce"],
+            context_digest=prompt.host_context_digest,
+        )
+
+        result = perform_telos_transition(ledger, store, decision_ctx, decision.decision)
+
+        if result.status == "approved":
+            return {
+                "schema_version": 1,
+                "action": action_name,
+                "status": "approved",
+                "request_id": request_id[:8],
+            }
+        else:
+            return {
+                "schema_version": 1,
+                "action": action_name,
+                "status": result.status,
+                "request_id": request_id[:8],
+                "message": result.message,
+            }
+    except TelosApprovalError as exc:
+        return {
+            "schema_version": 1,
+            "action": action_name,
+            "status": "rejected",
+            "request_id": request_id[:8] if request_id else None,
+            "message": str(exc),
+        }
+    finally:
+        ledger.connection.close()
+
+
+def _handle_telos_approve_cli(digest: str, org_root: Any = None) -> dict[str, Any]:
+    """Public wrapper for ``hermes evolution telos approve <digest>``."""
+    return _handle_telos_cli_transition(digest, "activate", org_root)
+
+
+def _handle_telos_rollback_cli(digest: str, org_root: Any = None) -> dict[str, Any]:
+    """Public wrapper for ``hermes evolution telos rollback <digest>``."""
+    return _handle_telos_cli_transition(digest, "rollback", org_root)
+
+
+def _observer_status(org_root: Any = None) -> dict[str, Any]:
+    """Bounded observer status read."""
+    from pathlib import Path
+    from .organism_home import get_organism_home
+
+    root = Path(org_root) if org_root else get_organism_home()
+    try:
+        from .observer_service import ObserverService
+        svc = ObserverService(root)
+        return {
+            "schema_version": 1,
+            "action": "observer_status",
+            "circuit_open": svc.circuit_open,
+            "degraded_reason": svc.degraded_reason,
+        }
+    except Exception:
+        return {
+            "schema_version": 1,
+            "action": "observer_status",
+            "status": "error",
+            "message": "observer not available",
+        }
+
+
+def _observer_scan(org_root: Any = None) -> dict[str, Any]:
+    """Bounded observer scan — calls ``scan_and_update_suggestions``."""
+    from pathlib import Path
+    from .organism_home import get_organism_home
+
+    root = Path(org_root) if org_root else get_organism_home()
+    try:
+        from .observer_service import ObserverService
+        svc = ObserverService(root)
+        if svc.circuit_open:
+            return {
+                "schema_version": 1,
+                "action": "observer_scan",
+                "status": "degraded",
+                "reason": str(svc.degraded_reason) if svc.degraded_reason else "circuit_open",
+                "count": 0,
+            }
+        suggestions = svc.scan_and_update_suggestions(max_events=1000)
+        return {
+            "schema_version": 1,
+            "action": "observer_scan",
+            "status": "completed",
+            "count": len(suggestions),
+        }
+    except Exception:
+        return {
+            "schema_version": 1,
+            "action": "observer_scan",
+            "status": "unsupported",
+            "message": "observer scan not available",
+        }
 
 
 def _suggestions_list(org_root: Any = None) -> dict[str, Any]:

@@ -59,11 +59,11 @@ def test_evolution_command_telos_actions(tmp_path: Path, monkeypatch):
     tstore.save_revision(telos)
 
     # Telos status and history must work (read-only)
-    args_status = Namespace(action="telos", telos_action="status", json=True, org_root=org_root)
+    args_status = Namespace(action="telos_status", json=True, org_root=org_root)
     res_stat = evolution_command(args_status)
     assert res_stat == 0
 
-    args_history = Namespace(action="telos", telos_action="history", json=True, org_root=org_root)
+    args_history = Namespace(action="telos_history", json=True, org_root=org_root)
     res_hist = evolution_command(args_history)
     assert res_hist == 0
 
