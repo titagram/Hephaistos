@@ -560,7 +560,7 @@ def load_cli_config() -> Dict[str, Any]:
             logger.warning("Failed to load cli-config.yaml: %s", e)
 
     # Expand ${ENV_VAR} references in config values before bridging to env vars.
-    from hermes_cli.config import _expand_env_vars
+    from hermes_cli.config import _expand_env_vars, _normalize_evolution_config
     defaults = _expand_env_vars(defaults)
 
     # Managed scope: overlay administrator-pinned values LAST so they win over
@@ -574,6 +574,7 @@ def load_cli_config() -> Dict[str, Any]:
     from hermes_cli import managed_scope
 
     defaults = managed_scope.apply_managed_overlay(defaults)
+    defaults = _normalize_evolution_config(defaults)
 
     # Apply terminal config to environment variables (so terminal_tool picks them up)
     terminal_config = defaults.get("terminal", {})
@@ -12269,6 +12270,13 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             if self.bell_on_complete:
                 sys.stdout.write("\a")
                 sys.stdout.flush()
+
+            # Drain autopoiesis notices after response delivery
+            if self.agent:
+                try:
+                    self.agent.drain_autopoiesis_notices()
+                except Exception:
+                    pass
 
             # Notify when iteration budget was hit
             if result and not result.get("completed") and not result.get("interrupted"):

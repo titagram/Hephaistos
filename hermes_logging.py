@@ -30,6 +30,7 @@ Session context:
 import io
 import logging
 import os
+import stat
 import sys
 import threading
 from pathlib import Path
@@ -114,6 +115,31 @@ def _safe_stderr():  # type: ignore[return]
         pass
     # Best-effort: if wrapping fails, return the original stream.
     return stream
+
+
+def _has_symlinked_path_component(path: Path, *, boundary: Path) -> bool:
+    """Return whether *path* has a symlink at or below *boundary*.
+
+    Permission tightening must not follow a configured symlink out of the
+    Hermes hierarchy, but platform symlinks above its configured home (such
+    as macOS ``/tmp``) must not disable ordinary private log creation. Treat
+    an uninspectable or out-of-boundary path as unsafe: logging can still use
+    it, but it must not chmod its referent.
+    """
+    current = path.absolute()
+    boundary = boundary.absolute()
+    while True:
+        try:
+            if stat.S_ISLNK(current.lstat().st_mode):
+                return True
+        except OSError:
+            return True
+        if current == boundary:
+            return False
+        parent = current.parent
+        if parent == current:
+            return True
+        current = parent
 
 
 _CONCURRENT_LOG_LOCK_TIMEOUT = "Cannot acquire lock after 20 attempts"
@@ -298,7 +324,19 @@ def setup_logging(
     global _logging_initialized
     home = hermes_home or get_hermes_home()
     log_dir = home / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
+    # Keep the first logging touch compatible with the ordinary profile-home
+    # contract.  In managed installs the service manager owns the shared
+    # hierarchy; elsewhere reuse config's established home-mode policy.
+    from hermes_cli.config import _secure_dir, is_managed
+    if is_managed():
+        log_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        home.mkdir(mode=0o700, parents=True, exist_ok=True)
+        log_dir.mkdir(mode=0o700, exist_ok=True)
+        if not _has_symlinked_path_component(home, boundary=home):
+            _secure_dir(home)
+        if not _has_symlinked_path_component(log_dir, boundary=home):
+            _secure_dir(log_dir)
 
     # Read config defaults (best-effort — config may not be loaded yet).
     cfg_level, cfg_max_size, cfg_backup = _read_logging_config()
@@ -321,6 +359,7 @@ def setup_logging(
         max_bytes=max_bytes,
         backup_count=backups,
         formatter=RedactingFormatter(_LOG_FORMAT),
+        permission_boundary=home,
     )
 
     # --- errors.log (WARNING+) — quick triage log --------------------------
@@ -331,6 +370,7 @@ def setup_logging(
         max_bytes=2 * 1024 * 1024,
         backup_count=2,
         formatter=RedactingFormatter(_LOG_FORMAT),
+        permission_boundary=home,
     )
 
     # --- gateway.log (INFO+, gateway component only) ------------------------
@@ -343,6 +383,7 @@ def setup_logging(
             backup_count=3,
             formatter=RedactingFormatter(_LOG_FORMAT),
             log_filter=_ComponentFilter(COMPONENT_PREFIXES["gateway"]),
+            permission_boundary=home,
         )
 
     # --- gui.log (INFO+, dashboard/tui-gateway components) -----------------
@@ -355,6 +396,7 @@ def setup_logging(
             backup_count=5,
             formatter=RedactingFormatter(_LOG_FORMAT),
             log_filter=_ComponentFilter(COMPONENT_PREFIXES["gui"]),
+            permission_boundary=home,
         )
 
     if _logging_initialized and not force:
@@ -433,9 +475,14 @@ class _ManagedRotatingFileHandler(RotatingFileHandler):
         rotating handlers.
     """
 
-    def __init__(self, *args, **kwargs):
-        from hermes_cli.config import is_managed
+    def __init__(self, *args, permission_boundary: Optional[Path] = None, **kwargs):
+        from hermes_cli.config import _secure_file, is_managed
         self._managed = is_managed()
+        self._secure_file = _secure_file
+        filename = args[0] if args else kwargs["filename"]
+        self._permission_boundary = (
+            permission_boundary or Path(filename).parent
+        ).absolute()
         super().__init__(*args, **kwargs)
         # Snapshot the inode of the currently open stream so emit() can
         # detect external rotation without an extra fstat per write.
@@ -443,12 +490,18 @@ class _ManagedRotatingFileHandler(RotatingFileHandler):
         self._stat_ino: Optional[int] = None
         self._record_stream_stat()
 
-    def _chmod_if_managed(self):
+    def _set_file_permissions(self):
+        if _has_symlinked_path_component(
+            Path(self.baseFilename), boundary=self._permission_boundary,
+        ):
+            return
         if self._managed:
             try:
                 os.chmod(self.baseFilename, 0o660)
             except OSError:
                 pass
+        else:
+            self._secure_file(Path(self.baseFilename))
 
     def _record_stream_stat(self) -> None:
         """Snapshot dev/ino of ``baseFilename`` so we can detect external rotation."""
@@ -532,12 +585,12 @@ class _ManagedRotatingFileHandler(RotatingFileHandler):
 
     def _open(self):
         stream = super()._open()
-        self._chmod_if_managed()
+        self._set_file_permissions()
         return stream
 
     def doRollover(self):
         super().doRollover()
-        self._chmod_if_managed()
+        self._set_file_permissions()
         # Our own rollover writes a new baseFilename; refresh the snapshot
         # so the next emit doesn't mistake it for external rotation.
         self._record_stream_stat()
@@ -552,6 +605,7 @@ def _add_rotating_handler(
     backup_count: int,
     formatter: logging.Formatter,
     log_filter: Optional[logging.Filter] = None,
+    permission_boundary: Optional[Path] = None,
 ) -> None:
     """Add a ``RotatingFileHandler`` to *logger*, skipping if one already
     exists for the same resolved file path (idempotent).
@@ -573,7 +627,7 @@ def _add_rotating_handler(
     path.parent.mkdir(parents=True, exist_ok=True)
     handler = _ManagedRotatingFileHandler(
         str(path), maxBytes=max_bytes, backupCount=backup_count,
-        encoding="utf-8",
+        encoding="utf-8", permission_boundary=permission_boundary,
     )
     handler.setLevel(level)
     handler.setFormatter(formatter)

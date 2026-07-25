@@ -532,6 +532,15 @@ def create_org_run(
             },
         )
 
+    # Runnable nodes inherit workspace_kind=dir when the board has a
+    # default_workdir; anchors (completed metadata) stay scratch.
+    board_slug = board if board else kb.get_current_board()
+    board_meta = kb.read_board_metadata(board_slug)
+    board_default = board_meta.get("default_workdir")
+    runnable_ws_kind: str = "scratch"
+    if board_default and isinstance(board_default, str) and board_default.strip():
+        runnable_ws_kind = "dir"
+
     remote_anchors: dict[str, str] = {}
     for task in plan.tasks:
         remote_anchor = _create_or_complete_anchor(
@@ -559,6 +568,7 @@ def create_org_run(
             triage=not activate,
             idempotency_key=f"org-run:{plan.org_run_id}:{task.remote_task_id}:execute",
             board=board,
+            workspace_kind=runnable_ws_kind,
         )
         review_ids[task.remote_task_id] = kb.create_task(
             conn,
@@ -574,6 +584,7 @@ def create_org_run(
             skills=["requesting-code-review"],
             idempotency_key=f"org-run:{plan.org_run_id}:{task.remote_task_id}:review",
             board=board,
+            workspace_kind=runnable_ws_kind,
         )
         integration_ready_ids[task.remote_task_id] = kb.create_task(
             conn,
@@ -585,6 +596,7 @@ def create_org_run(
             priority=task.priority,
             idempotency_key=f"org-run:{plan.org_run_id}:{task.remote_task_id}:ready",
             board=board,
+            workspace_kind=runnable_ws_kind,
         )
 
     for task_id, parents in validation.ordered_dependencies.items():
@@ -604,6 +616,7 @@ def create_org_run(
         parents=list(integration_ready_ids.values()),
         idempotency_key=f"org-run:{plan.org_run_id}:integration",
         board=board,
+        workspace_kind=runnable_ws_kind,
     )
     review_id = kb.create_task(
         conn,
@@ -615,6 +628,7 @@ def create_org_run(
         skills=["requesting-code-review"],
         idempotency_key=f"org-run:{plan.org_run_id}:org-review",
         board=board,
+        workspace_kind=runnable_ws_kind,
     )
 
     completion_ids: dict[str, str] = {}
@@ -629,6 +643,7 @@ def create_org_run(
             priority=task.priority,
             idempotency_key=f"org-run:{plan.org_run_id}:{task.remote_task_id}:complete",
             board=board,
+            workspace_kind=runnable_ws_kind,
         )
     synthesis_id = kb.create_task(
         conn,
@@ -639,6 +654,7 @@ def create_org_run(
         parents=list(completion_ids.values()),
         idempotency_key=f"org-run:{plan.org_run_id}:synthesis",
         board=board,
+        workspace_kind=runnable_ws_kind,
     )
 
     created = OrgRunCreated(

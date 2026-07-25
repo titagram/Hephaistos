@@ -542,4 +542,10 @@ def finalize_turn(
     except Exception as exc:
         logger.warning("on_session_end hook failed: %s", exc)
 
+    # -- Autopoiesis pending notice queue (container only, no scan) --
+    # Scans and delivery happen in drain_autopoiesis_notices() called by
+    # frontends AFTER the response has been visibly delivered.
+    if not getattr(agent, "_pending_autopoiesis_notices", None):
+        agent._pending_autopoiesis_notices = []
+
     return result

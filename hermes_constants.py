@@ -175,6 +175,15 @@ def get_default_hermes_root() -> Path:
     return env_path
 
 
+def get_organism_home() -> Path:
+    """Return the global organism storage directory (`<default-hermes-root>/organism`).
+
+    Independent of the currently active profile (HERMES_HOME).
+    """
+    return get_default_hermes_root() / "organism"
+
+
+
 def _get_packaged_data_dir(name: str) -> Path | None:
     """Return an installed data-files directory if one exists.
 

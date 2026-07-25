@@ -2,8 +2,8 @@ import type { QueryClient } from '@tanstack/react-query'
 import { type MutableRefObject, useCallback, useEffect, useRef } from 'react'
 
 import { writeAgentTerminalChunk } from '@/app/right-sidebar/terminal/agent-terminal-stream'
-import { closeAgentTerminalByProc } from '@/app/right-sidebar/terminal/terminals'
 import { readActiveTerminal } from '@/app/right-sidebar/terminal/buffer'
+import { closeAgentTerminalByProc } from '@/app/right-sidebar/terminal/terminals'
 import { translateNow } from '@/i18n'
 import {
   appendAssistantTextPart,
@@ -21,13 +21,10 @@ import {
 import { coerceGatewayText, coerceThinkingText, normalizePersonalityValue } from '@/lib/chat-runtime'
 import { playCompletionSound } from '@/lib/completion-sound'
 import { gatewayEventRequiresSessionId } from '@/lib/gateway-events'
-import {
-  dedupeGeneratedImageEchoesInParts,
-  generatedImageEchoSources,
-  stripGeneratedImageEchoes
-} from '@/lib/generated-images'
+import { dedupeGeneratedImageEchoesInParts, generatedImageEchoSources, stripGeneratedImageEchoes } from '@/lib/generated-images'
 import { triggerHaptic } from '@/lib/haptics'
 import { isProviderSetupErrorMessage } from '@/lib/provider-setup-errors'
+import { parseTelosPayload } from '@/lib/telos-approval'
 import { parseTodos } from '@/lib/todos'
 import { clearClarifyRequest, setClarifyRequest } from '@/store/clarify'
 import { setSessionCompacting } from '@/store/compaction'
@@ -38,7 +35,7 @@ import { notify } from '@/store/notifications'
 import { requestDesktopOnboarding } from '@/store/onboarding'
 import { flashPetActivity, markPetUnread, setPetActivity } from '@/store/pet'
 import { followActiveSessionCwd } from '@/store/projects'
-import { clearAllPrompts, setApprovalRequest, setSecretRequest, setSudoRequest } from '@/store/prompts'
+import { clearAllPrompts, setApprovalRequest, setSecretRequest, setSudoRequest, setTelosApprovalRequest } from '@/store/prompts'
 import {
   $currentCwd,
   setCurrentBranch,
@@ -1074,6 +1071,37 @@ export function useMessageStream({
             title: translateNow('notifications.native.inputTitle')
           })
         }
+      } else if (event.type === 'approval.request' && payload?.domain === 'telos') {
+        // ── Telos host-approval path ──
+        // Validate fail-closed: the parser returns null for any missing or
+        // malformed field.  Invalid Telos events are silently ignored and
+        // MUST NOT fall through to the dangerous-command handler.
+        const telos = parseTelosPayload(payload, sessionId)
+
+        if (telos) {
+          setTelosApprovalRequest({
+            kind: 'telos',
+            requestId: telos.requestId,
+            digest: telos.digest,
+            action: telos.action,
+            boundedSummary: telos.boundedSummary,
+            nonce: telos.nonce,
+            expiresAt: telos.expiresAt,
+            capturedSessionId: telos.sessionId,
+            sessionId: telos.sessionId
+          })
+
+          updateSessionState(telos.sessionId, state => ({ ...state, needsInput: true }))
+
+          dispatchNativeNotification({
+            kind: 'input',
+            sessionId: telos.sessionId,
+            title: translateNow('notifications.native.telosTitle'),
+            body: telos.boundedSummary
+          })
+        }
+
+        // Malformed Telos event — silently ignored, no dangerous fallthrough.
       } else if (event.type === 'approval.request') {
         // Dangerous-command / execute_code approval. The Python side is blocked
         // in _await_gateway_decision() until approval.respond lands; without

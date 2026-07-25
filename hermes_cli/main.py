@@ -4298,6 +4298,13 @@ def cmd_gnothi(args):
     raise SystemExit(gnothi_command(args))
 
 
+def cmd_evolution(args):
+    """Dispatch evolution lazily so help startup never imports lifecycle code."""
+    from hermes_cli.evolution.command import evolution_command
+
+    raise SystemExit(evolution_command(args))
+
+
 def cmd_org(args):
     """Validate and materialize local Hades OrgRuns."""
     from hermes_cli.hades_org_cmd import org_command
@@ -10807,6 +10814,7 @@ def _coalesce_session_name_args(argv: list) -> list:
         "import",
         "completion",
         "logs",
+        "evolution",
     }
     _SESSION_FLAGS = {"-c", "--continue", "-r", "--resume"}
 
@@ -11979,7 +11987,7 @@ _BUILTIN_SUBCOMMANDS = frozenset(
         "prompt-size",
         "review", "send", "sessions", "setup",
         "skills", "slack", "status", "tools", "uninstall", "update",
-        "version", "webhook", "whatsapp", "whatsapp-cloud", "chat", "secrets", "security",
+        "version", "webhook", "whatsapp", "whatsapp-cloud", "chat", "secrets", "security", "evolution",
         # Help-ish invocations — plugin commands not being listed in
         # top-level --help is an acceptable trade-off for skipping an
         # expensive eager import of every bundled plugin module.
@@ -12762,6 +12770,9 @@ def main():
     from hermes_cli.hades_gnothi_cmd import build_gnothi_parser
 
     build_gnothi_parser(subparsers, cmd_gnothi=cmd_gnothi)
+    from hermes_cli.subcommands.evolution import build_evolution_parser
+
+    build_evolution_parser(subparsers, cmd_evolution=cmd_evolution)
 
     # =========================================================================
     # hooks command — shell-hook inspection and management

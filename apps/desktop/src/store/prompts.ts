@@ -85,9 +85,23 @@ export interface SecretRequest extends KeyedPrompt {
   requestId: string
 }
 
+/** Telos host-approval request — domain="telos" on the wire. */
+export interface TelosApprovalRequest extends KeyedPrompt {
+  kind: 'telos'
+  requestId: string
+  digest: string
+  action: 'activate' | 'rollback'
+  boundedSummary: string
+  nonce: string
+  expiresAt: string
+  /** Session id captured from the event — used for the respond RPC. */
+  capturedSessionId: string
+}
+
 const approval = keyedPromptStore<ApprovalRequest>()
 const sudo = keyedPromptStore<SudoRequest>()
 const secret = keyedPromptStore<SecretRequest>()
+const telosApproval = keyedPromptStore<TelosApprovalRequest>()
 const $approvalInlineAnchorCount = atom(0)
 
 export const $approvalRequest = approval.$active
@@ -111,14 +125,18 @@ export const $secretRequest = secret.$active
 export const setSecretRequest = secret.set
 export const clearSecretRequest = secret.clear
 
+export const $telosApprovalRequest = telosApproval.$active
+export const setTelosApprovalRequest = telosApproval.set
+export const clearTelosApprovalRequest = telosApproval.clear
+
 // True when the active session is blocked on the user (clarify question or an
-// approval / sudo / secret prompt). Mirrors the pet's `awaitingInput` concept
+// approval / sudo / secret / telos prompt). Mirrors the pet's `awaitingInput` concept
 // (agent/pet/state.py): the turn is paused on you, not working — so callers can
 // suppress "thinking" indicators and the Esc-to-interrupt shortcut while you
 // decide, instead of treating the wait as an in-flight turn.
 export const $activeSessionAwaitingInput = computed(
-  [$clarifyRequest, $approvalRequest, $sudoRequest, $secretRequest],
-  (clarify, approval, sudo, secret) => Boolean(clarify || approval || sudo || secret)
+  [$clarifyRequest, $approvalRequest, $sudoRequest, $secretRequest, $telosApprovalRequest],
+  (clarify, approval, sudo, secret, telos) => Boolean(clarify || approval || sudo || secret || telos)
 )
 
 // Drop in-flight prompts for `sessionId` (a turn ended) across all three kinds —
@@ -128,6 +146,7 @@ export function clearAllPrompts(sessionId?: string | null): void {
     approval.reset()
     sudo.reset()
     secret.reset()
+    telosApproval.reset()
     $approvalInlineAnchorCount.set(0)
 
     return
@@ -136,4 +155,5 @@ export function clearAllPrompts(sessionId?: string | null): void {
   approval.clear(sessionId)
   sudo.clear(sessionId)
   secret.clear(sessionId)
+  telosApproval.clear(sessionId)
 }

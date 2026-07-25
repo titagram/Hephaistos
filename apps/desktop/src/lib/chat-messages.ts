@@ -67,6 +67,13 @@ export type GatewayEventPayload = {
   // secret.request (skill credential capture)
   env_var?: string
   prompt?: string
+  // telos approval.request
+  domain?: string
+  digest?: string
+  action?: string
+  bounded_summary?: string
+  nonce?: string
+  expires_at?: string
   // terminal.read.request (GUI agent reading the in-app terminal pane)
   start?: number
   count?: number

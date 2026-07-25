@@ -1,7 +1,7 @@
 'use client'
 
 import { useStore } from '@nanostores/react'
-import { type FormEvent, useCallback, useEffect, useState } from 'react'
+import { type FormEvent, useCallback, useEffect, useRef, useState } from 'react'
 
 import { PendingApprovalFallback } from '@/components/assistant-ui/tool-approval'
 import { Button } from '@/components/ui/button'
@@ -17,9 +17,17 @@ import { Input } from '@/components/ui/input'
 import { useI18n } from '@/i18n'
 import { triggerHaptic } from '@/lib/haptics'
 import { KeyRound, Loader2, Lock } from '@/lib/icons'
+import { buildTelosRespondParams } from '@/lib/telos-approval'
 import { $gateway } from '@/store/gateway'
 import { notifyError } from '@/store/notifications'
-import { $secretRequest, $sudoRequest, clearSecretRequest, clearSudoRequest } from '@/store/prompts'
+import {
+  $secretRequest,
+  $sudoRequest,
+  $telosApprovalRequest,
+  clearSecretRequest,
+  clearSudoRequest,
+  clearTelosApprovalRequest
+} from '@/store/prompts'
 
 // Renders the modal mid-turn prompts the gateway raises and waits on: sudo
 // password and skill secret capture. Dangerous-command / execute_code approval
@@ -130,6 +138,121 @@ function SudoDialog() {
   )
 }
 
+function TelosApprovalDialog() {
+  const { t } = useI18n()
+  const copy = t.assistant.telos
+  const request = useStore($telosApprovalRequest)
+  const gateway = useStore($gateway)
+  const [submitting, setSubmitting] = useState(false)
+  const submittingRef = useRef(false)
+
+  useEffect(() => {
+    submittingRef.current = false
+    setSubmitting(false)
+  }, [request?.requestId])
+
+  const send = useCallback(
+    async (choice: 'approved' | 'denied') => {
+      if (!request || submittingRef.current) {
+        return
+      }
+
+      if (!gateway) {
+        notifyError(new Error(copy.gatewayDisconnected), copy.sendFailed)
+
+        return
+      }
+
+      submittingRef.current = true
+      setSubmitting(true)
+
+      const params = buildTelosRespondParams(request, choice)
+
+      if (!params) {
+        submittingRef.current = false
+        setSubmitting(false)
+
+        return
+      }
+
+      try {
+        await gateway.request<{ status?: string }>('approval.respond', params)
+        triggerHaptic('submit')
+        clearTelosApprovalRequest(request.sessionId, request.requestId)
+      } catch (error) {
+        notifyError(error, copy.sendFailed)
+        submittingRef.current = false
+        setSubmitting(false)
+      }
+    },
+    [copy.gatewayDisconnected, copy.sendFailed, gateway, request]
+  )
+
+  // Esc / backdrop click → explicit deny without double-send. Matches SudoDialog
+  // and SecretDialog: Radix fires onOpenChange(false) exactly once, we send the
+  // refusal, then the store clears and the dialog unmounts.
+  const onOpenChange = useCallback(
+    (open: boolean) => {
+      if (!open && !submittingRef.current && request) {
+        void send('denied')
+      }
+    },
+    [request, send]
+  )
+
+  if (!request) {
+    return null
+  }
+
+  const title = request.action === 'activate' ? copy.activateTitle : copy.rollbackTitle
+
+  return (
+    <Dialog onOpenChange={onOpenChange} open>
+      <DialogContent showCloseButton={false}>
+        <DialogHeader>
+          <DialogTitle>{title}</DialogTitle>
+          <DialogDescription>{request.boundedSummary}</DialogDescription>
+        </DialogHeader>
+
+        <div className="grid gap-2 text-sm">
+          <div className="flex flex-col gap-0.5">
+            <span className="text-muted-foreground text-xs">{copy.digest}</span>
+            <span className="font-mono text-xs break-all">{request.digest}</span>
+          </div>
+
+          <div className="flex flex-col gap-0.5">
+            <span className="text-muted-foreground text-xs">{copy.summary}</span>
+            <span>{request.boundedSummary}</span>
+          </div>
+
+          <div className="flex gap-4">
+            <div className="flex flex-col gap-0.5">
+              <span className="text-muted-foreground text-xs">{copy.nonce}</span>
+              <span className="font-mono text-xs">{request.nonce}</span>
+            </div>
+
+            {request.expiresAt ? (
+              <div className="flex flex-col gap-0.5">
+                <span className="text-muted-foreground text-xs">{copy.expires}</span>
+                <span className="font-mono text-xs">{request.expiresAt}</span>
+              </div>
+            ) : null}
+          </div>
+        </div>
+
+        <DialogFooter>
+          <Button disabled={submitting} onClick={() => void send('denied')} type="button" variant="ghost">
+            {copy.deny}
+          </Button>
+          <Button disabled={submitting} onClick={() => void send('approved')} type="button">
+            {copy.approve}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 function SecretDialog() {
   const { t } = useI18n()
   const copy = t.prompts
@@ -228,6 +351,7 @@ export function PromptOverlays() {
   return (
     <>
       <PendingApprovalFallback />
+      <TelosApprovalDialog />
       <SudoDialog />
       <SecretDialog />
     </>

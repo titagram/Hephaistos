@@ -5,6 +5,7 @@ import { getOverlayState, patchOverlayState, resetOverlayState } from '../app/ov
 import { turnController } from '../app/turnController.js'
 import { getTurnState, resetTurnState } from '../app/turnStore.js'
 import { getUiState, patchUiState, resetUiState } from '../app/uiStore.js'
+import type { GatewayEvent } from '../gatewayTypes.js'
 import { estimateTokensRough } from '../lib/text.js'
 import type { Msg } from '../types.js'
 
@@ -946,6 +947,93 @@ describe('createGatewayEventHandler', () => {
       allowPermanent: false,
       command: 'curl suspicious | bash',
       description: 'content-security warning'
+    })
+  })
+
+  it('opens Telos approval overlay with correct fields and preserves full request id', () => {
+    const onEvent = createGatewayEventHandler(buildCtx([]))
+
+    const event: GatewayEvent = {
+      payload: {
+        domain: 'telos',
+        request_id: 'full-telos-req-id-12345',
+        digest: 'a'.repeat(64),
+        action: 'activate',
+        bounded_summary: 'Test Telos activation',
+        nonce: 'abc123',
+        expires_at: '2026-07-25T12:00:00.000000Z'
+      },
+      session_id: 'ev-sid-1',
+      type: 'approval.request'
+    }
+
+    onEvent(event)
+
+    const state = getOverlayState().approval
+    expect(state).not.toBeNull()
+    expect(state!.kind).toBe('telos')
+    expect(state!.requestId).toBe('full-telos-req-id-12345')
+    expect(state!.digest).toBe('a'.repeat(64))
+    expect(state!.action).toBe('activate')
+    expect(state!.boundedSummary).toBe('Test Telos activation')
+    expect(state!.nonce).toBe('abc123')
+    expect(state!.expiresAt).toBe('2026-07-25T12:00:00.000000Z')
+    expect(state!.capturedSessionId).toBe('ev-sid-1')
+  })
+
+  it.each([
+    ['empty request id', { request_id: '' }],
+    ['uppercase digest', { digest: 'A'.repeat(64) }],
+    ['nonhex digest', { digest: 'g'.repeat(64) }],
+    ['empty summary', { bounded_summary: '' }],
+    ['empty nonce', { nonce: '' }],
+    ['missing expiry', { expires_at: undefined }],
+    ['missing session', { session_id: undefined }]
+  ])('ignores malformed Telos payload: %s', (_name, overrides) => {
+    const onEvent = createGatewayEventHandler(buildCtx([]))
+
+    const base = {
+      payload: {
+        domain: 'telos',
+        request_id: 'req-full',
+        digest: 'a'.repeat(64),
+        action: 'activate',
+        bounded_summary: 'summary',
+        nonce: 'nonce',
+        expires_at: '2026-07-25T12:00:00.000000Z'
+      },
+      session_id: 'event-session',
+      type: 'approval.request'
+    }
+
+    const event = {
+      ...base,
+      ...('session_id' in overrides ? { session_id: overrides.session_id } : {}),
+      payload: { ...base.payload, ...overrides }
+    } as unknown as GatewayEvent
+
+    onEvent(event)
+
+    expect(getOverlayState().approval).toBeNull()
+  })
+
+  it('preserves dangerous-command approval when domain is absent', () => {
+    const onEvent = createGatewayEventHandler(buildCtx([]))
+
+    const event: GatewayEvent = {
+      payload: { command: 'rm -rf /tmp', description: 'test command' },
+      type: 'approval.request'
+    }
+
+    onEvent(event)
+
+    const state = getOverlayState().approval
+    expect(state?.kind).toBe('dangerous')
+    expect(state).toMatchObject({
+      allowPermanent: true,
+      command: 'rm -rf /tmp',
+      description: 'test command',
+      kind: 'dangerous'
     })
   })
 

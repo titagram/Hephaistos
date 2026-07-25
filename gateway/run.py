@@ -2188,8 +2188,8 @@ def _load_gateway_config() -> dict:
     # gateway would resolve an empty model for ``model: {name: <id>}`` configs
     # while the CLI resolves it correctly. See issue #34500. Fail-open.
     try:
-        from hermes_cli.config import _normalize_root_model_keys
-        raw = _normalize_root_model_keys(raw)
+        from hermes_cli.config import _normalize_evolution_config, _normalize_root_model_keys
+        raw = _normalize_evolution_config(_normalize_root_model_keys(raw))
     except Exception:
         pass
     return raw
@@ -2724,6 +2724,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # Track platforms that failed to connect for background reconnection.
         # Key: Platform enum, Value: {"config": platform_config, "attempts": int, "next_retry": float}
         self._failed_platforms: Dict[Platform, Dict[str, Any]] = {}
+
+        # Telos transition coordinator — one in-memory instance per gateway
+        # process.  Created during init, never exposed to model commands or
+        # serialised.  Restart destroys coordinator state.
+        from gateway.telos_coordinator import TelosCoordinator
+        self._telos_coordinator = TelosCoordinator()
 
         # Track pending /update prompt responses per session.
         # Key: session_key, Value: True when a prompt is waiting for user input.
@@ -17670,6 +17676,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 if _persist_user_timestamp_override is not None:
                     _conversation_kwargs["persist_user_timestamp"] = _persist_user_timestamp_override
                 result = agent.run_conversation(_api_run_message, **_conversation_kwargs)
+                # Drain autopoiesis notices after agent completes
+                try:
+                    agent.drain_autopoiesis_notices()
+                except Exception:
+                    pass
             finally:
                 unregister_gateway_notify(_approval_session_key)
                 # Cancel any pending clarify entries so blocked agent

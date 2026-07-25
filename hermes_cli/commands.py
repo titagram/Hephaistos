@@ -175,7 +175,13 @@ COMMAND_REGISTRY: list[CommandDef] = [
                subcommands=("queue", "steer", "interrupt", "status")),
 
     # Tools & Skills
+    CommandDef("autopoiesis", "Goal-directed meta-observation, Telos workshop, and suggestions",
+               "Tools & Skills", args_hint="[suggestions|show <id>|note|telos]",
+               subcommands=("suggestions", "show", "note", "telos")),
+
+
     CommandDef("tools", "Manage tools: /tools [list|disable|enable] [name...]", "Tools & Skills",
+
                args_hint="[list|disable|enable] [name...]", cli_only=True),
     CommandDef("toolsets", "List available toolsets", "Tools & Skills",
                cli_only=True),
@@ -1209,7 +1215,9 @@ _SLACK_PRIORITY_ALIASES = ("btw", "bg")
 #   - moa: high-cost slash mode, available through /hermes moa to avoid
 #     displacing existing native Slack slash commands at the 50-command cap.
 #   - debug: the log/report upload surface; reached via /hermes debug on Slack.
-_SLACK_VIA_HERMES_ONLY = frozenset({"credits", "billing", "moa", "debug"})
+_SLACK_VIA_HERMES_ONLY = frozenset({"credits", "billing", "moa", "debug", "autopoiesis", "version"})
+
+
 
 
 def _sanitize_slack_name(raw: str) -> str:

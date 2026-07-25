@@ -151,6 +151,7 @@ export const en: Translations = {
     },
     native: {
       approvalTitle: 'Approval needed',
+      telosTitle: 'Telos host approval needed',
       approveAction: 'Approve',
       rejectAction: 'Reject',
       inputTitle: 'Input needed',
@@ -2038,6 +2039,18 @@ export const en: Translations = {
       alwaysDescription: pattern =>
         `This adds the “${pattern}” pattern to your permanent allowlist (~/.hermes/config.yaml). Hades won’t ask again for commands like this — in this session or any future one.`,
       alwaysAllow: 'Always allow'
+    },
+    telos: {
+      activateTitle: 'Telos Activation',
+      rollbackTitle: 'Telos Rollback',
+      digest: 'Digest',
+      summary: 'Summary',
+      nonce: 'Nonce',
+      expires: 'Expires',
+      approve: 'Approve',
+      deny: 'Deny',
+      gatewayDisconnected: 'Hades gateway is not connected',
+      sendFailed: 'Could not send Telos approval response'
     },
     clarify: {
       notReady: 'Clarify request is not ready yet',

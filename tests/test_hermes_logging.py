@@ -76,6 +76,102 @@ class TestSetupLogging:
         assert log_dir == hermes_home / "logs"
         assert log_dir.is_dir()
 
+    def test_non_managed_first_use_creates_a_private_log_hierarchy(self, tmp_path):
+        """Logging must not make a new profile fail the lifecycle lock."""
+        home = tmp_path / "absent-home"
+        old_umask = os.umask(0)
+        try:
+            with patch("hermes_cli.config.is_managed", return_value=False), \
+                 patch("hermes_cli.config._is_container", return_value=False):
+                hermes_logging.setup_logging(hermes_home=home)
+        finally:
+            os.umask(old_umask)
+
+        assert stat.S_IMODE(home.stat().st_mode) == 0o700
+        assert stat.S_IMODE((home / "logs").stat().st_mode) == 0o700
+        assert stat.S_IMODE((home / "logs" / "agent.log").stat().st_mode) == 0o600
+        assert stat.S_IMODE((home / "logs" / "errors.log").stat().st_mode) == 0o600
+
+    def test_private_first_use_ignores_symlinked_ancestor_above_home(self, tmp_path):
+        real_parent = tmp_path / "real-parent"
+        linked_parent = tmp_path / "linked-parent"
+        real_parent.mkdir()
+        linked_parent.symlink_to(real_parent, target_is_directory=True)
+        home = linked_parent / "home"
+
+        old_umask = os.umask(0)
+        try:
+            with patch("hermes_cli.config.is_managed", return_value=False), \
+                 patch("hermes_cli.config._is_container", return_value=False):
+                hermes_logging.setup_logging(hermes_home=home)
+        finally:
+            os.umask(old_umask)
+
+        assert stat.S_IMODE(home.stat().st_mode) == 0o700
+        assert stat.S_IMODE((home / "logs").stat().st_mode) == 0o700
+        assert stat.S_IMODE((home / "logs" / "agent.log").stat().st_mode) == 0o600
+        assert stat.S_IMODE((home / "logs" / "errors.log").stat().st_mode) == 0o600
+
+    def test_does_not_chmod_target_of_symlinked_home(self, tmp_path):
+        shared_home = tmp_path / "shared-home"
+        shared_logs = shared_home / "logs"
+        shared_home.mkdir()
+        shared_logs.mkdir()
+        for path, mode in ((shared_home, 0o770), (shared_logs, 0o770)):
+            path.chmod(mode)
+        for name in ("agent.log", "errors.log"):
+            (shared_logs / name).touch()
+            (shared_logs / name).chmod(0o660)
+
+        home = tmp_path / "home"
+        home.symlink_to(shared_home, target_is_directory=True)
+        with patch("hermes_cli.config.is_managed", return_value=False), \
+             patch("hermes_cli.config._is_container", return_value=False):
+            hermes_logging.setup_logging(hermes_home=home)
+
+        assert home.is_symlink()
+        assert stat.S_IMODE(shared_home.stat().st_mode) == 0o770
+        assert stat.S_IMODE(shared_logs.stat().st_mode) == 0o770
+        assert stat.S_IMODE((shared_logs / "agent.log").stat().st_mode) == 0o660
+        assert stat.S_IMODE((shared_logs / "errors.log").stat().st_mode) == 0o660
+
+    def test_does_not_chmod_target_of_symlinked_logs_directory(self, tmp_path):
+        home = tmp_path / "home"
+        shared_logs = tmp_path / "shared-logs"
+        home.mkdir(mode=0o700)
+        shared_logs.mkdir()
+        shared_logs.chmod(0o770)
+        for name in ("agent.log", "errors.log"):
+            (shared_logs / name).touch()
+            (shared_logs / name).chmod(0o660)
+        (home / "logs").symlink_to(shared_logs, target_is_directory=True)
+
+        with patch("hermes_cli.config.is_managed", return_value=False), \
+             patch("hermes_cli.config._is_container", return_value=False):
+            hermes_logging.setup_logging(hermes_home=home)
+
+        assert (home / "logs").is_symlink()
+        assert stat.S_IMODE(shared_logs.stat().st_mode) == 0o770
+        assert stat.S_IMODE((shared_logs / "agent.log").stat().st_mode) == 0o660
+        assert stat.S_IMODE((shared_logs / "errors.log").stat().st_mode) == 0o660
+
+    def test_does_not_chmod_target_of_symlinked_log_file(self, tmp_path):
+        home = tmp_path / "home"
+        log_dir = home / "logs"
+        shared_agent_log = tmp_path / "shared-agent.log"
+        home.mkdir(mode=0o700)
+        log_dir.mkdir(mode=0o700)
+        shared_agent_log.touch()
+        shared_agent_log.chmod(0o660)
+        (log_dir / "agent.log").symlink_to(shared_agent_log)
+
+        with patch("hermes_cli.config.is_managed", return_value=False), \
+             patch("hermes_cli.config._is_container", return_value=False):
+            hermes_logging.setup_logging(hermes_home=home)
+
+        assert (log_dir / "agent.log").is_symlink()
+        assert stat.S_IMODE(shared_agent_log.stat().st_mode) == 0o660
+
     def test_creates_agent_log_handler(self, hermes_home):
         hermes_logging.setup_logging(hermes_home=hermes_home)
         root = logging.getLogger()
@@ -816,6 +912,37 @@ class TestAddRotatingHandler:
             if isinstance(h, RotatingFileHandler):
                 logger.removeHandler(h)
                 h.close()
+
+    def test_non_managed_reopen_and_rollover_keep_logs_private(self, tmp_path):
+        log_path = tmp_path / "private.log"
+        handler = None
+        old_umask = os.umask(0)
+        try:
+            with patch("hermes_cli.config.is_managed", return_value=False), \
+                 patch("hermes_cli.config._is_container", return_value=False):
+                handler = hermes_logging._ManagedRotatingFileHandler(
+                    str(log_path), maxBytes=1, backupCount=1, encoding="utf-8",
+                )
+                handler.setFormatter(logging.Formatter("%(message)s"))
+                assert stat.S_IMODE(log_path.stat().st_mode) == 0o600
+
+                record = logging.LogRecord(
+                    name="test", level=logging.INFO, pathname="", lineno=0,
+                    msg="first", args=(), exc_info=None,
+                )
+                record.session_tag = ""
+                handler.emit(record)
+                handler.flush()
+                assert stat.S_IMODE(log_path.stat().st_mode) == 0o600
+
+                os.rename(log_path, tmp_path / "private.log.external")
+                handler.emit(record)
+                handler.flush()
+                assert stat.S_IMODE(log_path.stat().st_mode) == 0o600
+        finally:
+            if handler is not None:
+                handler.close()
+            os.umask(old_umask)
 
 
 class TestWindowsConcurrentLogLockTimeout:

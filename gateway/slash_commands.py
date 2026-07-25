@@ -3856,9 +3856,15 @@ class GatewaySlashCommandsMixin:
             /approve all session  — approve all + remember for session
             /approve always       — approve oldest + remember permanently
             /approve all always   — approve all + remember permanently
+            /approve telos <id>   — Telos approval (separate path)
         """
         source = event.source
         session_key = self._session_key_for_source(source)
+        args = event.get_command_args().strip().lower().split()
+
+        # --- Telos routing must occur BEFORE dangerous-command check ---
+        if args and args[0] == "telos":
+            return await self._handle_telos_approve_command(event, args[1:])
 
         from tools.approval import (
             resolve_gateway_approval, has_blocking_approval,
@@ -3871,7 +3877,6 @@ class GatewaySlashCommandsMixin:
             return t("gateway.approve.no_pending")
 
         # Parse args: support "all", "all session", "all always", "session", "always"
-        args = event.get_command_args().strip().lower().split()
         resolve_all = "all" in args
         remaining = [a for a in args if a != "all"]
 
@@ -3895,6 +3900,50 @@ class GatewaySlashCommandsMixin:
         plural = "plural" if count > 1 else "singular"
         return t(f"gateway.approve.{choice}_{plural}", count=count)
 
+    async def _handle_telos_approve_command(
+        self, event: MessageEvent, args: list[str]
+    ) -> str:
+        """Handle /approve telos <request-id> — Telos authorization path.
+
+        Separate from dangerous-command approval.  Uses the gateway-owned
+        TelosCoordinator to perform the complete host transition.
+        """
+        source = event.source
+        if not args:
+            return "Usage: /approve telos <request-id>"
+
+        request_id = args[0]
+        try:
+            from hermes_cli.evolution.organism_home import get_organism_home
+            from hermes_cli.evolution.ledger import EvolutionLedger
+            from hermes_cli.evolution.telos_store import TelosStore
+
+            organism_root = get_organism_home()
+            ledger_path = organism_root / "evolution" / "evolution.db"
+            if not ledger_path.exists():
+                return "Telos: no organism ledger found — run autopoiesis init first."
+
+            ledger = EvolutionLedger(ledger_path)
+            try:
+                store = TelosStore(organism_root)
+                session_key = self._session_key_for_source(source)
+                coordinator = getattr(self, "_telos_coordinator", None)
+                if coordinator is None:
+                    return "Telos: coordinator not available."
+
+                return await coordinator.approve(
+                    event=event,
+                    request_id=request_id,
+                    session_key=session_key,
+                    ledger=ledger,
+                    store=store,
+                )
+            finally:
+                ledger.connection.close()
+        except Exception as exc:
+            logger.warning("Telos approval error: %s", exc)
+            return "Telos: approval failed."
+
     async def _handle_deny_command(self, event: MessageEvent) -> str:
         """Handle /deny command — reject pending dangerous command(s).
 
@@ -3902,9 +3951,19 @@ class GatewaySlashCommandsMixin:
         a definitive BLOCKED message, same as the CLI deny flow.
 
         ``/deny`` denies the oldest; ``/deny all`` denies everything.
+        ``/deny telos <id>`` records Telos denial without transition.
         """
         source = event.source
         session_key = self._session_key_for_source(source)
+
+        # --- Telos routing must occur BEFORE dangerous-command check ---
+        args_raw = event.get_command_args().strip().lower()
+        args_split = args_raw.split()
+        if args_split and args_split[0] == "telos":
+            telos_args = args_split[1:]
+            if not telos_args:
+                return "Usage: /deny telos <request-id>"
+            return await self._handle_telos_deny_command(event, telos_args[0])
 
         from tools.approval import (
             resolve_gateway_approval, has_blocking_approval,
@@ -3932,6 +3991,39 @@ class GatewaySlashCommandsMixin:
         if count > 1:
             return t("gateway.deny.denied_plural", count=count)
         return t("gateway.deny.denied_singular")
+
+    async def _handle_telos_deny_command(
+        self, event: MessageEvent, request_id: str
+    ) -> str:
+        """Handle /deny telos <request-id> — records denial, no transition."""
+        try:
+            from hermes_cli.evolution.organism_home import get_organism_home
+            from hermes_cli.evolution.ledger import EvolutionLedger
+
+            organism_root = get_organism_home()
+            ledger_path = organism_root / "evolution" / "evolution.db"
+            if not ledger_path.exists():
+                return "Telos: no organism ledger found."
+
+            ledger = EvolutionLedger(ledger_path)
+            try:
+                source = event.source
+                session_key = self._session_key_for_source(source)
+                coordinator = getattr(self, "_telos_coordinator", None)
+                if coordinator is None:
+                    return "Telos: coordinator not available."
+
+                return await coordinator.deny(
+                    event=event,
+                    request_id=request_id,
+                    session_key=session_key,
+                    ledger=ledger,
+                )
+            finally:
+                ledger.connection.close()
+        except Exception as exc:
+            logger.warning("Telos deny error: %s", exc)
+            return "Telos: denial failed."
 
     async def _handle_debug_command(self, event: MessageEvent) -> str:
         """Handle /debug — upload debug report (summary only) and return paste URLs.
