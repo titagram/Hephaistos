@@ -201,7 +201,7 @@ class SuggestionRepository:
             if row is None:
                 raise SuggestionRepositoryError("observer_schema_unavailable")
             s_version = int(row["version"])
-            if s_version != 3:
+            if s_version != 4:
                 raise SuggestionRepositoryError("observer_schema_unsupported")
 
             # Verify Project B tables exist (fast pre-check)
