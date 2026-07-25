@@ -11522,7 +11522,7 @@ def _(rid, params: dict) -> dict:
                     "nonce": pf["display_nonce"],
                     "expires_at": pf.get("expires_at"),
                 }
-                _emit("approval.request", sid, telos_payload)
+                _emit_approval_request(sid, telos_payload)
                 return _ok(rid, {
                     "type": "telos_pending",
                     "status": "pending",
