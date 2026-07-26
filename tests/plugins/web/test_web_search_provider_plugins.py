@@ -70,18 +70,20 @@ def _isolate_env(monkeypatch: pytest.MonkeyPatch) -> None:
 class TestBundledPluginsRegister:
     """Retained bundled web plugins discover and register correctly."""
 
-    def test_retained_plugins_present_in_registry(self) -> None:
+    def test_hades_web_providers_present_in_registry(self) -> None:
         _ensure_plugins_loaded()
         from agent.web_search_registry import list_providers
 
-        names = sorted(p.name for p in list_providers())
-        assert names == [
+        names = {p.name for p in list_providers()}
+        assert {
             "brave-free",
             "ddgs",
+            "exa",
+            "firecrawl",
             "parallel",
             "searxng",
             "xai",
-        ]
+        } <= names
 
     @pytest.mark.parametrize(
         "plugin_name,expected_search,expected_extract",
@@ -137,12 +139,11 @@ class TestBundledPluginsRegister:
         assert "name" in schema
         assert "env_vars" in schema
 
-    @pytest.mark.parametrize("plugin_name", ["exa", "tavily", "firecrawl"])
-    def test_excluded_plugins_not_registered(self, plugin_name: str) -> None:
+    def test_tavily_remains_excluded(self) -> None:
         _ensure_plugins_loaded()
         from agent.web_search_registry import get_provider
 
-        assert get_provider(plugin_name) is None
+        assert get_provider("tavily") is None
 
 
 # ---------------------------------------------------------------------------

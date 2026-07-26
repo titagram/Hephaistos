@@ -143,11 +143,13 @@ def test_gui_toolset_label_strips_leading_emoji():
     assert gui_toolset_label("Terminal & Processes") == "Terminal & Processes"
 
 
-def test_hades_excludes_context_engine_from_configurable_toolsets():
-    assert not any(ts_key == "context_engine" for ts_key, _, _ in CONFIGURABLE_TOOLSETS)
+def test_hades_exposes_curated_default_capability_toolsets():
+    configurable = {ts_key for ts_key, _, _ in CONFIGURABLE_TOOLSETS}
+
+    assert {"computer_use", "context_engine", "cronjob", "vision"} <= configurable
 
 
-def test_get_platform_tools_active_context_engine_is_not_enabled_for_hades():
+def test_get_platform_tools_active_context_engine_is_enabled_for_hades():
     config = {
         "context": {"engine": "lcm"},
         "platform_toolsets": {"cli": ["web", "terminal"]},
@@ -155,7 +157,7 @@ def test_get_platform_tools_active_context_engine_is_not_enabled_for_hades():
 
     enabled = _get_platform_tools(config, "cli", include_default_mcp_servers=False)
 
-    assert "context_engine" not in enabled
+    assert "context_engine" in enabled
     assert "web" in enabled
     assert "terminal" in enabled
 
@@ -1360,10 +1362,8 @@ def test_get_effective_configurable_toolsets_excludes_spotify():
         f"duplicate toolset keys in effective list: "
         f"{[k for k in keys if keys.count(k) > 1]}"
     )
+    assert {"computer_use", "context_engine", "cronjob", "vision"} <= set(keys)
     for excluded in {
-        "computer_use",
-        "context_engine",
-        "cronjob",
         "discord",
         "discord_admin",
         "homeassistant",
@@ -1372,7 +1372,6 @@ def test_get_effective_configurable_toolsets_excludes_spotify():
         "tts",
         "video",
         "video_gen",
-        "vision",
         "x_search",
         "yuanbao",
     }:

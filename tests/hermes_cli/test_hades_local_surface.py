@@ -129,11 +129,12 @@ def test_hades_excluded_toolsets_are_not_reported_by_model_tools():
 def test_hades_excluded_lazy_features_are_not_installable():
     from tools.lazy_deps import FeatureUnavailable, ensure, feature_install_command, is_available
 
-    for feature in ("search.exa", "search.firecrawl", "image.fal"):
-        assert feature_install_command(feature) is None
-        assert is_available(feature) is False
-        with pytest.raises(FeatureUnavailable):
-            ensure(feature, prompt=False)
+    assert feature_install_command("search.exa") is not None
+    assert feature_install_command("search.firecrawl") is not None
+    assert feature_install_command("image.fal") is None
+    assert is_available("image.fal") is False
+    with pytest.raises(FeatureUnavailable):
+        ensure("image.fal", prompt=False)
 
 
 def test_hades_excluded_pyproject_extras_are_absent():
@@ -154,17 +155,15 @@ def test_hades_excluded_bundled_plugins_do_not_load():
     mgr.discover_and_load()
 
     excluded = {
-        "browser/firecrawl",
         "google_meet",
         "image_gen/openai",
         "spotify",
         "teams_pipeline",
         "video_gen/fal",
-        "web/exa",
-        "web/firecrawl",
         "web/tavily",
     }
     assert excluded.isdisjoint(mgr._plugins)
+    assert {"browser/firecrawl", "web/exa", "web/firecrawl"} <= set(mgr._plugins)
 
 
 def test_hades_mcp_catalog_filters_excluded_entries(monkeypatch):

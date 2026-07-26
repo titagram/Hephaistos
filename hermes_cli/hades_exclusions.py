@@ -13,12 +13,9 @@ from pathlib import Path, PurePosixPath
 
 EXCLUDED_BUNDLED_PLUGIN_KEYS = frozenset(
     {
-        "browser/firecrawl",
         "google_meet",
         "spotify",
         "teams_pipeline",
-        "web/exa",
-        "web/firecrawl",
         "web/tavily",
     }
 )
@@ -35,8 +32,6 @@ EXCLUDED_DASHBOARD_PLUGIN_NAMES = frozenset({"hermes-achievements"})
 EXCLUDED_LAZY_FEATURES = frozenset(
     {
         "image.fal",
-        "search.exa",
-        "search.firecrawl",
     }
 )
 
@@ -152,9 +147,6 @@ HADES_VISIBLE_SLASH_COMMANDS = frozenset(
 
 EXCLUDED_TOOLSETS = frozenset(
     {
-        "computer_use",
-        "context_engine",
-        "cronjob",
         "discord",
         "discord_admin",
         "homeassistant",
@@ -163,7 +155,6 @@ EXCLUDED_TOOLSETS = frozenset(
         "tts",
         "video",
         "video_gen",
-        "vision",
         "x_search",
         "yuanbao",
     }

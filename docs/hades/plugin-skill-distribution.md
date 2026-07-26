@@ -104,14 +104,20 @@ The Hades distribution keeps some upstream files in the repo, but hides them
 from the local product surface. These exclusions are enforced centrally by
 `hermes_cli/hades_exclusions.py`.
 
+Curated optional capabilities retained by Hades:
+
+- `computer_use`, gated by its local driver and operator approvals;
+- `context_engine`, populated only by the selected runtime engine;
+- `cronjob`;
+- `vision`;
+- Exa and Firecrawl web providers;
+- the Firecrawl browser provider.
+
 Excluded bundled plugin keys:
 
-- `browser/firecrawl`
 - `google_meet`
 - `spotify`
 - `teams_pipeline`
-- `web/exa`
-- `web/firecrawl`
 - `web/tavily`
 
 Excluded bundled plugin prefixes:
@@ -126,8 +132,6 @@ Excluded dashboard plugin names:
 Excluded lazy features:
 
 - `image.fal`
-- `search.exa`
-- `search.firecrawl`
 
 Excluded optional MCP catalog entries:
 
@@ -137,9 +141,6 @@ Excluded optional MCP catalog entries:
 
 Excluded toolsets:
 
-- `computer_use`
-- `context_engine`
-- `cronjob`
 - `discord`
 - `discord_admin`
 - `homeassistant`
@@ -147,7 +148,6 @@ Excluded toolsets:
 - `tts`
 - `video`
 - `video_gen`
-- `vision`
 - `x_search`
 - `yuanbao`
 - `spotify`
