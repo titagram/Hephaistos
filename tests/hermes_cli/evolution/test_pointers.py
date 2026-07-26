@@ -78,6 +78,11 @@ def _with_integrity(mapping: dict[str, object]) -> dict[str, object]:
     return payload
 
 
+def _now_utc() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
 def _with_raw_integrity(mapping: dict[str, object]) -> dict[str, object]:
     """Recompute framing without asking production to normalize bad types."""
 
@@ -1171,3 +1176,163 @@ def test_atomic_write_rejects_existing_target_with_extra_link(
 
     assert path.read_bytes() == before
     assert alias.read_bytes() == before
+
+
+# ── Scope/identity resolution tests ──────────────────────────────────────
+
+
+def _init_global_organism(tmp_path: Path, monkeypatch) -> tuple[EvolutionLedger, GenerationStore, PointerDocument]:
+    """Initialize pointers under a simulated global organism evolution root."""
+    org = tmp_path / "organism"
+    (org / "evolution").mkdir(parents=True, exist_ok=True)
+    os.chmod(org, 0o700)
+    os.chmod(org / "evolution", 0o700)
+
+    import hermes_constants as _hc_mod
+    from hermes_cli.evolution import organism_home as _oh
+    monkeypatch.setattr(_hc_mod, "get_organism_home", lambda: org)
+    monkeypatch.setattr(_oh, "get_organism_home", lambda: org)
+
+    ev_root = org / "evolution"
+    store = GenerationStore(ev_root / "generations")
+    ledger = EvolutionLedger(ev_root / "evolution.db")
+    baseline = _baseline(store)
+    active, lkg = initialize_baseline_pointers(ledger, store, baseline)
+    return ledger, store, active
+
+
+def test_global_scope_initializes_with_organism(tmp_path: Path, monkeypatch) -> None:
+    """New global organism pointers use the stable ``"organism"`` scope."""
+    ledger, store, pointer = _init_global_organism(tmp_path, monkeypatch)
+    assert pointer.profile_id == "organism", f"Expected 'organism', got {pointer.profile_id!r}"
+    ledger.connection.close()
+
+
+def test_global_scope_accepts_legacy_profile_after_switch(tmp_path: Path, monkeypatch) -> None:
+    """Global organism pointer with a legacy profile_id stays coherent after a
+    ``get_hermes_home()`` profile switch.
+    """
+    import hermes_constants as _hc_mod
+    from hermes_cli.evolution import organism_home as _oh
+
+    org = tmp_path / "organism"
+    (org / "evolution").mkdir(parents=True, exist_ok=True)
+    os.chmod(org, 0o700)
+    os.chmod(org / "evolution", 0o700)
+
+    monkeypatch.setattr(_hc_mod, "get_organism_home", lambda: org)
+    monkeypatch.setattr(_oh, "get_organism_home", lambda: org)
+
+    ev_root = org / "evolution"
+    store = GenerationStore(ev_root / "generations")
+    ledger = EvolutionLedger(ev_root / "evolution.db")
+    from hermes_cli.evolution.pointers import _verified_baseline as _vb
+
+    # Phase 1: create ONLY the generation (no event yet).  The single
+    #          baseline event will be a legacy "default" profile below.
+    baseline = _baseline(store)
+    descriptor = _vb(store, baseline)
+    gen_id = descriptor.generation.generation_id
+    manifest_digest = descriptor.manifest_digest
+
+    # Phase 2: create exactly ONE legacy baseline event with profile_id "default"
+    #          and matching pointer files — simulating a pre-fix global organism.
+    from datetime import UTC, datetime
+    now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    legacy_event = ledger.append_event(
+        LifecycleEvent(
+            event_id=str(uuid.uuid4()), attempt_id=None, generation_id=None,
+            event_type="baseline_designated", prior_state=None, next_state=None,
+            actor="system",
+            input_digests=(gen_id, manifest_digest,
+                          content_digest({"profile_id": "default"},
+                                         domain="hades-evolution-profile-v1")),
+            authorization_id=None, reason_code="baseline",
+            reason_summary="baseline designation", created_at=now,
+        )
+    )
+    legacy_payload = {
+        "schema_version": 1, "profile_id": "default",
+        "generation_id": gen_id, "manifest_digest": manifest_digest,
+        "lifecycle_sequence": legacy_event.event_sequence,
+        "designated_at": legacy_event.created_at,
+        "ledger_event_digest": legacy_event.event_digest,
+    }
+    legacy_payload["integrity_digest"] = pointer_integrity_digest(
+        legacy_payload, legacy_payload["ledger_event_digest"]
+    )
+    legacy_pointer = PointerDocument(**legacy_payload)
+    active_path, lkg_path = _pointer_paths(store)
+    atomic_write_pointer(active_path, legacy_pointer)
+    atomic_write_pointer(lkg_path, legacy_pointer)
+
+    # Phase 3: switch to a *different* profile (simulate HERMES_HOME change).
+    other_profile_home = tmp_path / "other_profile"
+    monkeypatch.setattr(_hc_mod, "get_hermes_home", lambda: other_profile_home)
+
+    # Phase 4: validate_pointer must still accept the legacy pointer on the
+    #          global organism root (backward compat), despite profile switch.
+    p = validate_pointer(
+        json.loads(active_path.read_text(encoding="utf-8")), ledger, store,
+    )
+    assert p.profile_id == "default", f"Expected legacy 'default', got {p.profile_id!r}"
+
+    # Phase 5: initialize_baseline_pointers must be idempotent — must NOT rewrite
+    #          the pointer to "organism" and must return with the legacy id.
+    active2, lkg2 = initialize_baseline_pointers(ledger, store, baseline)
+    assert active2.profile_id == "default", f"Idempotency lost: got {active2.profile_id!r}"
+    assert lkg2.profile_id == "default", f"Idempotency lost (lkg): got {lkg2.profile_id!r}"
+    assert active_path.read_bytes() == lkg_path.read_bytes()
+    on_disk = json.loads(active_path.read_text(encoding="utf-8"))
+    assert on_disk["profile_id"] == "default", f"Pointer rewritten to {on_disk['profile_id']!r}"
+
+    ledger.connection.close()
+
+
+def test_profile_local_rejects_mismatched_profile(tmp_path: Path, monkeypatch) -> None:
+    """Profile-local evolution root rejects a pointer with a non-matching profile_id."""
+    ev_root = tmp_path / "evolution"
+    ev_root.mkdir(parents=True, exist_ok=True)
+    os.chmod(ev_root, 0o700)
+
+    store = GenerationStore(ev_root / "generations")
+    ledger = EvolutionLedger(ev_root / "evolution.db")
+    from hermes_cli.evolution.pointers import _verified_baseline as _vb
+    baseline = _baseline(store)
+    descriptor = _vb(store, baseline)
+    now = _now_utc()
+    gen_id = descriptor.generation.generation_id
+    manifest_digest = descriptor.manifest_digest
+    event = ledger.append_event(
+        LifecycleEvent(
+            event_id=str(uuid.uuid4()), attempt_id=None, generation_id=None,
+            event_type="baseline_designated", prior_state=None, next_state=None,
+            actor="system",
+            input_digests=(gen_id, manifest_digest,
+                          content_digest({"profile_id": "work"}, domain="hades-evolution-profile-v1")),
+            authorization_id=None, reason_code="baseline",
+            reason_summary="baseline designation", created_at=now,
+        )
+    )
+    payload = {
+        "schema_version": 1, "profile_id": "work",
+        "generation_id": gen_id,
+        "manifest_digest": manifest_digest,
+        "lifecycle_sequence": event.event_sequence,
+        "designated_at": event.created_at,
+        "ledger_event_digest": event.event_digest,
+    }
+    payload["integrity_digest"] = pointer_integrity_digest(payload, payload["ledger_event_digest"])
+    atomic_write_pointer(ev_root / "active.json", PointerDocument(**payload))
+    atomic_write_pointer(ev_root / "last-known-good.json", PointerDocument(**payload))
+
+    # Profile-local evolution: the pointer has profile_id "work" but the current
+    # active profile (returned by _active_profile()) is something else (likely
+    # "default" or a custom hash).  Profile-local must reject.
+    data = json.loads((ev_root / "active.json").read_text(encoding="utf-8"))
+    store2 = GenerationStore(ev_root / "generations")
+    ledger2 = EvolutionLedger(ev_root / "evolution.db")
+    with pytest.raises(PointerError):
+        validate_pointer(data, ledger2, store2)
+    ledger2.connection.close()
+    ledger.connection.close()

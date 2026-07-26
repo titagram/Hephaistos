@@ -4,26 +4,30 @@ from __future__ import annotations
 
 import json
 import re
+import stat
 from typing import Any
 
-from hermes_constants import get_hermes_home
+import hermes_constants
 from agent.redact import redact_sensitive_text
 
 from .authorization import AuthorizationError, _privacy_safe_symbolic
 from .bootstrap import EvolutionBootstrapError, ensure_evolution_initialized, evolution_state_kind
 from .ledger import EvolutionLedger, EvolutionLedgerError, StoredEvent, _require_timestamp
+from .lifecycle_global import LifecycleInitError
 from .locking import LifecycleLockError
+from .organism_home import OrganismHomeError
 from .reconcile import reconcile_evolution_state, read_evolution_snapshot
 
 _SYMBOL = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,63}\Z", re.ASCII)
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z", re.ASCII)
 _TIMESTAMP = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z\Z", re.ASCII)
 _UUID = re.compile(r"[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\Z", re.ASCII)
-_EVENT_TYPES = frozenset({"baseline_designated", "state_transition", "supervisor_recovery", "authorization_requested", "authorization_granted", "authorization_denied", "authorization_consumed"})
+_EVENT_TYPES = frozenset({"baseline_designated", "state_transition", "supervisor_recovery", "authorization_requested", "authorization_granted", "authorization_denied", "authorization_consumed", "blueprint_proposed"})
 _ACTORS = frozenset({"system", "supervisor", "operator", "host"})
-_REASON_CODES = frozenset({"baseline", "transition", "active_restored_from_lkg", "stable_base_only", "authorization_requested", "authorization_granted", "authorization_denied", "authorization_consumed"})
-_PUBLIC_SUMMARIES = frozenset({"baseline designation", "restored active pointer from proven last known good", "evolution overlays disabled because no pointer was proven"})
+_REASON_CODES = frozenset({"baseline", "transition", "active_restored_from_lkg", "stable_base_only", "authorization_requested", "authorization_granted", "authorization_denied", "authorization_consumed", "blueprint_proposed"})
+_PUBLIC_SUMMARIES = frozenset({"baseline designation", "restored active pointer from proven last known good", "evolution overlays disabled because no pointer was proven", "observer proposal created"})
 _STATES = frozenset({"draft", "research_authorized", "blueprint_ready", "build_approved", "building", "quarantined", "canary_running", "promotion_ready", "active", "stable", "rejected", "research_expired", "build_failed", "canary_failed", "rolled_back", "retired"})
+_BLUEPRINT_ID = re.compile(r"bp_[A-Za-z0-9_-]{1,61}\Z", re.ASCII)
 
 
 def _is_public_identity(value: object) -> bool:
@@ -46,8 +50,24 @@ def _emit(value: dict[str, Any]) -> None:
     print(json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False))
 
 
+def _evolution_root() -> Path:
+    """Return the global organism evolution directory for lifecycle operations."""
+    return hermes_constants.get_organism_home() / "evolution"
+
+
+def _legacy_state_present() -> bool:
+    """Return True when legacy profile lifecycle state exists at HERMES_HOME/evolution."""
+    legacy = hermes_constants.get_hermes_home() / "evolution"
+    return evolution_state_kind(legacy) == "existing"
+
+
 def _status() -> dict[str, Any]:
-    root = get_hermes_home() / "evolution"
+    if _legacy_state_present():
+        return {"schema_version": 1, "status": "blocked", "initialized": False,
+                "overlay_enabled": False, "active_generation_id": None,
+                "last_known_good_generation_id": None,
+                "diagnostics": ["legacy_state_detected"]}
+    root = _evolution_root()
     state_kind = evolution_state_kind(root)
     if state_kind == "uninitialized":
         return {"schema_version": 1, "status": "uninitialized", "initialized": False,
@@ -58,7 +78,7 @@ def _status() -> dict[str, Any]:
                 "overlay_enabled": False, "active_generation_id": None,
                 "last_known_good_generation_id": None,
                 "diagnostics": ["evolution_unavailable"]}
-    result = reconcile_evolution_state(repair=False)
+    result = reconcile_evolution_state(repair=False, evolution_root=root)
     return {"schema_version": 1, "status": result.status, "initialized": True,
             "overlay_enabled": result.overlay_enabled,
             "active_generation_id": None if result.active is None else result.active.generation_id,
@@ -92,7 +112,9 @@ def _event(event: StoredEvent) -> dict[str, Any]:
 def _history(limit: int, after: int) -> dict[str, Any]:
     if type(limit) is not int or not 1 <= limit <= 1000 or type(after) is not int or after < 0:
         raise EvolutionLedgerError("invalid_history_limit")
-    root = get_hermes_home() / "evolution"
+    if _legacy_state_present():
+        raise EvolutionLedgerError("legacy_state_detected")
+    root = _evolution_root()
     kind = evolution_state_kind(root)
     if kind == "uninitialized":
         return {"schema_version": 1, "status": "uninitialized", "items": [], "next_after": None}
@@ -104,7 +126,7 @@ def _history(limit: int, after: int) -> dict[str, Any]:
         if ledger.verify_chain():
             raise EvolutionLedgerError("invalid_event_chain")
         return ledger.history(limit=limit, after=after)
-    items = read_evolution_snapshot(query)
+    items = read_evolution_snapshot(query, evolution_root=root)
     return {"schema_version": 1, "status": "ok", "items": [_event(item) for item in items],
             "next_after": items[-1].event_sequence if len(items) == limit else None}
 
@@ -113,7 +135,9 @@ def _show(kind: str, record_id: str) -> dict[str, Any]:
     valid = bool(_SYMBOL.fullmatch(record_id)) if kind == "suggestion" else bool(_DIGEST.fullmatch(record_id))
     if not valid:
         return {"schema_version": 1, "status": "missing", "kind": kind, "record": None}
-    root = get_hermes_home() / "evolution"
+    if _legacy_state_present():
+        raise EvolutionLedgerError("legacy_state_detected")
+    root = _evolution_root()
     state_kind = evolution_state_kind(root)
     if state_kind == "uninitialized":
         return {"schema_version": 1, "status": "missing", "kind": kind, "record": None}
@@ -132,7 +156,7 @@ def _show(kind: str, record_id: str) -> dict[str, Any]:
         if ledger.verify_chain():
             raise EvolutionLedgerError("invalid_event_chain")
         return ledger.connection.execute(sql, parameters).fetchone()
-    row = read_evolution_snapshot(query)
+    row = read_evolution_snapshot(query, evolution_root=root)
     if row is not None:
         record = {field: row[field] for field in fields}
         for field, value in record.items():
@@ -159,6 +183,200 @@ def _show(kind: str, record_id: str) -> dict[str, Any]:
                 return {"schema_version": 1, "status": "missing", "kind": kind, "record": None}
         return {"schema_version": 1, "status": "found", "kind": kind, "record": record}
     return {"schema_version": 1, "status": "missing", "kind": kind, "record": None}
+
+
+def _propose(suggestion_id: str) -> dict[str, Any]:
+    from .proposal_service import ProposalError, propose_suggestion
+
+    try:
+        result = propose_suggestion(
+            organism_root=_evolution_root().parent,
+            suggestion_id=suggestion_id,
+        )
+    except ProposalError as exc:
+        return {
+            "schema_version": 1,
+            "action": "propose",
+            "status": "blocked",
+            "reason": exc.code,
+            "proposal": None,
+            "next_action": None,
+        }
+
+    draft = result.blueprint
+    return {
+        "schema_version": 1,
+        "action": "propose",
+        "status": result.status,
+        "proposal": {
+            "blueprint_id": draft.blueprint_id,
+            "attempt_id": draft.attempt_id,
+            "canonical_digest": draft.canonical_digest,
+            "state": draft.state,
+            "created_at": draft.created_at,
+        },
+        "next_action": "review_blueprint",
+    }
+
+
+def _blueprint_show(blueprint_id: str) -> dict[str, Any]:
+    from .blueprint_repository import (
+        BlueprintRepository,
+        BlueprintRepositoryError,
+    )
+
+    missing = {
+        "schema_version": 1,
+        "action": "blueprint_show",
+        "status": "missing",
+        "blueprint": None,
+    }
+    if (
+        not isinstance(blueprint_id, str)
+        or _BLUEPRINT_ID.fullmatch(blueprint_id) is None
+    ):
+        return missing
+    if _legacy_state_present():
+        return _blueprint_blocked(
+            "blueprint_show",
+            "legacy_state_detected",
+            singular=True,
+        )
+
+    root = _evolution_root()
+    state_kind = evolution_state_kind(root)
+    if state_kind == "uninitialized":
+        return missing
+    if state_kind == "blocked" or not (root / "evolution.db").exists():
+        return _blueprint_blocked(
+            "blueprint_show",
+            "evolution_unavailable",
+            singular=True,
+        )
+
+    def query(ledger: EvolutionLedger):
+        if ledger.verify_chain():
+            raise EvolutionLedgerError("invalid_event_chain")
+        return BlueprintRepository(ledger).get(blueprint_id)
+
+    try:
+        stored = read_evolution_snapshot(query, evolution_root=root)
+    except (BlueprintRepositoryError, EvolutionLedgerError, OSError):
+        return _blueprint_blocked(
+            "blueprint_show",
+            "blueprint_incoherent",
+            singular=True,
+        )
+    if stored is None:
+        return missing
+    return {
+        "schema_version": 1,
+        "action": "blueprint_show",
+        "status": "found",
+        "blueprint": {
+            "blueprint_id": stored.blueprint_id,
+            "attempt_id": stored.attempt_id,
+            "canonical_digest": stored.canonical_digest,
+            "state": stored.state,
+            "created_at": stored.created_at,
+            "document": stored.document.to_dict(),
+        },
+    }
+
+
+def _blueprint_list(limit: int) -> dict[str, Any]:
+    from .blueprint_repository import (
+        BlueprintRepository,
+        BlueprintRepositoryError,
+    )
+
+    if type(limit) is not int or not 1 <= limit <= 100:
+        return _blueprint_blocked(
+            "blueprint_list",
+            "invalid_list_limit",
+            singular=False,
+        )
+    if _legacy_state_present():
+        return _blueprint_blocked(
+            "blueprint_list",
+            "legacy_state_detected",
+            singular=False,
+        )
+
+    root = _evolution_root()
+    state_kind = evolution_state_kind(root)
+    if state_kind == "uninitialized":
+        return {
+            "schema_version": 1,
+            "action": "blueprint_list",
+            "status": "ok",
+            "count": 0,
+            "items": [],
+        }
+    if state_kind == "blocked" or not (root / "evolution.db").exists():
+        return _blueprint_blocked(
+            "blueprint_list",
+            "evolution_unavailable",
+            singular=False,
+        )
+
+    def query(ledger: EvolutionLedger):
+        if ledger.verify_chain():
+            raise EvolutionLedgerError("invalid_event_chain")
+        return BlueprintRepository(ledger).list(limit=limit)
+
+    try:
+        blueprints = read_evolution_snapshot(
+            query,
+            evolution_root=root,
+        )
+    except (BlueprintRepositoryError, EvolutionLedgerError, OSError):
+        return _blueprint_blocked(
+            "blueprint_list",
+            "blueprint_incoherent",
+            singular=False,
+        )
+    items = [
+        {
+            "blueprint_id": stored.blueprint_id,
+            "canonical_digest": stored.canonical_digest,
+            "state": stored.state,
+            "created_at": stored.created_at,
+            "suggestion_id": stored.document.suggestion_id,
+            "score": stored.document.observer_snapshot.score,
+            "score_policy_version": (
+                stored.document.observer_snapshot.score_policy_version
+            ),
+        }
+        for stored in blueprints
+    ]
+    return {
+        "schema_version": 1,
+        "action": "blueprint_list",
+        "status": "ok",
+        "count": len(items),
+        "items": items,
+    }
+
+
+def _blueprint_blocked(
+    action: str,
+    reason: str,
+    *,
+    singular: bool,
+) -> dict[str, Any]:
+    value: dict[str, Any] = {
+        "schema_version": 1,
+        "action": action,
+        "status": "blocked",
+        "reason": reason,
+    }
+    if singular:
+        value["blueprint"] = None
+    else:
+        value["count"] = 0
+        value["items"] = []
+    return value
 
 
 
@@ -223,7 +441,10 @@ def evolution_command(args: Any) -> int:
     try:
         action = args.action
         if action == "init":
-            ensure_evolution_initialized()
+            if _legacy_state_present():
+                raise EvolutionBootstrapError("legacy_state_detected")
+            from .lifecycle_global import ensure_global_lifecycle_initialized
+            ensure_global_lifecycle_initialized()
             _emit(_status())
             return 0
         if action == "status":
@@ -236,6 +457,22 @@ def evolution_command(args: Any) -> int:
             value = _show(args.kind, args.record_id)
             _emit(value)
             return 0 if value["status"] == "found" else 1
+        if action == "propose":
+            value = _propose(args.suggestion_id)
+            _emit(value)
+            return (
+                0
+                if value["status"] in {"created", "existing"}
+                else 1
+            )
+        if action == "blueprint_show":
+            value = _blueprint_show(args.blueprint_id)
+            _emit(value)
+            return 0 if value["status"] == "found" else 1
+        if action == "blueprint_list":
+            value = _blueprint_list(args.limit)
+            _emit(value)
+            return 0 if value["status"] == "ok" else 1
         if action == "pause":
             from .global_config import load_global_config, save_global_config
             cfg = load_global_config()
@@ -260,8 +497,9 @@ def evolution_command(args: Any) -> int:
             _emit(_telos_command("history", getattr(args, "org_root", None)))
             return 0
         if action == "telos_draft":
-            _emit(_telos_command("draft", getattr(args, "org_root", None)))
-            return 0
+            result = _telos_command("draft", getattr(args, "org_root", None), file_path=getattr(args, "file", None))
+            _emit(result)
+            return 0 if result.get("status") in ("created",) else 1
         if action == "telos_approve":
             result = _handle_telos_cli_transition(getattr(args, "digest", ""), "activate", getattr(args, "org_root", None))
             _emit(result)
@@ -282,7 +520,9 @@ def evolution_command(args: Any) -> int:
     except (
         EvolutionBootstrapError,
         EvolutionLedgerError,
+        LifecycleInitError,
         LifecycleLockError,
+        OrganismHomeError,
         OSError,
         ValueError,
     ):
@@ -298,7 +538,7 @@ def evolution_command(args: Any) -> int:
     return 2
 
 
-def _telos_command(sub: str, org_root: Any = None) -> dict[str, Any]:
+def _telos_command(sub: str, org_root: Any = None, file_path: str | None = None) -> dict[str, Any]:
     """Telos status, history, and draft commands.
 
     Model-facing operations may save drafts, inspect status, and inspect
@@ -335,11 +575,111 @@ def _telos_command(sub: str, org_root: Any = None) -> dict[str, Any]:
             "revisions": digests[:50],
         }
     elif sub == "draft":
+        # Documented draft size bound: 1 MiB — well above the maximum Telos
+        # serialised size given 32 items per collection * 500-char statements,
+        # but small enough to prevent resource exhaustion from pathological input.
+        _MAX_DRAFT_SIZE = 1_048_576  # 1 MiB
+        if not file_path:
+            return {
+                "schema_version": 1,
+                "action": "telos_draft",
+                "status": "invalid",
+                "reason": "missing required --file argument",
+            }
+        path = Path(file_path)
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            return {
+                "schema_version": 1,
+                "action": "telos_draft",
+                "status": "invalid",
+                "reason": "file not found",
+            }
+        except OSError:
+            return {
+                "schema_version": 1,
+                "action": "telos_draft",
+                "status": "error",
+                "reason": "unreadable file",
+            }
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            return {
+                "schema_version": 1,
+                "action": "telos_draft",
+                "status": "invalid",
+                "reason": "path must be a regular file",
+            }
+        file_size = info.st_size
+        if file_size > _MAX_DRAFT_SIZE:
+            return {
+                "schema_version": 1,
+                "action": "telos_draft",
+                "status": "invalid",
+                "reason": "file exceeds maximum draft size",
+            }
+        try:
+            raw = path.read_bytes()
+        except OSError:
+            return {
+                "schema_version": 1,
+                "action": "telos_draft",
+                "status": "error",
+                "reason": "unreadable file",
+            }
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            return {
+                "schema_version": 1,
+                "action": "telos_draft",
+                "status": "invalid",
+                "reason": "invalid JSON",
+            }
+        if not isinstance(data, dict):
+            return {
+                "schema_version": 1,
+                "action": "telos_draft",
+                "status": "invalid",
+                "reason": "JSON root must be an object",
+            }
+        from .telos_contract import TelosContractError, telos_revision_from_dict
+        try:
+            revision = telos_revision_from_dict(data)
+        except (TelosContractError, KeyError, TypeError, ValueError):
+            return {
+                "schema_version": 1,
+                "action": "telos_draft",
+                "status": "invalid",
+                "reason": "validation failed",
+            }
+        from .organism_identity import load_organism_identity
+        try:
+            ident = load_organism_identity(root)
+        except Exception:
+            return {
+                "schema_version": 1,
+                "action": "telos_draft",
+                "status": "error",
+                "reason": "organism identity not found",
+            }
+        if revision.organism_id != ident.organism_id:
+            return {
+                "schema_version": 1,
+                "action": "telos_draft",
+                "status": "invalid",
+                "reason": "foreign organism ID in draft",
+            }
+        store.save_revision(revision)
+        digest = revision.canonical_digest
+        active = store.get_active_digest()
         return {
             "schema_version": 1,
             "action": "telos_draft",
-            "status": "unsupported",
-            "reason": "draft requires a defined input contract; use telos workshop",
+            "status": "created",
+            "digest": digest,
+            "digest_prefix": digest[:16],
+            "has_active": active is not None,
         }
     return {"schema_version": 1, "action": "telos", "error": "unknown_subcommand"}
 
@@ -511,35 +851,125 @@ def _observer_status(org_root: Any = None) -> dict[str, Any]:
 
 
 def _observer_scan(org_root: Any = None) -> dict[str, Any]:
-    """Bounded observer scan — calls ``scan_and_update_suggestions``."""
+    """Bounded observer scan — gate-honoring, with machine-readable status.
+
+    Returns one of: ``completed`` / ``paused`` / ``degraded`` / ``not_ready``.
+    """
     from pathlib import Path
     from .organism_home import get_organism_home
 
     root = Path(org_root) if org_root else get_organism_home()
+
+    # Gate 1: identity
+    try:
+        from .organism_identity import load_organism_identity
+        load_organism_identity(root)
+    except Exception:
+        return {
+            "schema_version": 1, "action": "observer_scan",
+            "status": "not_ready", "reason": "organism_not_initialized", "count": 0,
+        }
+
+    # Gate 2: config
+    try:
+        from .global_config import observer_enabled as _obs_enabled
+        if not _obs_enabled():
+            return {
+                "schema_version": 1, "action": "observer_scan",
+                "status": "paused", "reason": "autopoiesis_disabled", "count": 0,
+            }
+    except Exception:
+        return {
+            "schema_version": 1, "action": "observer_scan",
+            "status": "paused", "reason": "config_unreadable", "count": 0,
+        }
+
+    # Gate 3: circuit breaker
     try:
         from .observer_service import ObserverService
         svc = ObserverService(root)
         if svc.circuit_open:
             return {
-                "schema_version": 1,
-                "action": "observer_scan",
+                "schema_version": 1, "action": "observer_scan",
                 "status": "degraded",
                 "reason": str(svc.degraded_reason) if svc.degraded_reason else "circuit_open",
                 "count": 0,
             }
+    except Exception:
+        return {
+            "schema_version": 1, "action": "observer_scan",
+            "status": "degraded", "reason": "observer_unavailable", "count": 0,
+        }
+
+    # Gate 4: active Telos
+    try:
+        from .telos_store import TelosStore
+        tstore = TelosStore(root)
+        if tstore.get_active_digest() is None:
+            return {
+                "schema_version": 1, "action": "observer_scan",
+                "status": "not_ready", "reason": "no_active_telos", "count": 0,
+            }
+    except Exception:
+        return {
+            "schema_version": 1, "action": "observer_scan",
+            "status": "not_ready", "reason": "telos_unreadable", "count": 0,
+        }
+
+    # Gate 5: coherent generation
+    try:
+        from .reconcile import reconcile_evolution_state
+        gen = reconcile_evolution_state(repair=False, evolution_root=root / "evolution")
+        if gen.status != "coherent" or gen.active is None:
+            return {
+                "schema_version": 1, "action": "observer_scan",
+                "status": "not_ready", "reason": "generation_not_coherent", "count": 0,
+            }
+    except Exception:
+        return {
+            "schema_version": 1, "action": "observer_scan",
+            "status": "not_ready", "reason": "generation_unreadable", "count": 0,
+        }
+
+    # All gates passed — import profile-local errors.log via ExperienceBridge
+    try:
+        from hermes_cli.evolution.experience_bridge import ExperienceBridge
+        from hermes_cli.evolution.profile_ref import get_profile_ref
+        from hermes_cli.evolution.organism_identity import load_organism_identity
+
+        ident = load_organism_identity(root)
+        tdigest = tstore.get_active_digest()
+        gen_state = reconcile_evolution_state(
+            repair=False,
+            evolution_root=root / "evolution",
+        )
+        if gen_state.active is not None and tdigest is not None:
+            bridge = ExperienceBridge(
+                organism_id=ident.organism_id,
+                profile_ref=get_profile_ref(),
+                generation_id=gen_state.active.generation_id,
+                telos_digest=tdigest,
+            )
+            envs = bridge.import_new_error_events(max_lines=500)
+            for env in envs:
+                try:
+                    svc.ingest_envelope(env)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    # Bounded scan
+    try:
         suggestions = svc.scan_and_update_suggestions(max_events=1000)
         return {
-            "schema_version": 1,
-            "action": "observer_scan",
-            "status": "completed",
-            "count": len(suggestions),
+            "schema_version": 1, "action": "observer_scan",
+            "status": "completed", "count": len(suggestions),
         }
     except Exception:
         return {
-            "schema_version": 1,
-            "action": "observer_scan",
-            "status": "unsupported",
-            "message": "observer scan not available",
+            "schema_version": 1, "action": "observer_scan",
+            "status": "degraded", "reason": "scan_failed", "count": 0,
         }
 
 

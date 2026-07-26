@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Iterator
 
-from hermes_constants import get_hermes_home
+from hermes_constants import get_hermes_home, get_organism_home
 
 from .contract import canonical_json_bytes
 from .pointers import _active_profile
@@ -336,18 +336,28 @@ def _verify_paths(
 @contextmanager
 def lifecycle_lock(
     *,
+    home: Path | None = None,
     timeout_seconds: float = 30.0,
 ) -> Iterator[LifecycleLease]:
-    """Hold the profile lifecycle authority through a bounded kernel lock."""
+    """Hold the profile lifecycle authority through a bounded kernel lock.
+
+    When *home* is ``None`` (the default) the lock is scoped to the current
+    profile (``get_hermes_home()``).  Pass an explicit organism root to use
+    the lock under the global organism lifecycle instead.
+
+    The lock file lives under ``<home>/evolution/.lifecycle.lock`` and the
+    kernel lease (``flock`` / ``LockFileEx``) is held on the *home* directory
+    itself.
+    """
 
     timeout = _validate_timeout(timeout_seconds)
     if fcntl is None and msvcrt is None:
         raise LifecycleLockError("native_lifecycle_lock_unavailable")
 
-    home = Path(get_hermes_home())
-    home_info = _private_directory(home)
-    home_descriptor = _open_directory(home, home_info)
-    root = home / "evolution"
+    lock_home = home if home is not None else Path(get_hermes_home())
+    home_info = _private_directory(lock_home)
+    home_descriptor = _open_directory(lock_home, home_info)
+    root = lock_home / "evolution"
     root_descriptor: int | None = None
     lock_descriptor: int | None = None
     acquired_descriptor: int | None = None
@@ -384,7 +394,7 @@ def lifecycle_lock(
         )
         _write_diagnostics(lock_descriptor, lease)
         _verify_paths(
-            home=home,
+            home=lock_home,
             home_info=home_info,
             home_descriptor=home_descriptor,
             root=root,
@@ -401,7 +411,7 @@ def lifecycle_lock(
         finally:
             try:
                 _verify_paths(
-                    home=home,
+                    home=lock_home,
                     home_info=home_info,
                     home_descriptor=home_descriptor,
                     root=root,
@@ -429,3 +439,27 @@ def lifecycle_lock(
             os.close(home_descriptor)
         if cleanup_error is not None and not body_failed:
             raise cleanup_error
+
+
+@contextmanager
+def global_lifecycle_lock(
+    *,
+    organism_root: Path | None = None,
+    timeout_seconds: float = 30.0,
+) -> Iterator[LifecycleLease]:
+    """Hold the global organism lifecycle authority through a bounded kernel lock.
+
+    Like ``lifecycle_lock()`` but scoped to ``get_organism_home()`` so the
+    lock is stored under the global organism lifecycle, never under the legacy
+    profile ``<HERMES_HOME>/evolution`` directory.  The lock file lives at
+    ``<organism_root>/evolution/.lifecycle.lock``.
+    """
+    with lifecycle_lock(
+        home=(
+            organism_root
+            if organism_root is not None
+            else Path(get_organism_home())
+        ),
+        timeout_seconds=timeout_seconds,
+    ) as lease:
+        yield lease

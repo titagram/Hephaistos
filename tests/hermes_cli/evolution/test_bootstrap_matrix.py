@@ -13,6 +13,7 @@ import pytest
 
 from hermes_cli import __version__
 from hermes_cli.evolution import bootstrap as bootstrap_module
+from hermes_cli.evolution import lifecycle_global as lifecycle_global_module
 from hermes_cli.evolution.bootstrap import (
     EvolutionBootstrapError,
     _repository_commit,
@@ -74,7 +75,7 @@ def test_two_actual_processes_create_one_event_equal_pointers_and_one_generation
     generation_ids = {result[1] for result in results}
     assert len(generation_ids) == 1
     generation_id = generation_ids.pop()
-    root = home / "evolution"
+    root = home / "organism" / "evolution"
     active_bytes = (root / "active.json").read_bytes()
     lkg_bytes = (root / "last-known-good.json").read_bytes()
     assert active_bytes == lkg_bytes
@@ -230,7 +231,7 @@ def test_partial_or_foreign_state_refuses_without_mutating_retained_members(
 
     with pytest.raises(
         EvolutionBootstrapError,
-        match="existing_state_requires_reconciliation",
+        match="legacy_state_detected",
     ):
         ensure_evolution_initialized()
 
@@ -253,7 +254,7 @@ def test_injected_pointer_failure_closes_the_bootstrap_ledger_connection(
         raise RuntimeError("injected-pointer-failure")
 
     monkeypatch.setattr(
-        bootstrap_module,
+        lifecycle_global_module,
         "initialize_baseline_pointers",
         fail_pointer_initialization,
     )

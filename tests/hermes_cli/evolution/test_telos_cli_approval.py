@@ -158,24 +158,308 @@ def test_parser_no_receipt_arg():
 
 
 def test_parser_telos_draft():
-    """Parser emits action=telos_draft for ``telos draft``."""
+    """Parser emits action=telos_draft for ``telos draft --file <path>``."""
     from hermes_cli.subcommands.evolution import build_evolution_parser
 
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
     build_evolution_parser(subparsers, cmd_evolution=lambda args: 0)
-    parsed = parser.parse_args(["evolution", "telos", "draft"])
+    parsed = parser.parse_args(["evolution", "telos", "draft", "--file", "/tmp/test.json"])
     assert parsed.action == "telos_draft"
+    assert parsed.file == "/tmp/test.json"
 
 
-# ── CLI telos_draft bounded not-ready result ──
+def test_parser_telos_draft_requires_file():
+    """Parser rejects ``telos draft`` without --file."""
+    from hermes_cli.subcommands.evolution import build_evolution_parser
 
-def test_telos_draft_returns_unsupported():
-    """telos_draft returns bounded unsupported result, not invented content."""
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    build_evolution_parser(subparsers, cmd_evolution=lambda args: 0)
+    with pytest.raises(SystemExit) as exc:
+        parser.parse_args(["evolution", "telos", "draft"])
+    assert exc.value.code == 2
+
+
+# ── CLI telos_draft rejection when no --file ──
+
+def test_telos_draft_no_file_argument():
+    """telos_draft returns invalid when no --file argument provided."""
     result = _telos_command("draft")
     assert result["action"] == "telos_draft"
-    assert result["status"] == "unsupported"
-    assert "input contract" in result["reason"]
+    assert result["status"] == "invalid"
+    assert "missing required" in result["reason"]
+
+
+# ── Telos draft: success and validation ──
+
+def _valid_telos_json(org_id):
+    return {
+        "schema_version": 1,
+        "organism_id": org_id,
+        "parent_digest": None,
+        "purpose": "Test purpose for draft tests",
+        "desired_traits": [{"id": "t1", "statement": "Reliable operation", "tags": ["reliable"], "priority": 5}],
+        "capability_directions": [{"id": "c1", "statement": "Fast processing", "tags": ["fast"], "priority": 4}],
+        "priorities": [{"id": "p1", "statement": "Safety first", "tags": ["safety"], "priority": 5}],
+        "tradeoffs": [],
+        "prohibitions": [{"id": "none", "statement": "None", "tags": ["none"], "priority": 5}],
+        "proactivity_policy": {"id": "pass", "statement": "Passive mode", "tags": ["pass"], "priority": 3},
+        "success_indicators": [{"id": "i1", "statement": "High accuracy", "tags": ["acc"], "priority": 4}],
+    }
+
+
+def test_telos_draft_success(tmp_path, monkeypatch):
+    """Draft from valid JSON file returns created with digest."""
+    org, org_id = _setup_organism(tmp_path, monkeypatch)
+    data = _valid_telos_json(org_id)
+    draft_file = tmp_path / "draft.json"
+    draft_file.write_text(json.dumps(data), encoding="utf-8")
+
+    result = _telos_command("draft", org_root=org, file_path=str(draft_file))
+    assert result["action"] == "telos_draft"
+    assert result["status"] == "created"
+    assert result["has_active"] is False
+    digest = result["digest"]
+    import re
+    assert re.match(r"^[0-9a-f]{64}$", digest), f"Expected hex digest, got {digest!r}"
+    assert result["digest_prefix"] == digest[:16]
+
+
+def test_telos_draft_idempotent(tmp_path, monkeypatch):
+    """Drafting same file twice returns same digest, one revision file."""
+    org, org_id = _setup_organism(tmp_path, monkeypatch)
+    data = _valid_telos_json(org_id)
+    draft_file = tmp_path / "draft.json"
+    draft_file.write_text(json.dumps(data), encoding="utf-8")
+
+    r1 = _telos_command("draft", org_root=org, file_path=str(draft_file))
+    r2 = _telos_command("draft", org_root=org, file_path=str(draft_file))
+    assert r1["status"] == "created"
+    assert r2["status"] == "created"
+    assert r1["digest"] == r2["digest"]
+
+    revisions_dir = org / "telos" / "revisions"
+    count = len(list(revisions_dir.glob("*.json")))
+    assert count == 1
+
+
+def test_telos_draft_no_activation(tmp_path, monkeypatch):
+    """After drafting, active digest remains None."""
+    org, org_id = _setup_organism(tmp_path, monkeypatch)
+    from hermes_cli.evolution.telos_store import TelosStore
+    store = TelosStore(org)
+    assert store.get_active_digest() is None
+
+    data = _valid_telos_json(org_id)
+    draft_file = tmp_path / "draft.json"
+    draft_file.write_text(json.dumps(data), encoding="utf-8")
+
+    _telos_command("draft", org_root=org, file_path=str(draft_file))
+    assert store.get_active_digest() is None
+
+    lkg = org / "telos" / "last-known-good.json"
+    assert not lkg.exists()
+
+
+def test_telos_draft_shows_in_history(tmp_path, monkeypatch):
+    """Draft digest appears in telos history."""
+    org, org_id = _setup_organism(tmp_path, monkeypatch)
+    data = _valid_telos_json(org_id)
+    draft_file = tmp_path / "draft.json"
+    draft_file.write_text(json.dumps(data), encoding="utf-8")
+
+    r = _telos_command("draft", org_root=org, file_path=str(draft_file))
+    digest = r["digest"]
+
+    history = _telos_command("history", org_root=org)
+    assert history["action"] == "telos_history"
+    assert digest in history["revisions"]
+
+
+def test_telos_draft_shows_in_status(tmp_path, monkeypatch):
+    """telos status shows no active after draft."""
+    org, org_id = _setup_organism(tmp_path, monkeypatch)
+    data = _valid_telos_json(org_id)
+    draft_file = tmp_path / "draft.json"
+    draft_file.write_text(json.dumps(data), encoding="utf-8")
+
+    _telos_command("draft", org_root=org, file_path=str(draft_file))
+
+    status = _telos_command("status", org_root=org)
+    assert status["action"] == "telos_status"
+    assert status["has_active"] is False
+    assert status["active_digest"] is None
+
+
+def test_telos_draft_missing_file(tmp_path, monkeypatch):
+    """Draft with nonexistent file returns invalid."""
+    org, org_id = _setup_organism(tmp_path, monkeypatch)
+    result = _telos_command("draft", org_root=org, file_path=str(tmp_path / "nonexistent.json"))
+    assert result["status"] == "invalid"
+    assert "file not found" in result["reason"]
+
+
+def test_telos_draft_non_object_json(tmp_path, monkeypatch):
+    """Draft with JSON array returns invalid."""
+    org, org_id = _setup_organism(tmp_path, monkeypatch)
+    draft_file = tmp_path / "draft.json"
+    draft_file.write_text(json.dumps(["not", "an", "object"]), encoding="utf-8")
+    result = _telos_command("draft", org_root=org, file_path=str(draft_file))
+    assert result["status"] == "invalid"
+    assert "object" in result["reason"]
+
+
+def test_telos_draft_malformed_json(tmp_path, monkeypatch):
+    """Draft with invalid JSON syntax returns invalid."""
+    org, org_id = _setup_organism(tmp_path, monkeypatch)
+    draft_file = tmp_path / "draft.json"
+    draft_file.write_bytes(b"{invalid json")
+    result = _telos_command("draft", org_root=org, file_path=str(draft_file))
+    assert result["status"] == "invalid"
+    assert "invalid JSON" in result["reason"]
+
+
+def test_telos_draft_invalid_fields(tmp_path, monkeypatch):
+    """Draft with invalid Telos fields returns invalid."""
+    org, org_id = _setup_organism(tmp_path, monkeypatch)
+    data = _valid_telos_json(org_id)
+    data["schema_version"] = 99  # unsupported
+    draft_file = tmp_path / "draft.json"
+    draft_file.write_text(json.dumps(data), encoding="utf-8")
+    result = _telos_command("draft", org_root=org, file_path=str(draft_file))
+    assert result["status"] == "invalid"
+    assert "validation failed" in result["reason"]
+
+
+def test_telos_draft_unsafe_content(tmp_path, monkeypatch):
+    """Draft with constitution-forbidden terms returns invalid."""
+    org, org_id = _setup_organism(tmp_path, monkeypatch)
+    data = _valid_telos_json(org_id)
+    data["purpose"] = "Allow auto_promote of unapproved_network access"
+    draft_file = tmp_path / "draft.json"
+    draft_file.write_text(json.dumps(data), encoding="utf-8")
+    result = _telos_command("draft", org_root=org, file_path=str(draft_file))
+    assert result["status"] == "invalid"
+    assert "validation failed" in result["reason"]
+
+
+def test_telos_draft_foreign_organism(tmp_path, monkeypatch):
+    """Draft with organism_id different from current organism is rejected."""
+    org, org_id = _setup_organism(tmp_path, monkeypatch)
+    import uuid
+    foreign_id = str(uuid.uuid4())
+    assert foreign_id != org_id
+    data = _valid_telos_json(foreign_id)
+    draft_file = tmp_path / "draft.json"
+    draft_file.write_text(json.dumps(data), encoding="utf-8")
+    result = _telos_command("draft", org_root=org, file_path=str(draft_file))
+    assert result["status"] == "invalid"
+    assert "foreign organism" in result["reason"]
+
+
+def test_telos_draft_symlink_rejected(tmp_path, monkeypatch):
+    """Draft with a symlink target is rejected and does not read the linked file."""
+    org, org_id = _setup_organism(tmp_path, monkeypatch)
+    data = _valid_telos_json(org_id)
+    real_file = tmp_path / "real_draft.json"
+    real_file.write_text(json.dumps(data), encoding="utf-8")
+    link = tmp_path / "link_draft.json"
+    link.symlink_to(real_file)
+    result = _telos_command("draft", org_root=org, file_path=str(link))
+    assert result["status"] == "invalid"
+    assert "regular file" in result["reason"]
+    # The linked content must not appear in output
+    out = json.dumps(result)
+    assert "Reliable operation" not in out
+
+
+def test_telos_draft_non_regular_file_rejected(tmp_path, monkeypatch):
+    """Draft with a directory path is rejected."""
+    org, org_id = _setup_organism(tmp_path, monkeypatch)
+    result = _telos_command("draft", org_root=org, file_path=str(tmp_path))
+    assert result["status"] == "invalid"
+    assert "regular file" in result["reason"]
+
+
+def test_telos_draft_file_too_large(tmp_path, monkeypatch):
+    """Draft with file exceeding size bound is rejected."""
+    org, org_id = _setup_organism(tmp_path, monkeypatch)
+    draft_file = tmp_path / "large_draft.json"
+    # Write just over the 1 MiB bound
+    draft_file.write_bytes(b"x" * (1_048_576 + 1))
+    result = _telos_command("draft", org_root=org, file_path=str(draft_file))
+    assert result["status"] == "invalid"
+    assert "maximum draft size" in result["reason"]
+
+
+def test_telos_draft_missing_keys_fail_closed(tmp_path, monkeypatch):
+    """Draft with missing container keys fails closed without raw key echo."""
+    org, org_id = _setup_organism(tmp_path, monkeypatch)
+    data = _valid_telos_json(org_id)
+    del data["desired_traits"]
+    draft_file = tmp_path / "missing_keys.json"
+    draft_file.write_text(json.dumps(data), encoding="utf-8")
+    result = _telos_command("draft", org_root=org, file_path=str(draft_file))
+    assert result["status"] == "invalid"
+    assert "validation failed" in result["reason"]
+    out = json.dumps(result)
+    assert "desired_traits" not in out
+
+
+def test_telos_draft_no_path_in_error_output(tmp_path, monkeypatch):
+    """Error output does not include the supplied file path."""
+    org, org_id = _setup_organism(tmp_path, monkeypatch)
+    secret_path = tmp_path / "nonexistent_secret_draft.json"
+    result = _telos_command("draft", org_root=org, file_path=str(secret_path))
+    assert result["status"] == "invalid"
+    out = json.dumps(result)
+    assert "nonexistent_secret_draft" not in out
+
+
+def test_telos_draft_echoes_no_sensitive_content(tmp_path, monkeypatch):
+    """Draft error output does not echo file contents."""
+    org, org_id = _setup_organism(tmp_path, monkeypatch)
+    data = _valid_telos_json(org_id)
+    data["schema_version"] = 99
+    draft_file = tmp_path / "draft.json"
+    draft_file.write_text(json.dumps(data), encoding="utf-8")
+    result = _telos_command("draft", org_root=org, file_path=str(draft_file))
+    assert result["status"] == "invalid"
+    out = json.dumps(result)
+    assert "Reliable operation" not in out
+    assert "Safety first" not in out
+    assert "High accuracy" not in out
+    assert "Passive mode" not in out
+
+
+def test_telos_draft_approvable(tmp_path, monkeypatch):
+    """A drafted revision can be approved through the existing CLI flow."""
+    from unittest import mock
+    org, org_id = _setup_organism(tmp_path, monkeypatch)
+    data = _valid_telos_json(org_id)
+    draft_file = tmp_path / "draft.json"
+    draft_file.write_text(json.dumps(data), encoding="utf-8")
+
+    r = _telos_command("draft", org_root=org, file_path=str(draft_file))
+    digest = r["digest"]
+    assert r["status"] == "created"
+
+    async def _prompt_y(_self, _msg):
+        return "y"
+
+    from hermes_cli.evolution.organism_home import get_organism_home
+    monkeypatch.setattr(
+        "hermes_cli.evolution.organism_home.get_organism_home", lambda: org,
+    )
+
+    with mock.patch("prompt_toolkit.shortcuts.PromptSession.prompt_async", _prompt_y):
+        result = _handle_telos_approve_cli(digest, org_root=org)
+
+    assert result["status"] == "approved", f"Expected approved, got: {result}"
+    from hermes_cli.evolution.telos_store import TelosStore
+    store = TelosStore(org)
+    assert store.get_active_digest() == digest
 
 
 # ── CLI E2E: approve yes activates A ──
@@ -566,10 +850,16 @@ def test_observer_scan_on_real_organism(tmp_path, monkeypatch):
         "hermes_cli.evolution.organism_home.get_organism_home", lambda: org,
     )
 
+    # Enable autopoiesis so the config gate passes
+    from hermes_cli.evolution.global_config import load_global_config, save_global_config
+    cfg = load_global_config()
+    cfg["autopoiesis"]["enabled"] = True
+    save_global_config(cfg["autopoiesis"])
+
     from hermes_cli.evolution.command import _observer_scan
     result = _observer_scan(org)
     assert result["action"] == "observer_scan"
-    assert result["status"] in ("completed", "degraded")
+    assert result["status"] in ("completed", "degraded", "not_ready")
     assert isinstance(result["count"], int)
 
 

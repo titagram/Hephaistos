@@ -30,6 +30,7 @@ def _main_process(
 ) -> subprocess.CompletedProcess[str]:
     environment = dict(os.environ)
     environment["HERMES_HOME"] = str(home)
+    environment.pop("HADES_HOME", None)
     return subprocess.run(
         [sys.executable, "-m", "hermes_cli.main", *arguments],
         cwd=REPOSITORY_ROOT,
@@ -49,7 +50,14 @@ def test_actual_main_help_and_every_action_dispatch_contract(
     home.chmod(0o700)
     help_result = _main_process(home, "evolution", "--help")
     assert help_result.returncode == 0
-    for action in ("init", "status", "history", "show"):
+    for action in (
+        "init",
+        "status",
+        "history",
+        "show",
+        "propose",
+        "blueprint",
+    ):
         assert action in help_result.stdout
 
     status_result = _main_process(home, "evolution", "status", "--json")
@@ -111,20 +119,17 @@ def test_actual_main_help_and_every_action_dispatch_contract(
     )
 
 
-@pytest.mark.parametrize("state", ["unsafe-root", "hostile-lock"])
 def test_actual_main_init_lock_failures_are_bounded_without_path_disclosure(
     tmp_path: Path,
-    state: str,
 ) -> None:
     home = tmp_path / "home"
-    root = home / "evolution"
+    organism = home / "organism"
+    root = organism / "evolution"
     root.mkdir(parents=True, mode=0o700)
     home.chmod(0o700)
+    organism.chmod(0o700)
     root.chmod(0o700)
-    if state == "unsafe-root":
-        root.chmod(0o755)
-    else:
-        (root / ".lifecycle.lock").symlink_to(root / "missing-lock")
+    (root / ".lifecycle.lock").symlink_to(root / "missing-lock")
 
     result = _main_process(home, "evolution", "init", "--json")
 
@@ -141,6 +146,58 @@ def test_actual_main_init_lock_failures_are_bounded_without_path_disclosure(
     assert "Traceback" not in result.stderr
     assert str(home) not in result.stderr
     assert str(REPOSITORY_ROOT) not in result.stderr
+
+
+def test_actual_main_init_repairs_owned_global_directory_mode(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    organism = home / "organism"
+    root = organism / "evolution"
+    root.mkdir(parents=True, mode=0o700)
+    home.chmod(0o700)
+    organism.chmod(0o700)
+    root.chmod(0o755)
+
+    result = _main_process(home, "evolution", "init", "--json")
+
+    assert result.returncode == 0
+    assert json.loads(result.stdout)["status"] == "coherent"
+    assert root.stat().st_mode & 0o777 == 0o700
+
+
+def test_actual_main_blueprint_list_is_local_and_empty_after_init(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+    home.chmod(0o700)
+
+    initialized = _main_process(
+        home,
+        "evolution",
+        "init",
+        "--json",
+    )
+    assert initialized.returncode == 0
+
+    result = _main_process(
+        home,
+        "evolution",
+        "blueprint",
+        "list",
+        "--json",
+    )
+
+    assert result.returncode == 0
+    assert json.loads(result.stdout) == {
+        "schema_version": 1,
+        "action": "blueprint_list",
+        "status": "ok",
+        "count": 0,
+        "items": [],
+    }
+    assert "backend" not in result.stderr.lower()
 
 
 def test_actual_main_evolution_help_keeps_handler_import_lazy(
@@ -162,7 +219,14 @@ def test_actual_main_evolution_help_keeps_handler_import_lazy(
 
     assert error.value.code == 0
     assert "usage: hades evolution" in stdout.getvalue()
-    for action in ("init", "status", "history", "show"):
+    for action in (
+        "init",
+        "status",
+        "history",
+        "show",
+        "propose",
+        "blueprint",
+    ):
         assert action in stdout.getvalue()
     assert "hermes_cli.evolution.command" not in sys.modules
 

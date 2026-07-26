@@ -723,9 +723,18 @@ def _evaluate_read_only(
         raise EvolutionLedgerError("unstable_ledger_snapshot")
 
 
-def read_evolution_snapshot(query: Callable[[EvolutionLedger], _QueryResult]) -> _QueryResult:
-    """Run one bounded query against A6's immutable/WAL-safe ledger snapshot."""
-    root = Path(get_hermes_home()) / "evolution"
+def read_evolution_snapshot(
+    query: Callable[[EvolutionLedger], _QueryResult],
+    evolution_root: Path | None = None,
+) -> _QueryResult:
+    """Run one bounded query against A6's immutable/WAL-safe ledger snapshot.
+
+    When *evolution_root* is omitted, defaults to the historical profile
+    evolution root (``get_hermes_home() / "evolution"``) for backwards
+    compatibility.  Global Autopoiesis CLI callers pass the global organism
+    evolution root explicitly.
+    """
+    root = evolution_root if evolution_root is not None else get_hermes_home() / "evolution"
     path = root / "evolution.db"
     budget = _SnapshotBudget.start()
     with tempfile.TemporaryDirectory(prefix="hermes-evolution-read-") as temporary:
@@ -924,8 +933,8 @@ def _base_only(diagnostic: str) -> ReconciliationResult:
     )
 
 
-def _evaluate(*, repair: bool) -> ReconciliationResult:
-    root = Path(get_hermes_home()) / "evolution"
+def _evaluate(*, repair: bool, evolution_root: Path | None = None) -> ReconciliationResult:
+    root = evolution_root if evolution_root is not None else get_hermes_home() / "evolution"
     ledger_path = root / "evolution.db"
     if not ledger_path.exists() or ledger_path.is_symlink():
         return _base_only("ledger_unavailable")
@@ -961,7 +970,7 @@ def _evaluate_open_ledger(
         if ledger.verify_chain():
             return _base_only("ledger_unavailable")
 
-        store = _ExistingGenerationStore()
+        store = _ExistingGenerationStore(root / "generations")
         active_path = root / "active.json"
         lkg_path = root / "last-known-good.json"
         active_observation = _observe_pointer(active_path, ledger, store)
@@ -1036,12 +1045,19 @@ def _evaluate_open_ledger(
 def reconcile_evolution_state(
     *,
     repair: bool,
+    evolution_root: Path | None = None,
 ) -> ReconciliationResult:
-    """Prove current pointer state or deterministically disable overlays."""
+    """Prove current pointer state or deterministically disable overlays.
+
+    When *evolution_root* is omitted, defaults to the historical profile
+    evolution root (``get_hermes_home() / "evolution"``) for backwards
+    compatibility.  Global Autopoiesis CLI callers pass the global organism
+    evolution root explicitly.
+    """
 
     if type(repair) is not bool:
         raise ValueError("invalid_reconciliation_mode")
     if not repair:
-        return _evaluate(repair=False)
+        return _evaluate(repair=False, evolution_root=evolution_root)
     with lifecycle_lock():
-        return _evaluate(repair=True)
+        return _evaluate(repair=True, evolution_root=evolution_root)

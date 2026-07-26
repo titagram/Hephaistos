@@ -867,43 +867,107 @@ class AIAgent:
                 logger.debug("notice_clear_callback error in _emit_notice_clear", exc_info=True)
 
     def drain_autopoiesis_notices(self) -> None:
-        """Drain pending autopoiesis notices built by finalize_turn.
+        """Drain autopoiesis notices after response delivery.
+
+        Gates on global organism coherence, autopoiesis/observer config,
+        circuit state, and active Telos.  Imports new errors.log entries
+        via ExperienceBridge, ingests into ObserverService, scans a bounded
+        window, and emits notices with durable dedup.
 
         Called by frontends AFTER the response has been visibly delivered.
-        Each notice is emitted via _emit_notice then cleared from the queue.
-        Failures are logged but never block or alter the response.
+        Swallows all failures — must never block or alter the response.
         """
-        pending = getattr(self, "_pending_autopoiesis_notices", None)
-        if not pending:
-            return
-        # Perform the scan now (was moved from finalize_turn to post-delivery)
+        # Gate 1: global organism identity
         try:
             from hermes_cli.evolution.organism_home import get_organism_home
+            from hermes_cli.evolution.organism_identity import load_organism_identity
             org_root = get_organism_home()
-            if (org_root / "identity.json").exists():
-                from hermes_cli.evolution.observer_service import ObserverService
-                svc = ObserverService(org_root)
-                if not svc.circuit_open:
-                    suggestions = svc.scan_and_update_suggestions(max_events=100)
-                    for s in suggestions:
-                        if s.state in ("eligible", "surfaced"):
-                            entry = {
-                                "suggestion_id": s.suggestion_id,
-                                "opportunity_key": s.opportunity_key,
-                                "state": s.state,
-                                "score": s.score if s.score else 0.0,
-                            }
-                            if entry not in self._pending_autopoiesis_notices:
-                                self._pending_autopoiesis_notices.append(entry)
+            ident = load_organism_identity(org_root)
         except Exception:
-            logger.debug("drain_autopoiesis_notices: scan failed", exc_info=True)
-        # Emit all pending notices
-        for entry in list(self._pending_autopoiesis_notices):
-            try:
-                self._emit_notice(entry)
-            except Exception:
-                logger.debug("drain_autopoiesis_notices: emit failed", exc_info=True)
-        self._pending_autopoiesis_notices = []
+            return
+
+        # Gate 2: autopoiesis.enabled and observer.enabled
+        try:
+            from hermes_cli.evolution.global_config import observer_enabled as _obs_enabled
+            if not _obs_enabled():
+                return
+        except Exception:
+            return
+
+        # Gate 3: observer circuit closed
+        try:
+            from hermes_cli.evolution.observer_service import ObserverService
+            svc = ObserverService(org_root)
+            if svc.circuit_open:
+                return
+        except Exception:
+            return
+
+        # Gate 4: active Telos revision
+        active_telos_digest: str | None = None
+        try:
+            from hermes_cli.evolution.telos_store import TelosStore
+            tstore = TelosStore(org_root)
+            active_telos_digest = tstore.get_active_digest()
+            if active_telos_digest is None:
+                return
+        except Exception:
+            return
+
+        # Gate 5: coherent global generation
+        try:
+            from hermes_cli.evolution.reconcile import reconcile_evolution_state
+            gen = reconcile_evolution_state(
+                repair=False,
+                evolution_root=org_root / "evolution",
+            )
+            if gen.status != "coherent" or gen.active is None:
+                return
+        except Exception:
+            return
+
+        # -- Import new errors.log entries via ExperienceBridge --
+        try:
+            from hermes_cli.evolution.experience_bridge import ExperienceBridge
+            from hermes_cli.evolution.profile_ref import get_profile_ref
+            bridge = ExperienceBridge(
+                organism_id=ident.organism_id,
+                profile_ref=get_profile_ref(),
+                generation_id=gen.active.generation_id,
+                telos_digest=active_telos_digest,
+            )
+            envelopes = bridge.import_new_error_events(max_lines=500)
+            for env in envelopes:
+                try:
+                    svc.ingest_envelope(env)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # -- Scan bounded events and generate notices --
+        try:
+            from hermes_cli.evolution.notices import generate_notices
+            from agent.credits_tracker import AgentNotice
+
+            suggestions = svc.scan_and_update_suggestions(max_events=200)
+            notices = generate_notices(suggestions)
+            for notice in notices:
+                try:
+                    self._emit_notice(notice)
+                except Exception:
+                    pass
+                # Durable dedup: transition to surfaced so this suggestion
+                # is not re-emitted until meaningful evidence changes.
+                if notice.id:
+                    try:
+                        svc.repository.update_suggestion_state(
+                            notice.id, "surfaced", "notice_emitted",
+                        )
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
     # ── Buffered retry/fallback status ────────────────────────────────────
     # Retry and fallback chains were flooding the CLI/gateway with status

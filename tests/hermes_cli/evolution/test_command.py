@@ -63,7 +63,7 @@ def test_init_is_idempotent_and_status_is_read_only(
     first = ensure_evolution_initialized()
     second = ensure_evolution_initialized()
     assert first.generation_id == second.generation_id
-    root = tmp_path / "home" / "evolution"
+    root = tmp_path / "home" / "organism" / "evolution"
     before = {p.relative_to(root).as_posix(): p.read_bytes() for p in root.rglob("*") if p.is_file()}
     assert evolution_command(_args()) == 0
     status = json.loads(capsys.readouterr().out)
@@ -161,7 +161,7 @@ def test_all_show_kinds_found_and_missing_use_closed_records(
     home = tmp_path / "home"
     monkeypatch.setenv("HERMES_HOME", str(home))
     baseline = ensure_evolution_initialized()
-    ledger = EvolutionLedger(home / "evolution" / "evolution.db")
+    ledger = EvolutionLedger(home / "organism" / "evolution" / "evolution.db")
     try:
         now = "2026-07-24T00:00:00.000000Z"
         ledger.connection.execute("INSERT INTO attempts VALUES (?,?,?,?,?)", ("attempt-alpha", "local", "alpha", "draft", now))
@@ -185,7 +185,7 @@ def test_invalid_semantic_timestamp_is_not_a_found_show_record(
     home = tmp_path / "home"
     monkeypatch.setenv("HERMES_HOME", str(home))
     ensure_evolution_initialized()
-    ledger = EvolutionLedger(home / "evolution" / "evolution.db")
+    ledger = EvolutionLedger(home / "organism" / "evolution" / "evolution.db")
     try:
         ledger.connection.execute("INSERT INTO attempts VALUES (?,?,?,?,?)", ("attempt-alpha", "local", "alpha", "draft", "2026-07-24T00:00:00.000000Z"))
         ledger.connection.execute("INSERT INTO blueprints VALUES (?,?,?,?,?)", ("blueprint-alpha", "attempt-alpha", "e" * 64, "draft", "9999-99-99T99:99:99.999999Z"))

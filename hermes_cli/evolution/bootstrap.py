@@ -96,21 +96,13 @@ def evolution_state_kind(root: Path) -> str:
 
 
 def ensure_evolution_initialized() -> PublishedGeneration:
-    """Initialize exactly once, refusing all non-empty/non-coherent state."""
-    root = Path(get_hermes_home()) / "evolution"
-    with lifecycle_lock():
-        if evolution_state_kind(root) != "uninitialized":
-            result = reconcile_evolution_state(repair=False)
-            if result.status == "coherent" and result.active is not None:
-                return GenerationStore(root / "generations").verify(result.active.generation_id)
-            raise EvolutionBootstrapError("existing_state_requires_reconciliation")
-        ledger: EvolutionLedger | None = None
-        try:
-            ledger = EvolutionLedger(root / "evolution.db")
-            store = GenerationStore(root / "generations")
-            baseline = store.initialize_baseline(_stable_base())
-            initialize_baseline_pointers(ledger, store, baseline)
-            return baseline
-        finally:
-            if ledger is not None:
-                ledger.connection.close()
+    """Initialize the global organism lifecycle.
+
+    Delegates to ensure_global_lifecycle_initialized. Blocks if legacy
+    profile state exists at HERMES_HOME/evolution.
+    """
+    legacy_root = Path(get_hermes_home()) / "evolution"
+    if evolution_state_kind(legacy_root) == "existing":
+        raise EvolutionBootstrapError("legacy_state_detected")
+    from .lifecycle_global import ensure_global_lifecycle_initialized
+    return ensure_global_lifecycle_initialized()

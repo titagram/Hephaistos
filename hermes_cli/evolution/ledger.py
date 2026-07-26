@@ -10,20 +10,26 @@ import stat
 import threading
 import unicodedata
 import uuid
+from collections.abc import Sequence as AbstractSequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, Sequence
 
 from hermes_constants import get_hermes_home
 from hermes_state import apply_wal_with_fallback
 
-from .contract import canonical_json_bytes, content_digest, require_digest
+from .contract import (
+    EvolutionContractError,
+    canonical_json_bytes,
+    content_digest,
+    require_digest,
+)
 from .state_machine import TransitionRequest, validate_transition
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 _MAX_DIGESTS = 64
 _VERIFY_BATCH_SIZE = 256
 _PATH_SCHEME_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*:")
@@ -52,6 +58,19 @@ _STATES = (
 )
 _STATE_CHECK = ", ".join(repr(state) for state in _STATES)
 
+_SUGGESTION_ID_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,63}\Z", re.ASCII)
+_BLUEPRINT_DOMAIN = "hades-autopoiesis-blueprint-v1"
+
+
+def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    """object_pairs_hook that raises on duplicate JSON keys at any nesting level."""
+    seen: set[str] = set()
+    for key, _ in pairs:
+        if key in seen:
+            raise EvolutionLedgerError("noncanonical_document")
+        seen.add(key)
+    return dict(pairs)
+
 
 class EvolutionLedgerError(RuntimeError):
     """A non-sensitive, fail-closed ledger initialization or write failure."""
@@ -78,6 +97,17 @@ class StoredEvent(LifecycleEvent):
     event_sequence: int
     previous_event_digest: str | None
     event_digest: str
+
+
+@dataclass(frozen=True)
+class BlueprintDraft:
+    blueprint_id: str
+    attempt_id: str
+    canonical_digest: str
+    state: str
+    created_at: str
+    created: bool
+    event: StoredEvent | None
 
 
 @dataclass
@@ -993,6 +1023,37 @@ _SCHEMA_V5_ADDITIVE_STATEMENTS = (
 
 _TABLES_V5 = _TABLES_V4 + ("telos_approval_quarantine_v4",)
 
+_SCHEMA_V6_ADDITIVE_STATEMENTS = (
+    """
+    CREATE TABLE blueprint_documents (
+        blueprint_id TEXT NOT NULL PRIMARY KEY,
+        attempt_id TEXT NOT NULL UNIQUE,
+        suggestion_id TEXT NOT NULL,
+        canonical_digest TEXT NOT NULL UNIQUE CHECK(length(canonical_digest) = 64),
+        canonical_document_json TEXT NOT NULL CHECK(length(canonical_document_json) BETWEEN 2 AND 131072),
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(blueprint_id) REFERENCES blueprints(blueprint_id),
+        FOREIGN KEY(attempt_id) REFERENCES attempts(attempt_id)
+    )
+    """,
+    """
+    CREATE TRIGGER blueprint_documents_no_update
+    BEFORE UPDATE ON blueprint_documents
+    BEGIN
+        SELECT RAISE(ABORT, 'immutable_blueprint_document');
+    END
+    """,
+    """
+    CREATE TRIGGER blueprint_documents_no_delete
+    BEFORE DELETE ON blueprint_documents
+    BEGIN
+        SELECT RAISE(ABORT, 'immutable_blueprint_document');
+    END
+    """,
+)
+
+_TABLES_V6 = _TABLES_V5 + ("blueprint_documents",)
+
 _SCHEMA_V3_STATEMENTS = (
     """
     CREATE TABLE schema_version (
@@ -1011,7 +1072,7 @@ _SCHEMA_V3_STATEMENTS = (
     *_SCHEMA_V3_ADDITIVE_STATEMENTS,
 )
 
-_SCHEMA_STATEMENTS = (
+_SCHEMA_V5_STATEMENTS = (
     """
     CREATE TABLE schema_version (
         singleton INTEGER NOT NULL PRIMARY KEY CHECK(singleton = 1),
@@ -1031,7 +1092,30 @@ _SCHEMA_STATEMENTS = (
     *_SCHEMA_V5_ADDITIVE_STATEMENTS,
 )
 
-_TABLES = _TABLES_V5
+_SCHEMA_STATEMENTS = (
+    """
+    CREATE TABLE schema_version (
+        singleton INTEGER NOT NULL PRIMARY KEY CHECK(singleton = 1),
+        version INTEGER NOT NULL CHECK(version = 6)
+    ) WITHOUT ROWID
+    """,
+    *(
+        statement
+        for statement in _SCHEMA_V2_STATEMENTS
+        if not _statement_starts_with(
+            statement,
+            ("CREATE TABLE schema_version ",),
+        )
+    ),
+    *_SCHEMA_V3_ADDITIVE_STATEMENTS,
+    *_SCHEMA_V4_ADDITIVE_STATEMENTS,
+    *_SCHEMA_V5_ADDITIVE_STATEMENTS,
+    *_SCHEMA_V6_ADDITIVE_STATEMENTS,
+)
+
+_SCHEMA_V6_STATEMENTS = _SCHEMA_STATEMENTS
+
+_TABLES = _TABLES_V6
 
 
 def _execute_schema_statement(
@@ -1519,6 +1603,13 @@ def _validate_preflight_schema(connection: sqlite3.Connection) -> int:
             statements=_SCHEMA_V4_STATEMENTS,
             tables=_TABLES_V4,
         )
+    elif version == 5:
+        _validate_schema_version(
+            connection,
+            version=5,
+            statements=_SCHEMA_V5_STATEMENTS,
+            tables=_TABLES_V5,
+        )
     elif version == SCHEMA_VERSION:
         _validate_schema(connection)
     elif version > SCHEMA_VERSION:
@@ -1637,6 +1728,9 @@ class EvolutionLedger:
                     existing_version = _declared_version(connection)
                 if existing_version == 4:
                     self._migrate_v4_to_v5(connection)
+                    existing_version = _declared_version(connection)
+                if existing_version == 5:
+                    self._migrate_v5_to_v6(connection)
                 _validate_schema(connection)
             _verify_retained_identity(
                 self.path,
@@ -1936,10 +2030,68 @@ class EvolutionLedger:
                 (now,),
             )
             _execute_migration_statement(connection, "DROP TABLE schema_version")
-            _execute_migration_statement(connection, _SCHEMA_STATEMENTS[0])
+            _execute_migration_statement(connection, _SCHEMA_V5_STATEMENTS[0])
             connection.execute(
                 "INSERT INTO schema_version(singleton, version) VALUES (1, ?)",
                 (5,),
+            )
+            for table, before in before_counts.items():
+                after = connection.execute(
+                    f'SELECT COUNT(*) FROM "{table}"'
+                ).fetchone()[0]
+                if after != before:
+                    raise EvolutionLedgerError("migration_data_mismatch")
+            _validate_schema_version(
+                connection,
+                version=5,
+                statements=_SCHEMA_V5_STATEMENTS,
+                tables=_TABLES_V5,
+            )
+            connection.commit()
+        except BaseException:
+            if began and connection.in_transaction:
+                try:
+                    connection.rollback()
+                except BaseException:
+                    connection.close()
+            raise
+
+    @staticmethod
+    def _migrate_v5_to_v6(connection: sqlite3.Connection) -> None:
+        began = False
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            began = True
+            locked_version = _declared_version(connection)
+            if locked_version == SCHEMA_VERSION:
+                _validate_schema(connection)
+                connection.commit()
+                return
+            if locked_version != 5:
+                if locked_version > SCHEMA_VERSION:
+                    raise EvolutionLedgerError("unsupported_schema_version")
+                raise EvolutionLedgerError("invalid_ledger_database")
+            _validate_schema_version(
+                connection,
+                version=5,
+                statements=_SCHEMA_V5_STATEMENTS,
+                tables=_TABLES_V5,
+            )
+            before_counts = {}
+            for table in _TABLES_V5:
+                if table == "schema_version":
+                    continue
+                count = connection.execute(
+                    f'SELECT COUNT(*) FROM "{table}"'
+                ).fetchone()[0]
+                before_counts[table] = count
+            for statement in _SCHEMA_V6_ADDITIVE_STATEMENTS:
+                _execute_migration_statement(connection, statement)
+            _execute_migration_statement(connection, "DROP TABLE schema_version")
+            _execute_migration_statement(connection, _SCHEMA_V6_STATEMENTS[0])
+            connection.execute(
+                "INSERT INTO schema_version(singleton, version) VALUES (1, ?)",
+                (6,),
             )
             for table, before in before_counts.items():
                 after = connection.execute(
@@ -2005,6 +2157,252 @@ class EvolutionLedger:
                 (attempt_id, kind, reference, _now()),
             )
         return attempt_id
+
+    def create_or_get_blueprint_draft(
+        self,
+        *,
+        suggestion_id: str,
+        canonical_document_json: str,
+        canonical_digest: str,
+        input_digests: Sequence[str],
+    ) -> BlueprintDraft:
+        # 1. Validate suggestion_id — strict ASCII symbolic pattern, no normalization
+        if (
+            not isinstance(suggestion_id, str)
+            or _SUGGESTION_ID_PATTERN.fullmatch(suggestion_id) is None
+        ):
+            raise EvolutionLedgerError("invalid_suggestion_id")
+
+        # 2. Validate canonical_document_json — str, size, parse, duplicate keys, canonical roundtrip
+        if not isinstance(canonical_document_json, str):
+            raise EvolutionLedgerError("noncanonical_document")
+        try:
+            raw_bytes = canonical_document_json.encode("utf-8")
+        except UnicodeEncodeError:
+            raise EvolutionLedgerError("noncanonical_document") from None
+        if len(raw_bytes) < 2 or len(raw_bytes) > 131072:
+            raise EvolutionLedgerError("noncanonical_document")
+        try:
+            parsed = json.loads(
+                canonical_document_json, object_pairs_hook=_reject_duplicate_keys
+            )
+        except json.JSONDecodeError:
+            raise EvolutionLedgerError("noncanonical_document") from None
+        except RecursionError:
+            raise EvolutionLedgerError("noncanonical_document") from None
+        if not isinstance(parsed, dict):
+            raise EvolutionLedgerError("noncanonical_document")
+        try:
+            expected_json = canonical_json_bytes(parsed).decode("utf-8")
+        except UnicodeEncodeError:
+            raise EvolutionLedgerError("noncanonical_document") from None
+        except EvolutionContractError:
+            raise EvolutionLedgerError("noncanonical_document") from None
+        except RecursionError:
+            raise EvolutionLedgerError("noncanonical_document") from None
+        if canonical_document_json != expected_json:
+            raise EvolutionLedgerError("noncanonical_document")
+
+        # 3. Require parsed suggestion_id to match the method parameter
+        if parsed.get("suggestion_id") != suggestion_id:
+            raise EvolutionLedgerError("suggestion_document_mismatch")
+
+        # 4. Validate canonical_digest — format vs content split
+        try:
+            require_digest(canonical_digest)
+        except EvolutionContractError:
+            raise EvolutionLedgerError("invalid_canonical_digest") from None
+        try:
+            expected_digest = content_digest(parsed, domain=_BLUEPRINT_DOMAIN)
+        except (EvolutionContractError, UnicodeEncodeError, RecursionError):
+            raise EvolutionLedgerError("noncanonical_document") from None
+        if canonical_digest != expected_digest:
+            raise EvolutionLedgerError("digest_mismatch")
+
+        # 5. Validate input_digests — Sequence[str], 1..64, valid, duplicate-free, contains canonical
+        if not isinstance(input_digests, AbstractSequence) or isinstance(
+            input_digests, (str, bytes)
+        ):
+            raise EvolutionLedgerError("invalid_input_digests")
+        if len(input_digests) < 1 or len(input_digests) > _MAX_DIGESTS:
+            raise EvolutionLedgerError("invalid_input_digests")
+        normalized_digests: list[str] = []
+        seen_digests: set[str] = set()
+        for d in input_digests:
+            if not isinstance(d, str):
+                raise EvolutionLedgerError("invalid_input_digests")
+            try:
+                nd = require_digest(d)
+            except EvolutionContractError:
+                raise EvolutionLedgerError("invalid_input_digests") from None
+            if nd in seen_digests:
+                raise EvolutionLedgerError("invalid_input_digests")
+            seen_digests.add(nd)
+            normalized_digests.append(nd)
+        if canonical_digest not in seen_digests:
+            raise EvolutionLedgerError("invalid_input_digests")
+
+        # 6. Transaction — query or insert
+        with self.transaction() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM blueprint_documents
+                WHERE canonical_digest = ?
+                """,
+                (canonical_digest,),
+            ).fetchone()
+
+            if row is not None:
+                attempt = connection.execute(
+                    "SELECT * FROM attempts WHERE attempt_id = ?",
+                    (row["attempt_id"],),
+                ).fetchone()
+                blueprint = connection.execute(
+                    "SELECT * FROM blueprints WHERE blueprint_id = ?",
+                    (row["blueprint_id"],),
+                ).fetchone()
+                if (
+                    attempt is None
+                    or blueprint is None
+                    or row["suggestion_id"] != suggestion_id
+                    or row["canonical_document_json"] != canonical_document_json
+                    or row["canonical_digest"] != canonical_digest
+                    or attempt["state"] != "draft"
+                    or blueprint["state"] != "draft"
+                    or attempt["source_kind"] != "observer-proposal-v1"
+                    or attempt["source_ref"] != canonical_digest
+                    or blueprint["attempt_id"] != attempt["attempt_id"]
+                    or blueprint["canonical_digest"] != canonical_digest
+                    or row["attempt_id"] != attempt["attempt_id"]
+                    or row["blueprint_id"] != blueprint["blueprint_id"]
+                    or attempt["created_at"] != blueprint["created_at"]
+                    or blueprint["created_at"] != row["created_at"]
+                ):
+                    raise EvolutionLedgerError("incoherent_blueprint_draft")
+
+                events = connection.execute(
+                    "SELECT * FROM lifecycle_events WHERE attempt_id = ?",
+                    (row["attempt_id"],),
+                ).fetchall()
+                if len(events) != 1:
+                    raise EvolutionLedgerError("incoherent_blueprint_draft")
+                event_row = events[0]
+                try:
+                    stored_event = self._stored(event_row)
+                    previous_row = connection.execute(
+                        """
+                        SELECT event_digest
+                        FROM lifecycle_events
+                        WHERE event_sequence < ?
+                        ORDER BY event_sequence DESC
+                        LIMIT 1
+                        """,
+                        (stored_event.event_sequence,),
+                    ).fetchone()
+                    actual_previous = (
+                        None
+                        if previous_row is None
+                        else str(previous_row["event_digest"])
+                    )
+                    expected_event_digest = content_digest(
+                        self._payload(stored_event, actual_previous),
+                        domain="hermes-evolution-lifecycle-event-v1",
+                    )
+                except (
+                    EvolutionLedgerError,
+                    EvolutionContractError,
+                    TypeError,
+                    ValueError,
+                    json.JSONDecodeError,
+                    RecursionError,
+                ):
+                    raise EvolutionLedgerError(
+                        "incoherent_blueprint_draft"
+                    ) from None
+                if (
+                    stored_event.previous_event_digest != actual_previous
+                    or stored_event.event_digest != expected_event_digest
+                    or stored_event.event_type != "blueprint_proposed"
+                    or stored_event.prior_state is not None
+                    or stored_event.next_state != "draft"
+                    or stored_event.actor != "operator"
+                    or stored_event.generation_id is not None
+                    or stored_event.authorization_id is not None
+                    or stored_event.reason_code != "blueprint_proposed"
+                    or stored_event.reason_summary != "observer proposal created"
+                    or stored_event.created_at != row["created_at"]
+                    or stored_event.input_digests != tuple(normalized_digests)
+                ):
+                    raise EvolutionLedgerError("incoherent_blueprint_draft")
+                return BlueprintDraft(
+                    blueprint_id=row["blueprint_id"],
+                    attempt_id=row["attempt_id"],
+                    canonical_digest=row["canonical_digest"],
+                    state="draft",
+                    created_at=row["created_at"],
+                    created=False,
+                    event=None,
+                )
+
+            attempt_id = str(uuid.uuid4())
+            blueprint_id = "bp_" + str(uuid.uuid4())
+            now = _now()
+
+            connection.execute(
+                """
+                INSERT INTO attempts(attempt_id, source_kind, source_ref, state, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (attempt_id, "observer-proposal-v1", canonical_digest, "draft", now),
+            )
+            connection.execute(
+                """
+                INSERT INTO blueprints(blueprint_id, attempt_id, canonical_digest, state, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (blueprint_id, attempt_id, canonical_digest, "draft", now),
+            )
+            connection.execute(
+                """
+                INSERT INTO blueprint_documents(blueprint_id, attempt_id, suggestion_id, canonical_digest, canonical_document_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    blueprint_id,
+                    attempt_id,
+                    suggestion_id,
+                    canonical_digest,
+                    canonical_document_json,
+                    now,
+                ),
+            )
+            event = self._append(
+                connection,
+                LifecycleEvent(
+                    event_id=str(uuid.uuid4()),
+                    attempt_id=attempt_id,
+                    generation_id=None,
+                    event_type="blueprint_proposed",
+                    prior_state=None,
+                    next_state="draft",
+                    actor="operator",
+                    input_digests=tuple(normalized_digests),
+                    authorization_id=None,
+                    reason_code="blueprint_proposed",
+                    reason_summary="observer proposal created",
+                    created_at=now,
+                ),
+            )
+
+        return BlueprintDraft(
+            blueprint_id=blueprint_id,
+            attempt_id=attempt_id,
+            canonical_digest=canonical_digest,
+            state="draft",
+            created_at=now,
+            created=True,
+            event=event,
+        )
 
     def _normalize_event(self, event: LifecycleEvent) -> LifecycleEvent:
         if not isinstance(event, LifecycleEvent):

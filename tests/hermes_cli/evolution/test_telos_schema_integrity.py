@@ -22,11 +22,11 @@ def _create_v4_db(path: Path):
 
 
 def _create_v5_db(path: Path):
-    """Create a fresh v5 database with all schema statements including triggers."""
+    """Create a fresh v5 database with the literal v5 schema and triggers."""
     from hermes_cli.evolution import ledger as _ledger
     conn = sqlite3.connect(str(path))
     conn.execute("PRAGMA foreign_keys=ON")
-    for stmt in _ledger._SCHEMA_STATEMENTS:
+    for stmt in _ledger._SCHEMA_V5_STATEMENTS:
         conn.execute(stmt)
     conn.execute("INSERT INTO schema_version VALUES (1, 5)")
     conn.commit()

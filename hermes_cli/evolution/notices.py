@@ -14,7 +14,7 @@ def generate_notices(
 ) -> list[AgentNotice]:
     notices: list[AgentNotice] = []
     for sug in suggestions:
-        if sug.state in ("eligible", "surfaced") and sug.score >= notice_min_score:
+        if sug.state == "eligible" and sug.score >= notice_min_score:
             msg = f"Autopoiesis opportunity detected: {sug.suggestion_id} — {sug.summary_reason} (Score: {sug.score:.2f})"
             notices.append(
                 AgentNotice(

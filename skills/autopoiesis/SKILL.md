@@ -15,6 +15,61 @@ This skill allows Hades to interact with the global Autopoiesis Observer, inspec
 - `/autopoiesis note`: Record a user-reviewed observation note into the global ledger.
 - `/autopoiesis telos`: View the current active Telos revision and status.
 
+## Proposal Blueprint Flow
+
+Use this flow when the user asks Hades to examine an Observer suggestion or
+propose a new capability:
+
+1. List the current suggestions:
+   ```bash
+   hermes evolution suggestions --json
+   ```
+   Consider only suggestions whose state is `eligible`.
+2. Explain the observed limitation and how it aligns with the active Telos.
+   Present only the sanitized suggestion facts returned by the CLI.
+3. Create one inert local draft:
+   ```bash
+   hermes evolution propose <suggestion-id> --json
+   ```
+4. Show the verified proposal to the user:
+   ```bash
+   hermes evolution blueprint show <blueprint-id> --json
+   ```
+   Recent proposal summaries are available with:
+   ```bash
+   hermes evolution blueprint list --json
+   ```
+5. Stop after presenting the blueprint. A proposal does not build, install,
+   research, or modify source files. Explicit user approval is required
+   before any later research or build step.
+
+The blueprint is a local review artifact. Never describe it as implemented,
+installed, activated, tested in a candidate workspace, or ready for
+promotion.
+
+## Telos Workshop Flow
+
+When conducting a Telos Workshop (`/autopoiesis`):
+
+1. **Brainstorm with the user** to draft or refine the Telos revision (purpose, desired traits, capability directions, priorities, tradeoffs, prohibitions, proactivity policy, success indicators).
+2. **Present a bounded candidate Telos** to the user for confirmation. Show the key fields (purpose, organism ID prefix, counts of each item type). Do not display full field values that would leak sensitive content.
+3. **On user confirmation**, write the candidate Telos as a JSON file in a safe temporary location. Do not write directly to the organism store.
+4. **Run the CLI command** to persist the draft:
+   ```
+   hermes evolution telos draft --file <path>
+   ```
+   The command validates the JSON Telos contract, checks organism identity, and saves the revision as a single immutable file. It returns a SHA-256 digest that identifies the draft.
+5. **Show the digest** to the user and explain that activation requires a separate host approval step:
+   ```
+   hermes evolution telos approve <digest>
+   ```
+6. **Never perform web research, install packages, edit Hades source files, or activate a revision** without explicit user approval.
+
+## Viewing Drafts
+
+- `hermes evolution telos history` — lists all saved revision digests (drafts and active).
+- `hermes evolution telos status` — shows the currently active Telos digest (or none).
+
 ## Local Mode
 
 Autopoiesis does not require the Hades backend. Telos, Observer, suggestions, and their audit ledger remain local to the global organism and must keep working when backend setup, connectivity, or synchronization is absent.

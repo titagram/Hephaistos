@@ -4,6 +4,35 @@ Note di prodotto per le prossime implementazioni del backend e del suo
 frontend. Questi punti descrivono problemi osservati e direzioni da progettare;
 non sono ancora specifiche implementative approvate.
 
+## Sync manuale: scope della directory e binding remoti orfani
+
+Problema osservato da un checkout presente soltanto come progetto locale
+Hades: `hades backend sync` considera sufficiente che nel profilo esista
+almeno un workspace binding con stato locale `linked`, quindi avvia un sync
+non circoscritto alla directory corrente. Un vecchio record remoto di
+project-awareness puo' inoltre continuare a rispondere per una coppia
+project/workspace opaca anche quando il progetto canonico non e' piu'
+disponibile nella normale superficie backend.
+
+Comportamento richiesto:
+
+- risolvere il progetto esclusivamente dalla directory corrente;
+- bloccare prima di scansioni, rete o mutazioni se la directory non appartiene
+  a un workspace esplicitamente inizializzato;
+- passare al sync soltanto il project ID e il workspace-binding ID risolti;
+- verificare remotamente la terna project, agent e workspace binding contro
+  una superficie canonica, senza usare il solo stato di project-awareness come
+  prova di esistenza;
+- distinguere nello status `linked locally`, `verified remotely` e
+  `orphaned`/`unmapped`;
+- mettere in quarantena un binding orfano senza cancellarlo automaticamente,
+  lasciando unlink o rimozione a un'azione esplicita dell'utente.
+
+Il fix locale dello scope puo' essere indipendente dall'eventuale nuovo
+endpoint backend. La verifica canonica richiede invece un contratto remoto che
+confermi esistenza del progetto, membership dell'agente e attivita' del
+workspace binding.
+
 ## Memoria di progetto: vista umana e dati grezzi
 
 Esempio osservato:

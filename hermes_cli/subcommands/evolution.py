@@ -30,6 +30,30 @@ def _after(value: str) -> int:
     return parsed
 
 
+def _blueprint_id(value: str) -> str:
+    if (
+        not value.startswith("bp_")
+        or len(value) == 3
+        or _SYMBOL.fullmatch(value) is None
+    ):
+        raise argparse.ArgumentTypeError("invalid blueprint identifier")
+    return value
+
+
+def _blueprint_limit(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            "must be an integer between 1 and 100"
+        ) from None
+    if not 1 <= parsed <= 100:
+        raise argparse.ArgumentTypeError(
+            "must be an integer between 1 and 100"
+        )
+    return parsed
+
+
 def _identifier(kind: str):
     pattern = _SYMBOL if kind == "suggestion" else _DIGEST
     def validate(value: str) -> str:
@@ -70,10 +94,43 @@ def build_evolution_parser(subparsers, *, cmd_evolution: Callable) -> None:
 
     suggestions = actions.add_parser("suggestions", help="List active autopoiesis suggestions")
 
+    propose = actions.add_parser(
+        "propose",
+        help="Create an inert draft proposal from an eligible suggestion",
+    )
+    propose.add_argument(
+        "suggestion_id",
+        type=_identifier("suggestion"),
+    )
+
+    blueprint = actions.add_parser(
+        "blueprint",
+        help="Inspect immutable local proposal blueprints",
+    )
+    blueprint_actions = blueprint.add_subparsers(
+        dest="blueprint_action",
+        required=True,
+    )
+    blueprint_show = blueprint_actions.add_parser(
+        "show",
+        help="Show one verified blueprint",
+    )
+    blueprint_show.add_argument("blueprint_id", type=_blueprint_id)
+    blueprint_list = blueprint_actions.add_parser(
+        "list",
+        help="List verified blueprint summaries",
+    )
+    blueprint_list.add_argument(
+        "--limit",
+        type=_blueprint_limit,
+        default=20,
+    )
+
     telos = actions.add_parser("telos", help="Global Telos commands")
     telos_actions = telos.add_subparsers(dest="telos_action", required=True)
     telos_status = telos_actions.add_parser("status", help="Show active Telos status")
-    telos_draft = telos_actions.add_parser("draft", help="Draft a new Telos revision")
+    telos_draft = telos_actions.add_parser("draft", help="Draft a new Telos revision from a JSON file")
+    telos_draft.add_argument("--file", type=str, required=True, help="Path to JSON Telos revision document")
     telos_history = telos_actions.add_parser("history", help="Show Telos revision history")
 
     telos_approve = telos_actions.add_parser("approve", help="Approve and activate a Telos revision digest")
@@ -86,6 +143,7 @@ def build_evolution_parser(subparsers, *, cmd_evolution: Callable) -> None:
     all_commands = [
         init, status, history, show, pause, resume, doctor,
         observer, obs_status, obs_scan, suggestions,
+        propose, blueprint_show, blueprint_list,
         telos, telos_status, telos_draft, telos_history, telos_approve, telos_rollback,
     ]
 
@@ -103,6 +161,15 @@ def build_evolution_parser(subparsers, *, cmd_evolution: Callable) -> None:
     obs_status.set_defaults(action="observer_status")
     obs_scan.set_defaults(action="observer_scan")
     suggestions.set_defaults(action="suggestions")
+    propose.set_defaults(action="propose")
+    blueprint_show.set_defaults(
+        action="blueprint_show",
+        evolution_action="blueprint_show",
+    )
+    blueprint_list.set_defaults(
+        action="blueprint_list",
+        evolution_action="blueprint_list",
+    )
     telos_status.set_defaults(action="telos_status")
     telos_draft.set_defaults(action="telos_draft")
     telos_history.set_defaults(action="telos_history")

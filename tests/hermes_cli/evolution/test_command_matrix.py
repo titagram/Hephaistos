@@ -183,7 +183,7 @@ def test_all_show_kinds_have_exact_found_and_missing_command_contracts(
     home = tmp_path / "home"
     monkeypatch.setenv("HERMES_HOME", str(home))
     baseline = ensure_evolution_initialized()
-    ledger = EvolutionLedger(home / "evolution" / "evolution.db")
+    ledger = EvolutionLedger(home / "organism" / "evolution" / "evolution.db")
     try:
         rows = _seed_safe_show_records(ledger, baseline.generation_id)
     finally:
@@ -225,7 +225,7 @@ def test_history_pagination_is_ascending_and_uses_the_last_seen_sequence(
     home = tmp_path / "home"
     monkeypatch.setenv("HERMES_HOME", str(home))
     ensure_evolution_initialized()
-    ledger = EvolutionLedger(home / "evolution" / "evolution.db")
+    ledger = EvolutionLedger(home / "organism" / "evolution" / "evolution.db")
     try:
         for suffix in ("alpha", "beta"):
             ledger.append_event(
@@ -275,7 +275,7 @@ def test_history_preserves_real_a3_authorization_vocabulary_without_reason_text(
     home = tmp_path / "home"
     monkeypatch.setenv("HERMES_HOME", str(home))
     ensure_evolution_initialized()
-    ledger = EvolutionLedger(home / "evolution" / "evolution.db")
+    ledger = EvolutionLedger(home / "organism" / "evolution" / "evolution.db")
     scope = {
         "source_classes": ["documentation"],
         "domains": ["example.com"],
@@ -365,7 +365,7 @@ def test_hostile_schema_valid_history_and_show_strings_never_serialize(
     home = tmp_path / "home"
     monkeypatch.setenv("HERMES_HOME", str(home))
     baseline = ensure_evolution_initialized()
-    ledger = EvolutionLedger(home / "evolution" / "evolution.db")
+    ledger = EvolutionLedger(home / "organism" / "evolution" / "evolution.db")
     try:
         _insert_attempt(ledger, "baseline-attempt")
         ledger.connection.execute(
@@ -477,7 +477,7 @@ def test_lower_hex_public_identities_are_redacted_or_missing(
     blueprint_digest = "e" * 64
     report_digest = "f" * 64
     input_digest = "9" * 64
-    ledger = EvolutionLedger(home / "evolution" / "evolution.db")
+    ledger = EvolutionLedger(home / "organism" / "evolution" / "evolution.db")
     try:
         _insert_attempt(ledger, secret)
         ledger.connection.execute(
@@ -571,7 +571,7 @@ def test_uuid_identities_and_declared_digest_fields_remain_visible(
     baseline = ensure_evolution_initialized()
     identity = "123e4567-e89b-12d3-a456-426614174000"
     input_digest = "9" * 64
-    ledger = EvolutionLedger(home / "evolution" / "evolution.db")
+    ledger = EvolutionLedger(home / "organism" / "evolution" / "evolution.db")
     try:
         _insert_attempt(ledger, identity)
         rows = _seed_safe_show_records(ledger, baseline.generation_id)
@@ -629,7 +629,7 @@ def test_generation_and_projected_digests_are_strict_lowercase_hex(
     home = tmp_path / "home"
     monkeypatch.setenv("HERMES_HOME", str(home))
     ensure_evolution_initialized()
-    ledger = EvolutionLedger(home / "evolution" / "evolution.db")
+    ledger = EvolutionLedger(home / "organism" / "evolution" / "evolution.db")
     try:
         _insert_attempt(ledger, "attempt-alpha")
         ledger.connection.execute(
@@ -670,7 +670,7 @@ def test_injected_read_failures_keep_action_specific_envelopes(
 
     if failure == "snapshot":
 
-        def fail_snapshot(query):
+        def fail_snapshot(query, **kwargs):
             raise EvolutionLedgerError("injected_snapshot_failure")
 
         monkeypatch.setattr(
@@ -712,7 +712,7 @@ def test_broken_event_chain_keeps_action_specific_envelopes(
     home = tmp_path / "home"
     monkeypatch.setenv("HERMES_HOME", str(home))
     ensure_evolution_initialized()
-    database = home / "evolution" / "evolution.db"
+    database = home / "organism" / "evolution" / "evolution.db"
     original = database.read_bytes()
     assert original.count(b"baseline designation") == 1
     database.write_bytes(
@@ -743,16 +743,16 @@ def test_broken_event_chain_keeps_action_specific_envelopes(
         ("absent", "uninitialized", "uninitialized"),
         ("empty", "uninitialized", "uninitialized"),
         ("lock-only", "uninitialized", "uninitialized"),
-        ("foreign", "base_only", "blocked"),
-        ("dangling-symlink", "blocked", "blocked"),
-        ("file-root", "blocked", "blocked"),
-        ("symlink-root", "blocked", "blocked"),
-        ("unsafe-mode", "blocked", "blocked"),
-        ("unsafe-empty-mode", "blocked", "blocked"),
-        ("lock-symlink", "blocked", "blocked"),
-        ("lock-directory", "blocked", "blocked"),
-        ("lock-mode", "blocked", "blocked"),
-        ("lock-hardlink", "blocked", "blocked"),
+        ("foreign", "blocked", "blocked"),
+        ("dangling-symlink", "uninitialized", "uninitialized"),
+        ("file-root", "uninitialized", "uninitialized"),
+        ("symlink-root", "uninitialized", "uninitialized"),
+        ("unsafe-mode", "uninitialized", "uninitialized"),
+        ("unsafe-empty-mode", "uninitialized", "uninitialized"),
+        ("lock-symlink", "uninitialized", "uninitialized"),
+        ("lock-directory", "uninitialized", "uninitialized"),
+        ("lock-mode", "uninitialized", "uninitialized"),
+        ("lock-hardlink", "uninitialized", "uninitialized"),
     ],
 )
 def test_status_history_show_never_mutate_any_root_shape(
@@ -854,7 +854,7 @@ def test_wrong_owner_empty_root_is_blocked_without_mutation_when_portable(
     if not hasattr(os, "geteuid") or not hasattr(os, "chown"):
         pytest.skip("owner validation is not exposed on this platform")
     home = tmp_path / "home"
-    root = home / "evolution"
+    root = home / "organism" / "evolution"
     root.mkdir(parents=True, mode=0o700)
     try:
         os.chown(root, os.geteuid() + 1, -1)
@@ -890,16 +890,17 @@ def test_init_lock_failures_use_the_canonical_status_envelope(
     state: str,
 ) -> None:
     home = tmp_path / "home"
-    root = home / "evolution"
-    root.mkdir(parents=True, mode=0o700)
-    home.chmod(0o700)
-    root.chmod(0o700)
-    if state == "unsafe-empty-mode":
-        root.chmod(0o755)
-    else:
-        (root / ".lifecycle.lock").symlink_to(root / "missing-lock")
     monkeypatch.setenv("HERMES_HOME", str(home))
     before = _inventory(home)
+
+    from hermes_cli.evolution.locking import LifecycleLockTimeout
+
+    def fail_init():
+        raise LifecycleLockTimeout("lifecycle_lock_timeout")
+
+    import hermes_cli.evolution.lifecycle_global as _lg
+
+    monkeypatch.setattr(_lg, "ensure_global_lifecycle_initialized", fail_init)
 
     exit_code, value, _ = _run(action="init")
 
@@ -921,12 +922,14 @@ def test_init_lock_timeout_uses_the_canonical_status_envelope(
 ) -> None:
     from hermes_cli.evolution.locking import LifecycleLockTimeout
 
+    import hermes_cli.evolution.lifecycle_global as lifecycle_global_module
+
     def fail_initialization() -> None:
         raise LifecycleLockTimeout("lifecycle_lock_timeout")
 
     monkeypatch.setattr(
-        command_module,
-        "ensure_evolution_initialized",
+        lifecycle_global_module,
+        "ensure_global_lifecycle_initialized",
         fail_initialization,
     )
 

@@ -7,11 +7,11 @@ import pytest
 from hermes_cli.evolution.ledger import EvolutionLedger, SCHEMA_VERSION
 
 
-def test_fresh_ledger_creates_v5_with_project_a_and_project_b_tables(tmp_path: Path):
-    """A fresh EvolutionLedger must be at schema v5 with both Project A and Project B tables."""
+def test_fresh_ledger_creates_v6_with_project_a_and_project_b_tables(tmp_path: Path):
+    """A fresh EvolutionLedger must be at schema v6 with both Project A and Project B tables."""
     db_path = tmp_path / "evolution.db"
     ledger = EvolutionLedger(db_path)
-    assert ledger.schema_version == SCHEMA_VERSION == 5
+    assert ledger.schema_version == SCHEMA_VERSION == 6
     tables = {row[0] for row in ledger.connection.execute(
         "SELECT name FROM sqlite_master WHERE type='table'"
     )}
@@ -99,7 +99,7 @@ def test_v4_to_v5_migration_preserves_project_a_and_b_tables(tmp_path: Path):
     path = tmp_path / "evolution.db"
     _create_valid_v4_db(path)
     ledger = EvolutionLedger(path)
-    assert ledger.schema_version == SCHEMA_VERSION == 5
+    assert ledger.schema_version == SCHEMA_VERSION == 6
     tables = {row[0] for row in ledger.connection.execute(
         "SELECT name FROM sqlite_master WHERE type='table'"
     )}
@@ -138,8 +138,8 @@ def test_v4_to_v5_migration_preserves_attempts_and_suggestions_rows(tmp_path: Pa
     ).fetchone()[0] == "z" * 64
 
 
-def test_v5_view_and_quarantine_triggers_present(tmp_path: Path) -> None:
-    """A fresh v5 ledger must have telos_valid_approval_chains view and quarantine triggers."""
+def test_v6_view_and_quarantine_triggers_present(tmp_path: Path) -> None:
+    """A fresh v6 ledger must have telos_valid_approval_chains view and quarantine triggers."""
     db_path = tmp_path / "evolution.db"
     ledger = EvolutionLedger(db_path)
     views = {row[0] for row in ledger.connection.execute(
@@ -182,7 +182,7 @@ def test_v5_v4_to_v5_migration_respects_cross_wiring_invariant(tmp_path: Path):
     path.chmod(0o600)
 
     ledger = EvolutionLedger(path)
-    assert ledger.schema_version == 5
+    assert ledger.schema_version == SCHEMA_VERSION == 6
     q = ledger.connection.execute(
         "SELECT COUNT(*) FROM telos_approval_quarantine_v4"
     ).fetchone()[0]
@@ -227,7 +227,7 @@ def test_v4_to_v5_migration_coherent_chain_in_view(tmp_path: Path):
     path.chmod(0o600)
 
     ledger = EvolutionLedger(path)
-    assert ledger.schema_version == 5
+    assert ledger.schema_version == SCHEMA_VERSION == 6
     rows = ledger.connection.execute(
         "SELECT * FROM telos_valid_approval_chains"
     ).fetchall()

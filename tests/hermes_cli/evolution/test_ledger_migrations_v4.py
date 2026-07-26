@@ -20,12 +20,12 @@ def _create_valid_v3_database(path: Path) -> None:
 
 
 def test_v3_to_v4_migration_adds_telos_tables_and_triggers(tmp_path):
-    from hermes_cli.evolution.ledger import EvolutionLedger
+    from hermes_cli.evolution.ledger import EvolutionLedger, SCHEMA_VERSION
 
     path = tmp_path / "evolution.db"
     _create_valid_v3_database(path)
     ledger = EvolutionLedger(path)
-    assert ledger.schema_version == 5
+    assert ledger.schema_version == SCHEMA_VERSION == 6
 
     tables = {
         row[0]
@@ -70,13 +70,13 @@ def test_v3_to_v4_migration_adds_telos_tables_and_triggers(tmp_path):
 
 
 def test_v3_to_v4_preserves_v3_rows(tmp_path):
-    from hermes_cli.evolution.ledger import EvolutionLedger
+    from hermes_cli.evolution.ledger import EvolutionLedger, SCHEMA_VERSION
 
     path = tmp_path / "evolution.db"
     _create_valid_v3_database(path)
 
     ledger = EvolutionLedger(path)
-    assert ledger.schema_version == 5
+    assert ledger.schema_version == SCHEMA_VERSION == 6
     # Verify the migrated database has all v4 tables
     tables = {
         row[0]

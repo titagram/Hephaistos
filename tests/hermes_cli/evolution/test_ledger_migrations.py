@@ -36,6 +36,7 @@ REQUIRED_TABLES = {
     "telos_approval_grants",
     "telos_approval_consumptions",
     "telos_approval_quarantine_v4",
+    "blueprint_documents",
 }
 
 
@@ -909,11 +910,11 @@ def _create_valid_v4_database(path: Path) -> None:
     os.chmod(path, 0o600)
 
 
-def test_v1_to_v2_to_v3_to_v4_to_v5_full_chain(tmp_path) -> None:
+def test_v1_to_v2_to_v3_to_v4_to_v5_to_v6_full_chain(tmp_path) -> None:
     path = tmp_path / "evolution.db"
     _create_valid_v1_database(path)
     ledger = EvolutionLedger(path)
-    assert ledger.schema_version == ledger_module.SCHEMA_VERSION == 5
+    assert ledger.schema_version == ledger_module.SCHEMA_VERSION == 6
     assert ledger.connection.execute(
         "SELECT source_ref FROM attempts WHERE attempt_id = 'attempt-v1'"
     ).fetchone()[0] == "ticket-v1"
@@ -937,7 +938,7 @@ def test_v4_to_v5_migration_preserves_v4_rows_byte_for_byte(tmp_path) -> None:
     conn.close()
 
     ledger = EvolutionLedger(path)
-    assert ledger.schema_version == 5
+    assert ledger.schema_version == ledger_module.SCHEMA_VERSION == 6
 
     for table in ("attempts", "suggestions"):
         after = ledger.connection.execute(
@@ -950,11 +951,11 @@ def test_v4_to_v5_migration_idempotent_reopen(tmp_path) -> None:
     path = tmp_path / "evolution.db"
     _create_valid_v4_database(path)
     l1 = EvolutionLedger(path)
-    assert l1.schema_version == 5
+    assert l1.schema_version == ledger_module.SCHEMA_VERSION == 6
     l1.connection.close()
     for _ in range(2):
         ledger = EvolutionLedger(path)
-        assert ledger.schema_version == 5
+        assert ledger.schema_version == ledger_module.SCHEMA_VERSION == 6
         ledger.connection.close()
 
 
@@ -1031,7 +1032,7 @@ def test_v4_to_v5_cross_wired_quarantined_and_excluded_from_view(tmp_path):
     path.chmod(0o600)
 
     ledger = EvolutionLedger(path)
-    assert ledger.schema_version == 5
+    assert ledger.schema_version == ledger_module.SCHEMA_VERSION == 6
 
     # Original audit rows preserved
     assert ledger.connection.execute(
@@ -1096,7 +1097,7 @@ def test_v4_to_v5_wrong_context_quarantined_and_excluded_from_view(tmp_path):
     path.chmod(0o600)
 
     ledger = EvolutionLedger(path)
-    assert ledger.schema_version == 5
+    assert ledger.schema_version == ledger_module.SCHEMA_VERSION == 6
 
     # Original rows preserved
     assert ledger.connection.execute(
@@ -1124,6 +1125,119 @@ def test_v4_to_v5_wrong_context_quarantined_and_excluded_from_view(tmp_path):
     assert ledger.connection.execute(
         "SELECT COUNT(*) FROM telos_valid_approval_chains"
     ).fetchone()[0] == 0
+
+
+def _create_valid_v5_database(path: Path) -> None:
+    """Create a complete v5 database with attempts and blueprints rows."""
+    from hermes_cli.evolution import ledger as _ledger
+    connection = sqlite3.connect(path)
+    connection.execute("PRAGMA foreign_keys=ON")
+    for statement in _ledger._SCHEMA_V5_STATEMENTS:
+        connection.execute(statement)
+    connection.execute("INSERT INTO schema_version VALUES (1, 5)")
+    connection.execute(
+        "INSERT INTO attempts VALUES (?,?,?,?,?)", (
+            "attempt-v5", "manual", "ticket-v5", "draft",
+            "2026-07-25T00:00:00.000000Z",
+        )
+    )
+    connection.execute(
+        "INSERT INTO blueprints VALUES (?,?,?,?,?)", (
+            "blueprint-v5", "attempt-v5", "a" * 64, "draft",
+            "2026-07-25T00:00:00.000000Z",
+        )
+    )
+    connection.commit()
+    connection.close()
+    os.chmod(path, 0o600)
+
+
+# ── v5→v6 migration chain ──────────────────────────────────────────────────
+
+
+def test_v5_to_v6_migration_preserves_all_preexisting_rows(tmp_path) -> None:
+    path = tmp_path / "evolution.db"
+    _create_valid_v5_database(path)
+
+    conn = sqlite3.connect(path)
+    before = {}
+    for table in ledger_module._TABLES_V5:
+        if table == "schema_version":
+            continue
+        before[table] = conn.execute(
+            f'SELECT * FROM "{table}" ORDER BY 1'
+        ).fetchall()
+    conn.close()
+
+    ledger = EvolutionLedger(path)
+    assert ledger.schema_version == ledger_module.SCHEMA_VERSION == 6
+
+    for table, expected_rows in before.items():
+        after = ledger.connection.execute(
+            f'SELECT * FROM "{table}" ORDER BY 1'
+        ).fetchall()
+        assert [tuple(r) for r in after] == [tuple(r) for r in expected_rows]
+
+
+def test_v5_to_v6_adds_immutable_blueprint_documents_table(tmp_path) -> None:
+    path = tmp_path / "evolution.db"
+    _create_valid_v5_database(path)
+
+    ledger = EvolutionLedger(path)
+    assert ledger.schema_version == ledger_module.SCHEMA_VERSION == 6
+
+    now = "2026-07-25T00:00:00.000000Z"
+    ledger.connection.execute(
+        "INSERT INTO blueprint_documents VALUES (?,?,?,?,?,?)", (
+            "blueprint-v5", "attempt-v5", "sug-v5", "a" * 64,
+            '{"key": "value"}', now,
+        )
+    )
+
+    with pytest.raises(sqlite3.IntegrityError, match="immutable_blueprint_document"):
+        ledger.connection.execute(
+            "UPDATE blueprint_documents SET suggestion_id = 'other' WHERE blueprint_id = ?",
+            ("blueprint-v5",),
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="immutable_blueprint_document"):
+        ledger.connection.execute(
+            "DELETE FROM blueprint_documents WHERE blueprint_id = ?",
+            ("blueprint-v5",),
+        )
+
+
+def test_v5_to_v6_rolls_back_all_schema_changes_on_injected_failure(
+    tmp_path, monkeypatch
+) -> None:
+    path = tmp_path / "evolution.db"
+    _create_valid_v5_database(path)
+
+    original = ledger_module._execute_migration_statement
+    calls = [0]
+
+    def fail_after_first_additive(connection, statement):
+        calls[0] += 1
+        if calls[0] == 2:
+            raise sqlite3.OperationalError("injected rollback")
+        return original(connection, statement)
+
+    monkeypatch.setattr(
+        ledger_module, "_execute_migration_statement", fail_after_first_additive
+    )
+
+    with pytest.raises(EvolutionLedgerError):
+        EvolutionLedger(path)
+
+    check = sqlite3.connect(path)
+    assert check.execute("SELECT version FROM schema_version").fetchone()[0] == 5
+    assert check.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'blueprint_documents'"
+    ).fetchone() is None
+    assert check.execute(
+        "SELECT source_ref FROM attempts WHERE attempt_id = 'attempt-v5'"
+    ).fetchone()[0] == "ticket-v5"
+    check.close()
 
 
 def test_v4_to_v5_coherent_v4_survives_in_view(tmp_path):
@@ -1160,7 +1274,7 @@ def test_v4_to_v5_coherent_v4_survives_in_view(tmp_path):
     path.chmod(0o600)
 
     ledger = EvolutionLedger(path)
-    assert ledger.schema_version == 5
+    assert ledger.schema_version == ledger_module.SCHEMA_VERSION == 6
 
     # No quarantined rows
     assert ledger.connection.execute(

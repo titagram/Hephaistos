@@ -79,9 +79,22 @@ def _profile(value: object) -> str:
     return value
 
 
-def _active_profile() -> str:
-    """Return the canonical profile name without exposing a custom home path."""
+def _active_profile(global_scope: bool = False) -> str:
+    """Return the canonical scope/identity identifier.
 
+    When *global_scope* is ``True`` (the caller's evolution root is the
+    global organism directory), returns ``"organism"`` — a stable,
+    profile-independent identifier that always satisfies ``_PROFILE``
+    grammar.  This is correct for global organism lifecycle pointers
+    because they live under ``get_organism_home() / "evolution"`` and
+    must NOT change when the user switches HERMES_HOME profiles.
+
+    When *global_scope* is ``False`` (profile-local evolution root),
+    returns the active profile name as before — the pointer belongs
+    to one HERMES_HOME profile exclusively.
+    """
+    if global_scope:
+        return "organism"
     active = get_active_profile_name()
     resolved_home = hermes_constants.get_hermes_home().resolve()
     platform_default = (
@@ -102,6 +115,20 @@ def _positive_integer(value: object) -> int:
     if type(value) is not int or value < 1:
         _fail()
     return value
+
+
+def _is_global_evolution_root(evolution_root: Path) -> bool:
+    """Return True when *evolution_root* is the global organism evolution directory.
+
+    The global organism root is ``get_organism_home() / "evolution"`` and is
+    shared across all HERMES_HOME profiles.  Every other path is a profile-
+    local evolution root under ``get_hermes_home() / "evolution"``.
+    """
+    try:
+        organism_ev = hermes_constants.get_organism_home() / "evolution"
+        return evolution_root.resolve() == organism_ev.resolve()
+    except (OSError, ValueError):
+        return False
 
 
 def _profile_digest(profile_id: str) -> str:
@@ -252,7 +279,16 @@ def validate_pointer(
         if ledger.connection.in_transaction:
             _fail()
         pointer = _document(document)
-        if pointer.profile_id != _active_profile():
+
+        # Resolve scope.  Global organism evolution root: accept any valid
+        # profile_id (``"organism"`` or a legacy profile-bound value).  The
+        # pointer's chain proof (event digest, manifest proof, integrity
+        # digest) is the real evidence — comparing to the current profile
+        # would reject valid legacy pointers after a profile switch.
+        # Profile-local roots: strict current-profile matching.
+        evolution_root = store.root.parent
+        global_scope = _is_global_evolution_root(evolution_root)
+        if not global_scope and pointer.profile_id != _active_profile():
             _fail()
         if ledger.verify_chain():
             _fail()
@@ -603,8 +639,9 @@ def initialize_baseline_pointers(
         if ledger.connection.in_transaction:
             _fail()
         descriptor = _verified_baseline(store, baseline)
-        profile_id = _active_profile()
         root = store.root.parent
+        is_global = _is_global_evolution_root(root)
+        profile_id = "organism" if is_global else _active_profile()
         active_path = root / "active.json"
         lkg_path = root / "last-known-good.json"
 
@@ -627,6 +664,12 @@ def initialize_baseline_pointers(
                 raise AssertionError("unreachable")
             if active is not None and lkg is not None and active != lkg:
                 _fail()
+            # For a global organism root with an existing legacy pointer
+            # (profile_id != "organism"), adopt the legacy profile_id so
+            # subsequent event/pointer validation succeeds.  Fresh
+            # initialization on a global root uses "organism".
+            if is_global and coherent.profile_id != "organism":
+                profile_id = coherent.profile_id
             if (
                 coherent.profile_id != profile_id
                 or coherent.generation_id

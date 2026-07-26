@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from hermes_constants import get_hermes_home
+import hermes_constants
 from .observation_contract import ObservationEnvelope, validate_observation_envelope, ObservationContractError
 
 _EXCEPTION_CLASS_PATTERN = re.compile(r"([A-Z][a-zA-Z0-9_]+Error|[A-Z][a-zA-Z0-9_]+Exception)")
@@ -34,11 +34,13 @@ class ExperienceBridge:
         profile_ref: str,
         generation_id: str,
         hermes_home: Path | None = None,
+        telos_digest: str | None = None,
     ) -> None:
         self.organism_id = organism_id
         self.profile_ref = profile_ref
         self.generation_id = generation_id
-        self.hermes_home = (hermes_home or get_hermes_home()).resolve()
+        self.telos_digest = telos_digest
+        self.hermes_home = (hermes_home or hermes_constants.get_hermes_home()).resolve()
         self.logs_dir = self.hermes_home / "logs"
         self.cursor_file = self.logs_dir / ".experience_cursor.json"
 
@@ -91,7 +93,7 @@ class ExperienceBridge:
                         source_session_ref=None,
                         generation_id=self.generation_id,
                         gnothi_revision_digest=None,
-                        telos_digest=None,
+                        telos_digest=self.telos_digest,
                         capability_key=cap_key,
                         operation_key=op_key,
                         outcome_key=out_key,
