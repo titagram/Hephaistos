@@ -2043,12 +2043,13 @@ DEFAULT_CONFIG = {
     
     # Context engine -- controls how the context window is managed when
     # approaching the model's token limit.
-    # "compressor" = built-in lossy summarization (default).
+    # "lcm" = Hades-curated lossless context management (default).
+    # "compressor" = built-in lossy summarization and safe rollback.
     # Set to a plugin name to activate an alternative engine (e.g. "lcm"
     # for Lossless Context Management).  The engine must be installed as
     # a plugin in plugins/context_engine/<name>/ or ~/.hermes/plugins/.
     "context": {
-        "engine": "compressor",
+        "engine": "lcm",
     },
 
     # Persistent memory -- bounded curated memory injected into system prompt

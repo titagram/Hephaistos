@@ -91,6 +91,37 @@ def _make_plugin_dir(base: Path, name: str, *, register_body: str = "pass",
 class TestPluginDiscovery:
     """Tests for plugin discovery from directories and entry points."""
 
+    @pytest.mark.parametrize(
+        ("engine", "expected_enabled"),
+        [("lcm", True), ("compressor", False)],
+    )
+    def test_curated_lcm_loads_only_when_selected_context_engine(
+        self,
+        tmp_path,
+        monkeypatch,
+        engine,
+        expected_enabled,
+    ):
+        """Rolling back to compressor must stop all hermes-lcm plugin hooks."""
+        hermes_home = tmp_path / "hermes_test"
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        _make_plugin_dir(
+            hermes_home / "plugins",
+            "hermes-lcm",
+            register_body='ctx.register_command("lcm-test", lambda a: a)',
+        )
+        config_path = hermes_home / "config.yaml"
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        config["context"] = {"engine": engine}
+        config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+
+        manager = PluginManager()
+        manager.discover_and_load()
+
+        loaded = manager._plugins["hermes-lcm"]
+        assert loaded.enabled is expected_enabled
+        assert ("lcm-test" in manager._plugin_commands) is expected_enabled
+
     def test_discover_user_plugins(self, tmp_path, monkeypatch):
         """Plugins in ~/.hermes/plugins/ are discovered."""
         plugins_dir = tmp_path / "hermes_test" / "plugins"

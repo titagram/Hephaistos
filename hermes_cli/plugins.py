@@ -1371,6 +1371,18 @@ class PluginManager:
                     "Skipping '%s' (not in plugins.enabled)", lookup_key
                 )
                 continue
+            from hermes_cli.curated_plugins import curated_plugin_is_selected
+
+            if not curated_plugin_is_selected(manifest.name):
+                loaded = LoadedPlugin(manifest=manifest, enabled=False)
+                loaded.error = "curated context engine is not selected"
+                self._plugins[lookup_key] = loaded
+                logger.debug(
+                    "Skipping curated plugin '%s' because its context engine "
+                    "is not selected",
+                    lookup_key,
+                )
+                continue
             self._load_plugin(manifest)
 
         if manifests:

@@ -56,6 +56,11 @@ HERMES_LCM_SPEC = CuratedPluginSpec(
 )
 
 DEFAULT_CURATED_PLUGINS = (HERMES_LCM_SPEC,)
+_CURATED_CONTEXT_ENGINES = {
+    spec.name: spec.engine
+    for spec in DEFAULT_CURATED_PLUGINS
+    if spec.engine
+}
 
 
 def _result(
@@ -116,6 +121,7 @@ def _reject_symlinks(root: Path) -> None:
 
 def _write_marker(target: Path, spec: CuratedPluginSpec) -> None:
     marker = {
+        "activation_applied": False,
         "commit": spec.commit,
         "name": spec.name,
         "ref": spec.ref,
@@ -130,6 +136,35 @@ def _write_marker(target: Path, spec: CuratedPluginSpec) -> None:
         os.fsync(fd)
     finally:
         os.close(fd)
+
+
+def _set_activation_applied(target: Path) -> None:
+    marker_path = target / _MARKER_NAME
+    marker = _read_marker(target)
+    if marker is None:
+        raise ValueError("managed marker disappeared before activation")
+    marker["activation_applied"] = True
+    payload = (json.dumps(marker, sort_keys=True, indent=2) + "\n").encode("utf-8")
+    fd, temp_name = tempfile.mkstemp(
+        dir=target,
+        prefix=".hades-managed-",
+        suffix=".tmp",
+    )
+    temp_path = Path(temp_name)
+    try:
+        os.fchmod(fd, 0o600)
+        os.write(fd, payload)
+        os.fsync(fd)
+        os.close(fd)
+        fd = -1
+        os.replace(temp_path, marker_path)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        try:
+            temp_path.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def _verify_staged_plugin(stage: Path, spec: CuratedPluginSpec) -> None:
@@ -261,6 +296,92 @@ def sync_curated_plugin(
         return _result(spec, "failed", str(exc))
 
 
+def activate_curated_context_engine(
+    spec: CuratedPluginSpec,
+    *,
+    hermes_home: Path,
+) -> bool:
+    """Enable a curated context engine without replacing another custom engine."""
+
+    if not spec.engine:
+        return True
+
+    config_path = Path(hermes_home) / "config.yaml"
+    if config_path.exists():
+        try:
+            raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        except (OSError, UnicodeError, yaml.YAMLError):
+            return False
+        if not isinstance(raw, dict):
+            return False
+    else:
+        raw = {}
+
+    plugins = raw.get("plugins")
+    if not isinstance(plugins, dict):
+        plugins = {}
+    enabled = plugins.get("enabled", [])
+    disabled = plugins.get("disabled", [])
+    enabled_set = set(enabled) if isinstance(enabled, list) else set()
+    disabled_set = set(disabled) if isinstance(disabled, list) else set()
+
+    context = raw.get("context")
+    if not isinstance(context, dict):
+        context = {}
+    current_engine = str(context.get("engine") or "").strip()
+
+    from utils import atomic_roundtrip_yaml_update
+
+    try:
+        atomic_roundtrip_yaml_update(
+            config_path,
+            "plugins.enabled",
+            sorted(enabled_set | {spec.name}),
+        )
+        atomic_roundtrip_yaml_update(
+            config_path,
+            "plugins.disabled",
+            sorted(disabled_set - {spec.name}),
+        )
+        if current_engine in {"", "compressor"}:
+            atomic_roundtrip_yaml_update(
+                config_path,
+                "context.engine",
+                spec.engine,
+            )
+    except (OSError, TypeError, ValueError, yaml.YAMLError):
+        return False
+    return True
+
+
+def curated_plugin_is_selected(
+    plugin_name: str,
+    *,
+    config: dict | None = None,
+) -> bool:
+    """Return whether a curated context-engine plugin may execute.
+
+    General plugins can register hooks at import time. Gating the curated LCM
+    plugin on the selected engine makes ``context.engine=compressor`` a real
+    rollback rather than merely hiding LCM's tool schemas.
+    """
+
+    expected_engine = _CURATED_CONTEXT_ENGINES.get(plugin_name)
+    if expected_engine is None:
+        return True
+    if config is None:
+        try:
+            from hermes_cli.config import load_config
+
+            config = load_config()
+        except Exception:
+            return False
+    context = config.get("context") if isinstance(config, dict) else None
+    if not isinstance(context, dict):
+        return False
+    return str(context.get("engine") or "").strip() == expected_engine
+
+
 def sync_default_plugins(
     *,
     hermes_home: Path | None = None,
@@ -271,7 +392,32 @@ def sync_default_plugins(
         from hermes_constants import get_hermes_home
 
         hermes_home = get_hermes_home()
-    return [
-        sync_curated_plugin(spec, hermes_home=Path(hermes_home))
-        for spec in DEFAULT_CURATED_PLUGINS
-    ]
+    home = Path(hermes_home)
+    results: list[CuratedPluginSyncResult] = []
+    for spec in DEFAULT_CURATED_PLUGINS:
+        result = sync_curated_plugin(spec, hermes_home=home)
+        target = home / "plugins" / spec.name
+        marker = _read_marker(target) if target.is_dir() else None
+        activation_pending = (
+            result.status in {"installed", "updated", "current"}
+            and marker is not None
+            and marker.get("activation_applied") is not True
+        )
+        if activation_pending:
+            if activate_curated_context_engine(spec, hermes_home=home):
+                try:
+                    _set_activation_applied(target)
+                except (OSError, ValueError) as exc:
+                    result = _result(
+                        spec,
+                        "failed",
+                        f"plugin installed but activation marker failed: {exc}",
+                    )
+            else:
+                result = _result(
+                    spec,
+                    "failed",
+                    "plugin installed but context-engine activation failed",
+                )
+        results.append(result)
+    return results

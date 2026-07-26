@@ -7,7 +7,11 @@ from pathlib import Path
 
 import pytest
 
-from hermes_cli.curated_plugins import CuratedPluginSpec, sync_curated_plugin
+from hermes_cli.curated_plugins import (
+    CuratedPluginSpec,
+    sync_curated_plugin,
+    sync_default_plugins,
+)
 
 
 def _run_git(repo: Path, *args: str) -> str:
@@ -70,6 +74,7 @@ def test_sync_installs_verified_pinned_plugin(tmp_path: Path) -> None:
     assert not (target / ".git").exists()
     marker = json.loads((target / ".hades-managed.json").read_text(encoding="utf-8"))
     assert marker == {
+        "activation_applied": False,
         "commit": commit,
         "name": "hermes-lcm",
         "ref": "v0.20.0",
@@ -204,3 +209,88 @@ def test_sync_is_idempotent_for_current_managed_plugin(tmp_path: Path) -> None:
     assert second.status == "current"
     assert second.first_install is False
     assert marker.stat().st_mtime_ns == before
+
+
+def test_default_context_engine_is_lcm() -> None:
+    from hermes_cli.config import DEFAULT_CONFIG
+
+    assert DEFAULT_CONFIG["context"]["engine"] == "lcm"
+
+
+def test_default_sync_activates_lcm_on_first_install(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, commit = _plugin_repo(tmp_path)
+    home = tmp_path / "home"
+    spec = _spec(repo, commit)
+    monkeypatch.setattr(
+        "hermes_cli.curated_plugins.DEFAULT_CURATED_PLUGINS",
+        (spec,),
+    )
+
+    results = sync_default_plugins(hermes_home=home)
+
+    raw = pytest.importorskip("yaml").safe_load(
+        (home / "config.yaml").read_text(encoding="utf-8")
+    )
+    marker = json.loads(
+        (home / "plugins" / "hermes-lcm" / ".hades-managed.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert results[0].status == "installed"
+    assert raw["context"]["engine"] == "lcm"
+    assert "hermes-lcm" in raw["plugins"]["enabled"]
+    assert "hermes-lcm" not in raw["plugins"].get("disabled", [])
+    assert marker["activation_applied"] is True
+
+
+def test_default_sync_does_not_undo_compressor_rollback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, commit = _plugin_repo(tmp_path)
+    home = tmp_path / "home"
+    spec = _spec(repo, commit)
+    monkeypatch.setattr(
+        "hermes_cli.curated_plugins.DEFAULT_CURATED_PLUGINS",
+        (spec,),
+    )
+    sync_default_plugins(hermes_home=home)
+    from utils import atomic_roundtrip_yaml_update
+
+    atomic_roundtrip_yaml_update(home / "config.yaml", "context.engine", "compressor")
+
+    results = sync_default_plugins(hermes_home=home)
+
+    raw = pytest.importorskip("yaml").safe_load(
+        (home / "config.yaml").read_text(encoding="utf-8")
+    )
+    assert results[0].status == "current"
+    assert raw["context"]["engine"] == "compressor"
+
+
+def test_default_sync_preserves_other_selected_context_engine(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, commit = _plugin_repo(tmp_path)
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "config.yaml").write_text(
+        "context:\n  engine: another-engine\n",
+        encoding="utf-8",
+    )
+    spec = _spec(repo, commit)
+    monkeypatch.setattr(
+        "hermes_cli.curated_plugins.DEFAULT_CURATED_PLUGINS",
+        (spec,),
+    )
+
+    sync_default_plugins(hermes_home=home)
+
+    raw = pytest.importorskip("yaml").safe_load(
+        (home / "config.yaml").read_text(encoding="utf-8")
+    )
+    assert raw["context"]["engine"] == "another-engine"
