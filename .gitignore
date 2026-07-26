@@ -50,7 +50,12 @@ agent-browser/
 privvy*
 images/
 __pycache__/
-hermes_agent.egg-info/
+# Editable installs regenerate package metadata from pyproject.toml. Keep every
+# distribution-name variant out of Git so package renames cannot make managed
+# checkouts dirty again.
+*.egg-info/
+# Code-scoped runtime marker written by setup/install commands.
+.install_method
 wandb/
 testlogs
 

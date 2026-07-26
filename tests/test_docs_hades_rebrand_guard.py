@@ -25,7 +25,6 @@ HIGH_SIGNAL_DOCS = [
     "docs/indexes/DATA_MODEL.md",
     "docs/indexes/DEPENDENCIES.md",
     "docs/indexes/SECURITY.md",
-    "hades_agent.egg-info/PKG-INFO",
     "scripts/build_model_catalog.py",
     "scripts/install.ps1",
     "scripts/install.sh",

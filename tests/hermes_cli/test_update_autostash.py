@@ -1,3 +1,4 @@
+import subprocess
 from pathlib import Path
 from subprocess import CalledProcessError
 from types import SimpleNamespace
@@ -7,6 +8,19 @@ import pytest
 
 from hermes_cli import config as hermes_config
 from hermes_cli import main as hermes_main
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _run_git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *args],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -38,6 +52,44 @@ def _patch_managed_uv(request):
          patch("hermes_cli.managed_uv.ensure_uv", side_effect=_fake_ensure_uv), \
          patch("hermes_cli.managed_uv.update_managed_uv", side_effect=_fake_update_managed_uv):
         yield
+
+
+def test_generated_install_metadata_does_not_trigger_update_autostash(tmp_path):
+    repo = tmp_path / "managed-install"
+    repo.mkdir()
+    _run_git(repo, "init", "--initial-branch=main")
+    (repo / ".gitignore").write_text(
+        (REPO_ROOT / ".gitignore").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    _run_git(repo, "add", ".gitignore")
+    _run_git(
+        repo,
+        "-c",
+        "user.name=Hades Tests",
+        "-c",
+        "user.email=hades-tests@example.invalid",
+        "commit",
+        "-m",
+        "initial",
+    )
+
+    (repo / ".install_method").write_text("git\n", encoding="utf-8")
+    egg_info = repo / "hades_agent.egg-info"
+    egg_info.mkdir()
+    (egg_info / "PKG-INFO").write_text("generated\n", encoding="utf-8")
+
+    stash_ref = hermes_main._stash_local_changes_if_needed(["git"], repo)
+
+    assert stash_ref is None
+    assert _run_git(repo, "status", "--porcelain").stdout == ""
+
+
+def test_editable_install_metadata_is_not_tracked_by_the_repository():
+    tracked = _run_git(REPO_ROOT, "ls-files", "*.egg-info/*")
+
+    assert tracked.stdout == ""
+
 
 def test_stash_local_changes_if_needed_returns_none_when_tree_clean(monkeypatch, tmp_path):
     calls = []
