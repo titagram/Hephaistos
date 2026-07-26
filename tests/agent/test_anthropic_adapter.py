@@ -667,7 +667,10 @@ class TestRunOauthSetupToken:
         }))
         monkeypatch.setattr("agent.anthropic_adapter.Path.home", lambda: tmp_path)
 
-        with patch("subprocess.run") as mock_run:
+        with patch(
+            "agent.anthropic_adapter._read_claude_code_credentials_from_keychain",
+            return_value=None,
+        ), patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0)
             token = run_oauth_setup_token()
 
@@ -685,7 +688,10 @@ class TestRunOauthSetupToken:
         monkeypatch.delenv("ANTHROPIC_TOKEN", raising=False)
         monkeypatch.setattr("agent.anthropic_adapter.Path.home", lambda: tmp_path)
 
-        with patch("subprocess.run") as mock_run:
+        with patch(
+            "agent.anthropic_adapter._read_claude_code_credentials_from_keychain",
+            return_value=None,
+        ), patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0)
             token = run_oauth_setup_token()
 
@@ -698,7 +704,10 @@ class TestRunOauthSetupToken:
         monkeypatch.delenv("ANTHROPIC_TOKEN", raising=False)
         monkeypatch.setattr("agent.anthropic_adapter.Path.home", lambda: tmp_path)
 
-        with patch("subprocess.run") as mock_run:
+        with patch(
+            "agent.anthropic_adapter._read_claude_code_credentials_from_keychain",
+            return_value=None,
+        ), patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0)
             token = run_oauth_setup_token()
 
