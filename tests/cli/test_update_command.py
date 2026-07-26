@@ -55,6 +55,46 @@ def _call(self_):
     return HermesCLI._handle_update_command(self_)
 
 
+def test_curated_default_plugin_sync_is_nonfatal_and_visible(capsys):
+    from hermes_cli.main import _sync_curated_default_plugins
+    from hermes_cli.curated_plugins import CuratedPluginSyncResult
+
+    results = [
+        CuratedPluginSyncResult(
+            name="hermes-lcm",
+            status="failed",
+            detail="network unavailable",
+        )
+    ]
+    with patch(
+        "hermes_cli.curated_plugins.sync_default_plugins",
+        return_value=results,
+    ):
+        ok = _sync_curated_default_plugins()
+
+    assert ok is False
+    assert "network unavailable" in capsys.readouterr().out
+
+
+def test_setup_syncs_curated_default_plugins_before_wizard():
+    from hermes_cli.main import cmd_setup
+
+    order = []
+    with (
+        patch(
+            "hermes_cli.main._sync_curated_default_plugins",
+            side_effect=lambda: order.append("sync"),
+        ),
+        patch(
+            "hermes_cli.setup.run_setup_wizard",
+            side_effect=lambda _args: order.append("wizard"),
+        ),
+    ):
+        cmd_setup(SimpleNamespace())
+
+    assert order == ["sync", "wizard"]
+
+
 # ---------------------------------------------------------------------------
 # Managed-install guard
 # ---------------------------------------------------------------------------

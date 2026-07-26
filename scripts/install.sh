@@ -1847,6 +1847,20 @@ copy_config_templates() {
         log_info "~/.hermes/config.yaml already exists, keeping it"
     fi
 
+    # Curated external plugins are revision-pinned and verified by Hades.
+    # Failure is non-fatal: the built-in compressor remains the startup
+    # fallback and `hades update` retries the synchronization later.
+    local curated_python="python"
+    if [ "$USE_VENV" = true ] && [ -x "$INSTALL_DIR/venv/bin/python" ]; then
+        curated_python="$INSTALL_DIR/venv/bin/python"
+    fi
+    if HERMES_HOME="$HERMES_HOME" "$curated_python" \
+        -m hermes_cli.curated_plugins sync-defaults; then
+        log_success "Curated default plugins synchronized"
+    else
+        log_warn "Curated plugin sync failed; Hades will use its built-in fallback"
+    fi
+
     # Create SOUL.md if it doesn't exist (global persona file).
     # This MUST match DEFAULT_SOUL_MD in hermes_cli/default_soul.py — the
     # runtime (_ensure_default_soul_md) treats the old comment-only scaffold as

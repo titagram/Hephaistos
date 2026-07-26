@@ -9,6 +9,8 @@ import pytest
 
 from hermes_cli.curated_plugins import (
     CuratedPluginSpec,
+    CuratedPluginSyncResult,
+    main as curated_plugins_main,
     sync_curated_plugin,
     sync_default_plugins,
 )
@@ -294,3 +296,42 @@ def test_default_sync_preserves_other_selected_context_engine(
         (home / "config.yaml").read_text(encoding="utf-8")
     )
     assert raw["context"]["engine"] == "another-engine"
+
+
+def test_curated_plugins_module_command_reports_success(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        "hermes_cli.curated_plugins.sync_default_plugins",
+        lambda: [
+            CuratedPluginSyncResult(
+                name="hermes-lcm",
+                status="current",
+                detail="curated revision already installed",
+            )
+        ],
+    )
+
+    exit_code = curated_plugins_main(["sync-defaults"])
+
+    assert exit_code == 0
+    assert "hermes-lcm: current" in capsys.readouterr().out
+
+
+def test_curated_plugins_module_command_is_nonzero_on_failed_sync(
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.setattr(
+        "hermes_cli.curated_plugins.sync_default_plugins",
+        lambda: [
+            CuratedPluginSyncResult(
+                name="hermes-lcm",
+                status="failed",
+                detail="commit mismatch",
+            )
+        ],
+    )
+
+    exit_code = curated_plugins_main(["sync-defaults"])
+
+    assert exit_code == 1
+    assert "commit mismatch" in capsys.readouterr().err

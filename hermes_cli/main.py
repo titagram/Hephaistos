@@ -2695,10 +2695,37 @@ def cmd_whatsapp_cloud(args):
     return run_whatsapp_cloud_setup()
 
 
+def _sync_curated_default_plugins(*, quiet: bool = False) -> bool:
+    """Synchronize Hades-curated plugins without blocking the base runtime."""
+
+    try:
+        from hermes_cli.curated_plugins import sync_default_plugins
+
+        results = sync_default_plugins()
+    except Exception as exc:
+        if not quiet:
+            print(f"  ⚠ Curated plugin sync failed (non-fatal): {exc}")
+        return False
+
+    ok = True
+    for result in results:
+        if result.status in {"failed", "preserved"}:
+            ok = False
+            if not quiet:
+                print(
+                    f"  ⚠ {result.name}: {result.detail} "
+                    "(using the built-in compressor fallback)"
+                )
+        elif not quiet:
+            print(f"  ✓ {result.name}: {result.status}")
+    return ok
+
+
 def cmd_setup(args):
     """Interactive setup wizard."""
     from hermes_cli.setup import run_setup_wizard
 
+    _sync_curated_default_plugins()
     run_setup_wizard(args)
 
 
@@ -6421,6 +6448,9 @@ def _update_via_zip(args):
     except Exception:
         pass
 
+    print("→ Syncing curated default plugins...")
+    _sync_curated_default_plugins()
+
     # Seed the model-catalog disk cache from the freshly-unpacked checkout
     # (same rationale as the git-pull path in _cmd_update_impl). Non-fatal.
     try:
@@ -9219,6 +9249,15 @@ def _cmd_update_pip(args):
         print("✗ Update failed")
         sys.exit(1)
 
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "hermes_cli.curated_plugins",
+            "sync-defaults",
+        ],
+        check=False,
+    )
     print("✓ Update complete! Restart hermes to use the new version.")
 
 
@@ -9793,6 +9832,10 @@ def _cmd_update_impl(args, gateway_mode: bool):
                 print("  ✓ Skills are up to date")
         except Exception as e:
             logger.debug("Skills sync during update failed: %s", e)
+
+        print()
+        print("→ Syncing curated default plugins...")
+        _sync_curated_default_plugins()
 
         # Sync bundled skills to all profiles (including the active one).
         # seed_profile_skills() uses subprocess with an explicit HERMES_HOME so

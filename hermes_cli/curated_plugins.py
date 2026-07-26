@@ -7,12 +7,14 @@ user-managed plugin directory.
 
 from __future__ import annotations
 
+import argparse
 import hmac
 import json
 import os
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import uuid
 from dataclasses import dataclass
@@ -421,3 +423,30 @@ def sync_default_plugins(
                 )
         results.append(result)
     return results
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Repair/synchronize curated plugins without exposing a core model tool."""
+
+    parser = argparse.ArgumentParser(prog="hades-curated-plugins")
+    parser.add_argument(
+        "command",
+        choices=("sync-defaults",),
+        help="install or repair Hades-curated default plugins",
+    )
+    parser.parse_args(argv)
+
+    results = sync_default_plugins()
+    failed = False
+    for result in results:
+        stream = sys.stderr if result.status in {"failed", "preserved"} else None
+        print(
+            f"{result.name}: {result.status} — {result.detail}",
+            file=stream,
+        )
+        failed = failed or result.status in {"failed", "preserved"}
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
