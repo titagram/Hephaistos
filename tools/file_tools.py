@@ -5,6 +5,9 @@ import errno
 import json
 import logging
 import os
+import stat
+import sys
+import tempfile
 import threading
 from pathlib import Path
 
@@ -418,6 +421,7 @@ _SENSITIVE_PATH_PREFIXES = (
     "/private/etc/", "/private/var/",
 )
 _SENSITIVE_EXACT_PATHS = {"/var/run/docker.sock", "/run/docker.sock"}
+_MACOS_USER_TEMP_PARENT = Path("/private/var/folders")
 
 _hermes_config_resolved: str | None = None
 _hermes_config_resolved_loaded = False
@@ -440,6 +444,47 @@ def _get_hermes_config_resolved() -> str | None:
     return _hermes_config_resolved
 
 
+def _trusted_macos_user_temp_roots() -> tuple[Path, Path] | None:
+    """Return textual and resolved roots for a private macOS user temp dir."""
+    if sys.platform != "darwin":
+        return None
+    try:
+        raw_root = Path(os.path.abspath(os.path.normpath(tempfile.gettempdir())))
+        resolved_root = raw_root.resolve(strict=True)
+        resolved_root.relative_to(_MACOS_USER_TEMP_PARENT)
+        metadata = resolved_root.stat()
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if not stat.S_ISDIR(metadata.st_mode):
+        return None
+    if metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) & 0o077:
+        return None
+    return raw_root, resolved_root
+
+
+def _is_trusted_macos_user_temp_path(resolved: str, normalized: str) -> bool:
+    """Whether both canonical and user-supplied forms stay in private temp."""
+    roots = _trusted_macos_user_temp_roots()
+    if roots is None:
+        return False
+    raw_root, resolved_root = roots
+    try:
+        Path(resolved).relative_to(resolved_root)
+    except ValueError:
+        return False
+
+    normalized_path = Path(normalized)
+    if not normalized_path.is_absolute():
+        return True
+    for root in (raw_root, resolved_root):
+        try:
+            normalized_path.relative_to(root)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
 def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None:
     """Return an error message if the path targets a sensitive system location."""
     try:
@@ -451,8 +496,13 @@ def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None
         f"Refusing to write to sensitive system path: {filepath}\n"
         "Use the terminal tool with sudo if you need to modify system files."
     )
+    trusted_macos_temp = False
+    if resolved.startswith("/private/var/") or normalized.startswith("/private/var/"):
+        trusted_macos_temp = _is_trusted_macos_user_temp_path(resolved, normalized)
     for prefix in _SENSITIVE_PATH_PREFIXES:
         if resolved.startswith(prefix) or normalized.startswith(prefix):
+            if prefix == "/private/var/" and trusted_macos_temp:
+                continue
             return _err
     if resolved in _SENSITIVE_EXACT_PATHS or normalized in _SENSITIVE_EXACT_PATHS:
         return _err

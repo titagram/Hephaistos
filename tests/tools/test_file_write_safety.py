@@ -4,6 +4,8 @@ Based on PR #1085 by ismoilh (salvaged).
 """
 
 import os
+import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -171,6 +173,16 @@ class TestMultipleSafeWriteRoots:
 class TestCheckSensitivePathMacOSBypass:
     """Verify _check_sensitive_path blocks /private/etc paths (issue #8734)."""
 
+    @staticmethod
+    def _darwin_user_temp_dir() -> Path:
+        for candidate in Path("/private/var/folders").glob("*/*/T"):
+            try:
+                if candidate.stat().st_uid == os.geteuid():
+                    return candidate
+            except OSError:
+                continue
+        pytest.skip("macOS user temp directory is unavailable")
+
     def test_etc_hosts_blocked(self):
         from tools.file_tools import _check_sensitive_path
         assert _check_sensitive_path("/etc/hosts") is not None
@@ -186,6 +198,38 @@ class TestCheckSensitivePathMacOSBypass:
     def test_private_var_blocked(self):
         from tools.file_tools import _check_sensitive_path
         assert _check_sensitive_path("/private/var/db/something") is not None
+
+    @pytest.mark.skipif(sys.platform != "darwin", reason="macOS user temp contract")
+    def test_current_user_private_temp_allowed(self, monkeypatch):
+        from tools.file_tools import _check_sensitive_path
+
+        temp_root = self._darwin_user_temp_dir()
+        monkeypatch.setattr(tempfile, "gettempdir", lambda: str(temp_root))
+
+        assert _check_sensitive_path(str(temp_root / "hades-safe-file.txt")) is None
+
+    @pytest.mark.skipif(sys.platform != "darwin", reason="macOS user temp contract")
+    def test_symlink_escape_from_user_temp_stays_blocked(self, monkeypatch):
+        from tools.file_tools import _check_sensitive_path
+
+        temp_root = self._darwin_user_temp_dir()
+        monkeypatch.setattr(tempfile, "gettempdir", lambda: str(temp_root))
+        with tempfile.TemporaryDirectory(dir=temp_root) as scratch:
+            escape = Path(scratch) / "escape"
+            escape.symlink_to("/private/etc", target_is_directory=True)
+
+            assert _check_sensitive_path(str(escape / "hosts")) is not None
+
+    @pytest.mark.skipif(sys.platform != "darwin", reason="macOS user temp contract")
+    def test_non_private_declared_temp_stays_blocked(self, monkeypatch):
+        from tools.file_tools import _check_sensitive_path
+
+        temp_root = self._darwin_user_temp_dir()
+        with tempfile.TemporaryDirectory(dir=temp_root) as scratch:
+            Path(scratch).chmod(0o755)
+            monkeypatch.setattr(tempfile, "gettempdir", lambda: scratch)
+
+            assert _check_sensitive_path(str(Path(scratch) / "file.txt")) is not None
 
     def test_boot_still_blocked(self):
         from tools.file_tools import _check_sensitive_path
