@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shutil
@@ -823,6 +824,86 @@ class TestProviderDiscovery:
             from hermes_cli.plugins_cmd import _discover_context_engines
             result = _discover_context_engines()
             assert result == []
+
+    def test_curated_lcm_remains_discoverable_after_compressor_rollback(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """The picker must offer the installed curated engine without loading it."""
+        from hermes_cli.curated_plugins import HERMES_LCM_SPEC
+
+        home = tmp_path / "hermes-home"
+        plugin_dir = home / "plugins" / "hermes-lcm"
+        plugin_dir.mkdir(parents=True)
+        (plugin_dir / "plugin.yaml").write_text(
+            "name: hermes-lcm\nversion: 0.20.0\n",
+            encoding="utf-8",
+        )
+        (plugin_dir / "__init__.py").write_text(
+            "from pathlib import Path\n"
+            "Path(__file__).with_name('loaded').write_text('executed')\n",
+            encoding="utf-8",
+        )
+        (plugin_dir / ".hades-managed.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "name": HERMES_LCM_SPEC.name,
+                    "repository": HERMES_LCM_SPEC.repository,
+                    "ref": HERMES_LCM_SPEC.ref,
+                    "commit": HERMES_LCM_SPEC.commit,
+                    "activation_applied": True,
+                },
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        (home / "config.yaml").write_text(
+            "context:\n"
+            "  engine: compressor\n"
+            "plugins:\n"
+            "  enabled:\n"
+            "    - hermes-lcm\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HERMES_HOME", str(home))
+
+        from hermes_cli import plugins as plugins_mod
+        from hermes_cli.plugins_cmd import _discover_context_engines
+
+        with patch.object(plugins_mod, "_plugin_manager", None):
+            engines = _discover_context_engines()
+
+        assert ("lcm", "Hades-curated plugin") in engines
+        assert not (plugin_dir / "loaded").exists()
+
+    def test_context_engine_picker_labels_compressor_as_fallback(self):
+        """The picker must not describe the opt-out engine as Hades' default."""
+        from hermes_cli import plugins_cmd
+
+        captured: dict = {}
+
+        def choose_current(*, title, items, selected):
+            captured["title"] = title
+            captured["items"] = items
+            captured["selected"] = selected
+            return selected
+
+        with (
+            patch.object(plugins_cmd, "_get_current_context_engine", return_value="lcm"),
+            patch.object(
+                plugins_cmd,
+                "_discover_context_engines",
+                return_value=[("lcm", "Hades-curated plugin")],
+            ),
+            patch("hermes_cli.curses_ui.curses_radiolist", side_effect=choose_current),
+        ):
+            changed = plugins_cmd._configure_context_engine()
+
+        assert changed is False
+        assert captured["items"][0] == "compressor (built-in fallback)"
+        assert captured["items"][1] == "lcm — Hades-curated plugin"
 
 
 # ── Auto-activation fix ──────────────────────────────────────────────────

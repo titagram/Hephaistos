@@ -3,18 +3,18 @@
 Hades Agent uses a dual compression system and Anthropic prompt caching to
 manage context window usage efficiently across long conversations.
 
-Source files: `agent/context_engine.py` (ABC), `agent/context_compressor.py` (default engine),
+Source files: `agent/context_engine.py` (ABC), `agent/context_compressor.py` (built-in fallback),
 `agent/prompt_caching.py`, `gateway/run.py` (session hygiene), `run_agent.py` (search for `_compress_context`)
 
 
 ## Pluggable Context Engine
 
-Context management is built on the `ContextEngine` ABC (`agent/context_engine.py`). The built-in `ContextCompressor` is the default implementation, but plugins can replace it with alternative engines (e.g., Lossless Context Management).
+Context management is built on the `ContextEngine` ABC (`agent/context_engine.py`). The built-in `ContextCompressor` is the always-available fallback implementation, while plugins can provide alternative engines such as Lossless Context Management (LCM). Hades installs a reviewed, pinned LCM plugin and selects it on the first managed installation.
 
 ```yaml
 context:
-  engine: "compressor"    # default — built-in lossy summarization
-  engine: "lcm"           # example — plugin providing lossless context
+  engine: "lcm"           # Hades curated default
+  # engine: "compressor"  # built-in lossy rollback/fallback
 ```
 
 The engine is responsible for:
@@ -28,7 +28,11 @@ Selection is config-driven via `context.engine` in `config.yaml`. The resolution
 2. Check general plugin system (`register_context_engine()`)
 3. Fall back to built-in `ContextCompressor`
 
-Plugin engines are **never auto-activated** — the user must explicitly set `context.engine` to the plugin's name. The default `"compressor"` always uses the built-in.
+Third-party plugin engines are never auto-activated. The Hades-managed
+`hermes-lcm` plugin is the narrow exception: its first successful managed
+installation selects `lcm` when the setting is absent or still
+`compressor`. Later setup/update runs preserve the user's choice, so switching
+back to `compressor` is durable.
 
 Configure via `hermes plugins` → Provider Plugins → Context Engine, or edit `config.yaml` directly.
 

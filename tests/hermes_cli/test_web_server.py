@@ -2920,6 +2920,16 @@ class TestBuildSchemaFromConfig:
             assert "options" in entry
             assert "local" in entry["options"]
 
+    def test_context_engine_options_offer_lcm_and_compressor_rollback(self):
+        from hermes_cli.web_server import CONFIG_SCHEMA
+
+        entry = CONFIG_SCHEMA["context.engine"]
+        assert entry["type"] == "select"
+        assert "lcm" in entry["options"]
+        assert "compressor" in entry["options"]
+        assert "default" not in entry["options"]
+        assert "custom" not in entry["options"]
+
     def test_empty_prefix_produces_correct_keys(self):
         from hermes_cli.web_server import _build_schema_from_config
         test_config = {"model": "test", "nested": {"key": "val"}}

@@ -63,7 +63,7 @@ hermes-agent/
 ├── agent/                    # Agent internals
 │   ├── prompt_builder.py     # System prompt assembly
 │   ├── context_engine.py     # ContextEngine ABC (pluggable)
-│   ├── context_compressor.py # Default engine — lossy summarization
+│   ├── context_compressor.py # Built-in fallback — lossy summarization
 │   ├── prompt_caching.py     # Anthropic prompt caching
 │   ├── auxiliary_client.py   # Auxiliary LLM for side tasks (vision, summarization)
 │   ├── model_metadata.py     # Model context lengths, token estimation

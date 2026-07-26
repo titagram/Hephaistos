@@ -1030,10 +1030,10 @@ def _discover_memory_providers() -> list[tuple[str, str]]:
 def _discover_context_engines() -> list[tuple[str, str]]:
     """Return [(name, description), ...] for available context engines.
 
-    Includes repo-shipped engines from ``plugins/context_engine/`` AND
-    plugin-registered engines (third-party engines installed as Hermes
-    plugins via ``ctx.register_context_engine``). Repo-shipped descriptions
-    win when a plugin-registered engine collides on name.
+    Includes repo-shipped engines from ``plugins/context_engine/``,
+    installed Hades-curated engines, and plugin-registered engines
+    (third-party engines installed via ``ctx.register_context_engine``).
+    Earlier discovery sources win when names collide.
     """
     engines: list[tuple[str, str]] = []
     seen: set[str] = set()
@@ -1041,6 +1041,18 @@ def _discover_context_engines() -> list[tuple[str, str]]:
     try:
         from plugins.context_engine import discover_context_engines
         for name, desc, _avail in discover_context_engines():
+            if name not in seen:
+                engines.append((name, desc))
+                seen.add(name)
+    except Exception:
+        pass
+
+    try:
+        from hermes_cli.curated_plugins import (
+            discover_installed_curated_context_engines,
+        )
+
+        for name, desc in discover_installed_curated_context_engines():
             if name not in seen:
                 engines.append((name, desc))
                 seen.add(name)
@@ -1144,8 +1156,8 @@ def _configure_context_engine() -> bool:
     current = _get_current_context_engine()
     engines = _discover_context_engines()
 
-    # Build items: "compressor" first (built-in), then discovered engines
-    items = ["compressor (default)"]
+    # Build items: the built-in fallback first, then discovered engines.
+    items = ["compressor (built-in fallback)"]
     names = ["compressor"]
     selected = 0
 

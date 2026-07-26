@@ -307,8 +307,21 @@ memory:
   provider: "honcho"      # empty string = built-in only
 
 context:
-  engine: "compressor"    # default built-in compressor
+  engine: "lcm"           # Hades curated default
 ```
+
+Hades installs its reviewed, pinned `hermes-lcm` plugin during setup/update
+and activates it once. You can switch engines from this picker or with:
+
+```bash
+hades config set context.engine compressor  # durable rollback
+hades config set context.engine lcm         # select LCM again
+```
+
+The change applies to newly constructed sessions; a running conversation keeps
+its current engine and tool schema. Later updates do not undo a manual switch
+to `compressor`. Disabling `hermes-lcm` is an additional containment action,
+not a requirement for switching engines.
 
 ### Enabled vs. disabled vs. neither
 

@@ -384,6 +384,40 @@ def curated_plugin_is_selected(
     return str(context.get("engine") or "").strip() == expected_engine
 
 
+def discover_installed_curated_context_engines(
+    *,
+    hermes_home: Path | None = None,
+) -> list[tuple[str, str]]:
+    """List installed curated engines without importing their plugin code."""
+
+    if hermes_home is None:
+        from hermes_constants import get_hermes_home
+
+        hermes_home = get_hermes_home()
+    plugins_dir = Path(hermes_home) / "plugins"
+    engines: list[tuple[str, str]] = []
+    for spec in DEFAULT_CURATED_PLUGINS:
+        if not spec.engine:
+            continue
+        target = plugins_dir / spec.name
+        if _is_symlink(target) or not target.is_dir():
+            continue
+        marker = _read_marker(target)
+        if marker is None or not _marker_owns_target(marker, spec):
+            continue
+        manifest_path = target / "plugin.yaml"
+        if _is_symlink(manifest_path) or not manifest_path.is_file():
+            continue
+        try:
+            manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, yaml.YAMLError):
+            continue
+        if not isinstance(manifest, dict) or manifest.get("name") != spec.name:
+            continue
+        engines.append((spec.engine, "Hades-curated plugin"))
+    return engines
+
+
 def sync_default_plugins(
     *,
     hermes_home: Path | None = None,

@@ -1574,7 +1574,7 @@ def init_agent(
     # 4. Fall back to built-in ContextCompressor
     _selected_engine = None
     _copy_failed = False
-    _engine_name = "compressor"  # default
+    _engine_name = "compressor"  # built-in fallback
     try:
         _ctx_cfg = _agent_cfg.get("context", {}) if isinstance(_agent_cfg, dict) else {}
         _engine_name = _ctx_cfg.get("engine", "compressor") or "compressor"

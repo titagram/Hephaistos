@@ -10,18 +10,21 @@ Context engine plugins replace the built-in `ContextCompressor` with an alternat
 
 ## How it works
 
-The agent's context management is built on the `ContextEngine` ABC (`agent/context_engine.py`). The built-in `ContextCompressor` is the default implementation. Plugin engines must implement the same interface.
+The agent's context management is built on the `ContextEngine` ABC (`agent/context_engine.py`). The built-in `ContextCompressor` is the fallback implementation. Plugin engines must implement the same interface.
 
 Only **one** context engine can be active at a time. Selection is config-driven:
 
 ```yaml
 # config.yaml
 context:
-  engine: "compressor"    # default built-in
   engine: "lcm"           # activates a plugin engine named "lcm"
+  # engine: "compressor"  # built-in rollback/fallback
 ```
 
-Plugin engines are **never auto-activated** — the user must explicitly set `context.engine` to the plugin's name.
+Ordinary plugin engines are never auto-activated: the user must explicitly
+select their name. A distribution may define a reviewed curated default;
+Hades does this for its pinned `hermes-lcm` build and applies that selection
+only on the first managed installation.
 
 ## Directory structure
 

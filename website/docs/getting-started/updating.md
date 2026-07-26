@@ -28,8 +28,9 @@ When you run `hades update`, the following steps occur:
 2. **Git pull** — pulls the latest code from the `main` branch and updates submodules
 3. **Post-pull syntax validation + auto-rollback** — after the pull, Hades compiles the eight critical files every `hades` invocation imports at startup. If any fails to parse (e.g. an orphan merge-conflict marker, an accidentally truncated file), Hades runs `git reset --hard <pre-pull-sha>` to roll the install back so your shell stays bootable. Re-run `hades update` once the upstream fix lands.
 4. **Dependency install** — runs `uv pip install -e ".[all]"` to pick up new or changed dependencies
-5. **Config migration** — detects new config options added since your version and prompts you to set them
-6. **Gateway auto-restart** — running gateways are refreshed after the update completes so the new code takes effect immediately. Service-managed gateways (systemd on Linux, launchd on macOS) are restarted through the service manager. Manual gateways are relaunched automatically when Hades can map the running PID back to a profile.
+5. **Curated plugin sync** — verifies or installs Hades-managed plugins at their reviewed, pinned revisions. A sync failure is non-fatal and leaves the built-in context compressor available.
+6. **Config migration** — detects new config options added since your version and prompts you to set them
+7. **Gateway auto-restart** — running gateways are refreshed after the update completes so the new code takes effect immediately. Service-managed gateways (systemd on Linux, launchd on macOS) are restarted through the service manager. Manual gateways are relaunched automatically when Hades can map the running PID back to a profile.
 
 ### Updating against a non-default branch: `--branch`
 

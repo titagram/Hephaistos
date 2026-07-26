@@ -7,7 +7,8 @@ implementing the ContextEngine ABC.
 Context engines are separate from the general plugin system — they live
 in the repo and are always available without user installation.  Only ONE
 can be active at a time, selected via ``context.engine`` in config.yaml.
-The default engine is ``"compressor"`` (the built-in ContextCompressor).
+``"compressor"`` is the built-in fallback and rollback engine.  A distribution
+may select a curated plugin engine such as ``"lcm"`` as its initial default.
 
 Usage:
     from plugins.context_engine import discover_context_engines, load_context_engine

@@ -860,17 +860,23 @@ The context engine controls how conversations are managed when approaching the m
 
 ```yaml
 context:
-  engine: "compressor"    # default — built-in lossy summarization
+  engine: "lcm"           # Hades curated default
 ```
 
-To use a plugin engine (e.g., LCM for lossless context management):
+To use the built-in lossy compressor as a rollback/fallback:
 
 ```yaml
 context:
-  engine: "lcm"          # must match the plugin's name
+  engine: "compressor"
 ```
 
-Plugin engines are **never auto-activated** — you must explicitly set `context.engine` to the plugin name. Available engines can be browsed and selected via `hermes plugins` → Provider Plugins → Context Engine.
+Hades installs a reviewed, pinned `hermes-lcm` plugin and selects it once on
+the first successful managed installation. Later setup/update runs preserve
+your selection, so `hades config set context.engine compressor` is a durable
+rollback and `hades config set context.engine lcm` selects LCM again. Other
+plugin engines still require explicit selection. Available engines can be
+browsed via `hermes plugins` → Provider Plugins → Context Engine. Changes take
+effect for the next session or process restart.
 
 See [Memory Providers](/user-guide/features/memory-providers) for the analogous single-select system for memory plugins.
 

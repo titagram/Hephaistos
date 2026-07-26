@@ -145,6 +145,15 @@ describe('settings helpers', () => {
   describe('enumOptionsFor — backend selector dropdowns', () => {
     const config: HermesConfigRecord = {}
 
+    it('offers both curated LCM and the compressor rollback engine', () => {
+      const opts = enumOptionsFor('context.engine', 'lcm', config)
+
+      expect(opts).toContain('lcm')
+      expect(opts).toContain('compressor')
+      expect(opts).not.toContain('default')
+      expect(opts).not.toContain('custom')
+    })
+
     it('renders a dropdown for the TTS provider including xAI (Grok)', () => {
       const opts = enumOptionsFor('tts.provider', 'edge', config)
       expect(opts).toBeDefined()
