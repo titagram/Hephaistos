@@ -578,6 +578,50 @@ def test_dry_run_admission_defers_unleased_remote_ready_and_review_cards(kanban_
     assert review_link is not None and review_link.lease_status == "none"
 
 
+def test_non_dry_dispatch_admits_each_ready_and_review_card_once_after_claim(
+    kanban_home, monkeypatch,
+):
+    """Lease-capable admission runs only after the local claim succeeded."""
+    monkeypatch.setattr("hermes_cli.profiles.profile_exists", lambda _name: True)
+    admission_calls = []
+    with kb.connect_closing() as conn:
+        ready_id = kb.create_task(conn, title="ready", assignee="worker")
+        review_id = kb.create_task(conn, title="review", assignee="reviewer")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status = 'review' WHERE id = ?", (review_id,))
+
+        def _admission(task):
+            admission_calls.append((task.id, task.status))
+            return kb.DispatchAdmission("allow", "admitted")
+
+        kb.dispatch_once(
+            conn,
+            admission_fn=_admission,
+            spawn_fn=lambda _task, _workspace: None,
+        )
+
+    assert admission_calls == [(ready_id, "running"), (review_id, "running")]
+
+
+def test_dispatch_skips_admission_when_ready_or_review_claim_is_lost(kanban_home, monkeypatch):
+    """A losing local claim must not acquire a remote lease speculatively."""
+    monkeypatch.setattr("hermes_cli.profiles.profile_exists", lambda _name: True)
+    monkeypatch.setattr(kb, "claim_task", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(kb, "claim_review_task", lambda *_args, **_kwargs: None)
+    admission_calls = []
+    with kb.connect_closing() as conn:
+        kb.create_task(conn, title="ready", assignee="worker")
+        review_id = kb.create_task(conn, title="review", assignee="reviewer")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status = 'review' WHERE id = ?", (review_id,))
+        kb.dispatch_once(
+            conn,
+            admission_fn=lambda task: admission_calls.append(task.id) or kb.DispatchAdmission("allow", "admitted"),
+        )
+
+    assert admission_calls == []
+
+
 # ---------------------------------------------------------------------------
 # Stats + age
 # ---------------------------------------------------------------------------

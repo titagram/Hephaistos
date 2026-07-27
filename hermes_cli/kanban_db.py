@@ -7790,14 +7790,14 @@ def _dispatch_once_locked(
                         {"reason": guard_reason},
                     )
             continue
-        candidate = get_task(conn, row["id"])
-        if candidate is None:
-            continue
-        decision = _dispatch_admission_decision(
-            admission_fn, candidate, dry_run=dry_run,
-        )
-        reason = decision.reason.strip() or "dispatch admission denied"
         if dry_run:
+            candidate = get_task(conn, row["id"])
+            if candidate is None:
+                continue
+            decision = _dispatch_admission_decision(
+                admission_fn, candidate, dry_run=True,
+            )
+            reason = decision.reason.strip() or "dispatch admission denied"
             if decision.action == "defer":
                 result.admission_deferred.append((candidate.id, reason))
                 continue
@@ -7925,14 +7925,14 @@ def _dispatch_once_locked(
         if profile_exists is not None and not profile_exists(row["assignee"]):
             result.skipped_nonspawnable.append(row["id"])
             continue
-        candidate = get_task(conn, row["id"])
-        if candidate is None:
-            continue
-        decision = _dispatch_admission_decision(
-            admission_fn, candidate, dry_run=dry_run,
-        )
-        reason = decision.reason.strip() or "dispatch admission denied"
         if dry_run:
+            candidate = get_task(conn, row["id"])
+            if candidate is None:
+                continue
+            decision = _dispatch_admission_decision(
+                admission_fn, candidate, dry_run=True,
+            )
+            reason = decision.reason.strip() or "dispatch admission denied"
             if decision.action == "defer":
                 result.admission_deferred.append((candidate.id, reason))
                 continue

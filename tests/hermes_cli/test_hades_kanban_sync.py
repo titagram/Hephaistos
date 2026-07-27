@@ -1,4 +1,5 @@
 from pathlib import Path
+import threading
 from types import SimpleNamespace
 
 from hermes_cli import kanban_db as kb
@@ -338,6 +339,87 @@ def test_dispatch_context_only_resolves_after_synced_or_healthy_deferred_report(
     assert offline.mode == "local_only"
     assert deferred == context
     assert resolutions == [{"board": "ariadne", "cwd": None}]
+
+
+def test_maybe_sync_marks_inflight_before_running_network_sync(_hermetic_environment, monkeypatch):
+    """Concurrent dispatcher ticks share one binding-scoped network attempt."""
+    from hermes_cli import kanban_backend as backend
+
+    context = _linked_context()
+    started = threading.Event()
+    release = threading.Event()
+    second_done = threading.Event()
+    calls = []
+    outcomes = []
+    monkeypatch.setattr(backend, "resolve_kanban_backend_context", lambda **_: context)
+
+    def _run(**_kwargs):
+        calls.append("sync")
+        started.set()
+        release.wait(timeout=2)
+        return KanbanSyncReport(
+            state="synced", workspace_binding_id=context.workspace_binding_id,
+        )
+
+    monkeypatch.setattr(backend, "run_kanban_sync", _run)
+
+    first_thread = threading.Thread(
+        target=lambda: outcomes.append(backend.maybe_run_kanban_sync(now=3_000)),
+    )
+    first_thread.start()
+    assert started.wait(timeout=1)
+
+    def _second():
+        outcomes.append(backend.maybe_run_kanban_sync(now=3_000))
+        second_done.set()
+
+    second_thread = threading.Thread(target=_second)
+    second_thread.start()
+    second_done.wait(timeout=0.25)
+    release.set()
+    first_thread.join(timeout=2)
+    second_thread.join(timeout=2)
+
+    assert calls == ["sync"]
+    assert {report.state for report in outcomes} == {"synced", "sync_inflight"}
+
+
+def test_maybe_sync_replaces_failed_inflight_marker_and_keeps_bindings_independent(
+    _hermetic_environment, monkeypatch,
+):
+    """Unexpected failures clear the marker; other bindings never share it."""
+    from hermes_cli import kanban_backend as backend
+
+    contexts = {
+        "a": _linked_context("a"),
+        "b": _linked_context("b"),
+    }
+    calls = []
+    monkeypatch.setattr(
+        backend,
+        "resolve_kanban_backend_context",
+        lambda *, cwd=None, **_: contexts[str(cwd)],
+    )
+
+    def _run(*, cwd=None, **_kwargs):
+        calls.append(str(cwd))
+        if str(cwd) == "a" and calls.count("a") == 1:
+            raise RuntimeError("temporary backend failure")
+        return KanbanSyncReport(
+            state="synced",
+            workspace_binding_id=contexts[str(cwd)].workspace_binding_id,
+        )
+
+    monkeypatch.setattr(backend, "run_kanban_sync", _run)
+
+    failed = backend.maybe_run_kanban_sync(cwd="a", now=4_000)
+    other_binding = backend.maybe_run_kanban_sync(cwd="b", now=4_000)
+    retried = backend.maybe_run_kanban_sync(cwd="a", now=4_031)
+
+    assert failed.state == "backend_offline"
+    assert other_binding.state == "synced"
+    assert retried.state == "synced"
+    assert calls == ["a", "b", "a"]
 
 
 def test_local_card_admission_never_constructs_backend_client(_hermetic_environment):

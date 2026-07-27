@@ -229,13 +229,34 @@ def maybe_run_kanban_sync(
         previous = _LAST_SYNC_ATTEMPTS.get(sync_key)
         if previous is not None and current - previous[0] < interval:
             previous_report = previous[1]
+            if previous_report.state == "sync_inflight":
+                return previous_report
             if previous_report.state in {"backend_offline", "sync_error"}:
                 return previous_report
             return KanbanSyncReport(
                 state="sync_deferred",
                 workspace_binding_id=context.workspace_binding_id,
             )
-    report = run_kanban_sync(board=board, cwd=cwd, now=current)
+        # Publish a binding-scoped in-flight marker before releasing the
+        # guard. A concurrent dispatcher must never start a second network
+        # pull while this caller is still resolving the first one.
+        _LAST_SYNC_ATTEMPTS[sync_key] = (
+            current,
+            KanbanSyncReport(
+                state="sync_inflight",
+                workspace_binding_id=context.workspace_binding_id,
+            ),
+        )
+    try:
+        report = run_kanban_sync(board=board, cwd=cwd, now=current)
+    except Exception as exc:
+        # Replace the marker even when an unexpected runner failure escapes,
+        # so an in-flight state cannot permanently suppress later attempts.
+        report = KanbanSyncReport(
+            state="backend_offline",
+            workspace_binding_id=context.workspace_binding_id,
+            error=str(exc)[:500],
+        )
     with _SYNC_GUARD:
         _LAST_SYNC_ATTEMPTS[sync_key] = (current, report)
     return report
