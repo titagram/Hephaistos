@@ -32,8 +32,9 @@ The JUnit evidence is
 - A process interruption between commit and delivery leaves a replayable
   outbox row.
 - The dashboard and CLI paths inherit the same central transition behavior.
-- Org-run cards are explicitly marked `org_run_gated`; their generic terminal
-  hook cannot publish before the independent evidence/integration gate.
+- Org-run links carry an immutable `org_run_gated` publication policy; their
+  generic terminal hook cannot publish before the independent
+  evidence/integration gate.
 
 Tests cover completion, blocking, internal give-up, CLI restart recovery,
 dashboard restart recovery, and the org-run integration-ready gate.
@@ -150,7 +151,8 @@ The first integrated regression run exposed six failures:
 Five were obsolete expectations after the intended local-first semantics
 changed. One was a real regression: the central terminal hook could publish an
 org-run result before its integration gate. Adding the typed
-`org_run_gated` state fixed that behavior rather than weakening the test.
+`org_run_gated` publication policy fixed that behavior rather than weakening
+the test.
 
 Core database/sync/coordination rerun:
 
@@ -204,3 +206,107 @@ and multiprocessing tests. A browser DOM run of the localhost dashboard was
 not available in this wave; dashboard route/plugin and web-server tests are
 green. Per task ownership, deployment and resuming the live Hades session are
 left to the parent orchestration step after this commit.
+
+## Continuation — final re-review blockers
+
+Date: 2026-07-28
+
+This continuation addresses the final two Critical and one Important
+re-review findings without deploying or resuming a live session.
+
+### Chain-aware remote failure classification
+
+- Kanban remote admission and heartbeat now reuse the existing proven
+  `_is_transport_failure` traversal used by backend sync.
+- The traversal follows both `__cause__` and `__context__`, detects cycles, and
+  recognizes `httpx.TransportError` in addition to standard connection,
+  timeout, and OS failures.
+- A production-shaped `HadesBackendError` caused by
+  `httpx.ConnectError` is therefore retryable transport, not an identity
+  rejection.
+- Transport heartbeat failures preserve the acquired lease. Permanent lease
+  results still expire the lease, but terminal completion now always creates a
+  durable ordinary-link intent.
+- Delivery with an absent/expired lease performs no backend mutation and
+  returns the outbox row to `pending` with a reconciliation-required reason.
+  Reacquiring a lease makes that same idempotent intent deliverable.
+
+Regressions use the real exception wrapping shape, including transport failure
+during client construction, rather than a bare `ConnectionError`.
+
+### Immutable publication policy
+
+- `kanban_remote_links.publication_policy` is a structured enum with
+  `ordinary` as the default and `org_run_gated` for integration-gated work.
+- The field is distinct from mutable lease and synchronization status. Public
+  link APIs reject attempts to change it after creation.
+- The additive migration maps the historical `sync_status='org_run_gated'`
+  encoding and recognizable OrgRun execution nodes into the new policy, then
+  normalizes mutable sync status.
+- OrgRun graph creation now runs in one outer SQLite write transaction and
+  creates each execution node and gated remote link together. A simulated
+  interruption after link insertion rolls back the complete graph and link,
+  proving there is no ordinary-policy crash window.
+- Successful claim, generic admission, and heartbeat update lease/sync state
+  without changing policy. Generic completion creates no outbox entry for a
+  gated link; specialized evidence-gated publication remains the only result
+  path.
+
+### Structured OrgRun claim
+
+- `claim_remote_work_item_outcome` and
+  `claim_org_run_remote_task_outcome` return the same
+  `DispatchAdmission` shape used by generic dispatch.
+- Transport returns `defer`; authorization, validation, malformed claim,
+  mapping, and identity failures return stable typed `supersede` reasons for
+  operator action.
+- Persisted diagnostics are bounded/redacted, and public reasons contain no
+  backend exception text or credentials.
+- Existing tuple callers remain supported by thin compatibility adapters over
+  the structured result.
+
+### Continuation TDD evidence
+
+Initial production-shape RED:
+
+```text
+tests/hermes_cli/test_kanban_remote_reliability.py
+4 failed, 15 passed
+```
+
+The coordination suite additionally failed collection because the new typed
+OrgRun outcome API did not yet exist. A sibling-path test then reproduced a
+wrapped transport failure during client construction as one additional RED.
+
+GREEN progression:
+
+```text
+Reliability + coordination:                  35 passed in 1.94s
+DB + reliability + coordination:            272 passed in 10.90s
+OrgRun portfolio/distributed/CLI consumers:  25 passed in 0.98s
+Client-construction and gate focus:           3 passed in 0.30s
+```
+
+Final selected regression suite plus relevant OrgRun consumers:
+
+```text
+912 tests
+0 failures
+0 errors
+0 skipped
+40.696 seconds
+```
+
+JUnit evidence:
+`/private/tmp/kanban-cont-final-suite.xml`.
+
+Final static checks:
+
+```text
+git diff --check: clean
+python -m py_compile (all changed production modules): passed
+```
+
+The remaining validation boundary is unchanged: dashboard routes/plugins and
+web-server tests are green, while browser DOM validation, deployment, and live
+Hades session resume belong to the parent orchestration step.

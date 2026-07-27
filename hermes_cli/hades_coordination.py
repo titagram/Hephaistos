@@ -506,6 +506,29 @@ def publish_org_run_completion(
     return True, "published"
 
 
+def claim_org_run_remote_task_outcome(
+    conn,
+    *,
+    client: object,
+    topology: _OrgRunCreated,
+    remote_task_id: str,
+    local_workspace_id: str,
+) -> kb.DispatchAdmission:
+    """Acquire an OrgRun lease with typed, secret-safe claim semantics."""
+    remote = topology.remote_tasks.get(remote_task_id)
+    if remote is None or not remote.work_item_id:
+        return kb.DispatchAdmission("supersede", "remote_mapping_missing")
+    from hermes_cli.hades_kanban_sync import claim_remote_work_item_outcome
+
+    return claim_remote_work_item_outcome(
+        conn,
+        client,
+        task_id=remote.execution_id,
+        work_item_id=remote.work_item_id,
+        local_workspace_id=local_workspace_id,
+    )
+
+
 def claim_org_run_remote_task(
     conn,
     *,
@@ -514,27 +537,15 @@ def claim_org_run_remote_task(
     remote_task_id: str,
     local_workspace_id: str,
 ) -> tuple[bool, str]:
-    """Acquire the remote lease for an OrgRun execution node."""
-    remote = topology.remote_tasks.get(remote_task_id)
-    if remote is None or not remote.work_item_id:
-        return False, "remote work item mapping is missing"
-    from hermes_cli.hades_kanban_sync import claim_remote_work_item
-
-    claimed, reason = claim_remote_work_item(
+    """Compatibility tuple adapter for callers predating typed admission."""
+    outcome = claim_org_run_remote_task_outcome(
         conn,
-        client,
-        task_id=remote.execution_id,
-        work_item_id=remote.work_item_id,
+        client=client,
+        topology=topology,
+        remote_task_id=remote_task_id,
         local_workspace_id=local_workspace_id,
     )
-    if claimed:
-        kb.record_remote_link_state(
-            conn,
-            remote.execution_id,
-            sync_status="org_run_gated",
-            error=None,
-        )
-    return claimed, reason
+    return outcome.action == "allow", outcome.reason
 
 
 _ORG_PROPOSAL_TYPES = frozenset(

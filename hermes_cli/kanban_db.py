@@ -133,6 +133,7 @@ VALID_BLOCK_KINDS = {"dependency", "needs_input", "capability", "transient"}
 # not dispatcher spawn/crash/timeout failures.
 BLOCK_RECURRENCE_LIMIT = 2
 VALID_WORKSPACE_KINDS = {"scratch", "worktree", "dir"}
+VALID_REMOTE_PUBLICATION_POLICIES = {"ordinary", "org_run_gated"}
 KNOWN_TOOLSET_NAMES = frozenset(name.casefold() for name in get_toolset_names())
 _IS_WINDOWS = sys.platform == "win32"
 
@@ -1116,6 +1117,7 @@ class RemoteLink:
     remote_work_item_id: str
     lease_token: Optional[str]
     lease_status: str
+    publication_policy: str
     sync_status: str
     last_error: Optional[str]
     created_at: int
@@ -1333,6 +1335,8 @@ CREATE TABLE IF NOT EXISTS kanban_remote_links (
     remote_work_item_id   TEXT NOT NULL,
     lease_token           TEXT,
     lease_status          TEXT NOT NULL DEFAULT 'none',
+    publication_policy    TEXT NOT NULL DEFAULT 'ordinary'
+                          CHECK(publication_policy IN ('ordinary', 'org_run_gated')),
     sync_status           TEXT NOT NULL DEFAULT 'linked',
     last_error            TEXT,
     created_at            INTEGER NOT NULL,
@@ -2162,6 +2166,39 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
                 conn, "kanban_sync_outbox", "claim_expires", "claim_expires INTEGER"
             )
 
+    remote_links_exist = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' "
+        "AND name='kanban_remote_links'"
+    ).fetchone() is not None
+    if remote_links_exist:
+        remote_link_cols = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(kanban_remote_links)")
+        }
+        if "publication_policy" not in remote_link_cols:
+            _add_column_if_missing(
+                conn,
+                "kanban_remote_links",
+                "publication_policy",
+                "publication_policy TEXT NOT NULL DEFAULT 'ordinary' "
+                "CHECK(publication_policy IN ('ordinary', 'org_run_gated'))",
+            )
+        # One-time semantic backfill for boards written before publication
+        # policy was separated from mutable synchronization state. Execution
+        # node identity is durable, so it also closes the old crash window
+        # where a process could link the node but die before writing the gate.
+        conn.execute(
+            "UPDATE kanban_remote_links SET publication_policy='org_run_gated' "
+            "WHERE sync_status='org_run_gated' OR task_id IN ("
+            "SELECT id FROM tasks WHERE idempotency_key LIKE 'org-run:%:execute'"
+            ")"
+        )
+        conn.execute(
+            "UPDATE kanban_remote_links SET sync_status = "
+            "CASE WHEN lease_status='acquired' THEN 'leased' ELSE 'linked' END "
+            "WHERE sync_status='org_run_gated'"
+        )
+
     # One-shot backfill: any task that is 'running' before runs existed
     # had its claim_lock / claim_expires / worker_pid on the task row.
     # Synthesize a matching task_runs row so subsequent end-run / heartbeat
@@ -2492,7 +2529,8 @@ def write_txn(conn: sqlite3.Connection):
 
 _REMOTE_LINK_COLUMNS = (
     "task_id, project_id, workspace_binding_id, remote_work_item_id, "
-    "lease_token, lease_status, sync_status, last_error, created_at, updated_at"
+    "lease_token, lease_status, publication_policy, sync_status, last_error, "
+    "created_at, updated_at"
 )
 
 
@@ -2504,6 +2542,7 @@ def _remote_link_from_row(row: sqlite3.Row) -> RemoteLink:
         remote_work_item_id=row["remote_work_item_id"],
         lease_token=row["lease_token"],
         lease_status=row["lease_status"],
+        publication_policy=row["publication_policy"],
         sync_status=row["sync_status"],
         last_error=row["last_error"],
         created_at=row["created_at"],
@@ -2536,9 +2575,14 @@ def upsert_remote_link(
     project_id: str,
     workspace_binding_id: str,
     remote_work_item_id: str,
+    publication_policy: str = "ordinary",
     sync_status: str = "linked",
     last_error: Optional[str] = None,
 ) -> RemoteLink:
+    if publication_policy not in VALID_REMOTE_PUBLICATION_POLICIES:
+        raise ValueError(
+            f"invalid remote publication policy: {publication_policy}"
+        )
     now = int(time.time())
     with write_txn(conn):
         existing = get_remote_link(conn, task_id)
@@ -2548,11 +2592,17 @@ def upsert_remote_link(
             existing.remote_work_item_id,
         ) != (project_id, workspace_binding_id, remote_work_item_id):
             raise ValueError("remote task identity cannot be rebound")
+        if (
+            existing is not None
+            and existing.publication_policy != publication_policy
+        ):
+            raise ValueError("remote publication policy is immutable")
         conn.execute(
             "INSERT INTO kanban_remote_links "
             "(task_id, project_id, workspace_binding_id, remote_work_item_id, "
-            " lease_status, sync_status, last_error, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, 'none', ?, ?, ?, ?) "
+            " lease_status, publication_policy, sync_status, last_error, "
+            " created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, 'none', ?, ?, ?, ?, ?) "
             "ON CONFLICT(task_id) DO UPDATE SET "
             "sync_status=excluded.sync_status, last_error=excluded.last_error, "
             "updated_at=excluded.updated_at",
@@ -2561,6 +2611,7 @@ def upsert_remote_link(
                 project_id,
                 workspace_binding_id,
                 remote_work_item_id,
+                publication_policy,
                 sync_status,
                 last_error,
                 now,
@@ -2715,9 +2766,7 @@ def _enqueue_remote_terminal_result_in_txn(
     link = get_remote_link(conn, task_id)
     if (
         link is None
-        or link.lease_status != "acquired"
-        or not link.lease_token
-        or link.sync_status == "org_run_gated"
+        or link.publication_policy == "org_run_gated"
     ):
         return None
     operation = "complete" if success else "fail"

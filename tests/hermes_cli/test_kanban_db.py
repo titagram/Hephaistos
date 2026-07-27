@@ -118,6 +118,27 @@ def test_remote_link_rejects_cross_task_remote_identity(kanban_home):
             )
 
 
+def test_remote_link_publication_policy_is_immutable(kanban_home):
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="ordinary remote")
+        kb.upsert_remote_link(
+            conn,
+            task_id=task_id,
+            project_id="p",
+            workspace_binding_id="b",
+            remote_work_item_id="w",
+        )
+        with pytest.raises(ValueError, match="publication policy is immutable"):
+            kb.upsert_remote_link(
+                conn,
+                task_id=task_id,
+                project_id="p",
+                workspace_binding_id="b",
+                remote_work_item_id="w",
+                publication_policy="org_run_gated",
+            )
+
+
 def test_remote_link_rejects_concurrent_rebind_after_initial_lookup(
     kanban_home, monkeypatch
 ):
@@ -570,6 +591,74 @@ def test_connect_migrates_legacy_db_before_optional_column_indexes(tmp_path):
     assert "idx_tasks_tenant" in indexes
     assert "idx_tasks_idempotency" in indexes
     assert "idx_events_run" in indexes
+
+
+def test_connect_migrates_legacy_remote_gate_to_publication_policy(tmp_path):
+    """Mutable legacy sync state is backfilled into the immutable gate column."""
+    db_path = tmp_path / "legacy-remote-policy.db"
+    with kb.connect(db_path) as conn:
+        task_id = kb.create_task(conn, title="legacy org execution")
+        kb.upsert_remote_link(
+            conn,
+            task_id=task_id,
+            project_id="p",
+            workspace_binding_id="b",
+            remote_work_item_id="w",
+            sync_status="org_run_gated",
+        )
+        kb.set_remote_lease(
+            conn,
+            task_id,
+            lease_token="lease-1",
+            lease_status="acquired",
+        )
+
+    raw = sqlite3.connect(str(db_path))
+    raw.execute("DROP INDEX idx_remote_links_binding")
+    raw.execute("ALTER TABLE kanban_remote_links RENAME TO old_remote_links")
+    raw.execute("""
+        CREATE TABLE kanban_remote_links (
+            task_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            workspace_binding_id TEXT NOT NULL,
+            remote_work_item_id TEXT NOT NULL,
+            lease_token TEXT,
+            lease_status TEXT NOT NULL DEFAULT 'none',
+            sync_status TEXT NOT NULL DEFAULT 'linked',
+            last_error TEXT,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            UNIQUE(project_id, workspace_binding_id, remote_work_item_id)
+        )
+    """)
+    raw.execute(
+        "INSERT INTO kanban_remote_links "
+        "(task_id, project_id, workspace_binding_id, remote_work_item_id, "
+        " lease_token, lease_status, sync_status, last_error, created_at, updated_at) "
+        "SELECT task_id, project_id, workspace_binding_id, remote_work_item_id, "
+        "lease_token, lease_status, sync_status, last_error, created_at, updated_at "
+        "FROM old_remote_links"
+    )
+    raw.execute("DROP TABLE old_remote_links")
+    raw.execute(
+        "CREATE INDEX idx_remote_links_binding "
+        "ON kanban_remote_links(workspace_binding_id, sync_status)"
+    )
+    raw.commit()
+    raw.close()
+    kb._INITIALIZED_PATHS.discard(str(db_path.resolve()))
+
+    with kb.connect(db_path) as migrated:
+        link = kb.get_remote_link(migrated, task_id)
+        columns = {
+            row["name"]
+            for row in migrated.execute("PRAGMA table_info(kanban_remote_links)")
+        }
+
+    assert "publication_policy" in columns
+    assert link.publication_policy == "org_run_gated"
+    assert link.sync_status == "leased"
+    assert link.lease_status == "acquired"
 
 
 # ---------------------------------------------------------------------------

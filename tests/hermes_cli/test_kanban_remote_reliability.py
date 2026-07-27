@@ -6,6 +6,7 @@ import threading
 import time
 from pathlib import Path
 
+import httpx
 import pytest
 
 from hermes_cli import hades_kanban_sync as remote_sync
@@ -14,6 +15,22 @@ from hermes_cli import kanban_backend
 from hermes_cli import kanban_db as kb
 from hermes_cli.hades_backend_client import HadesBackendError
 from hermes_cli.kanban_backend import KanbanBackendContext, KanbanSyncReport
+
+
+def _wrapped_connect_error(secret: str = "super-secret") -> HadesBackendError:
+    """Match the production Hades client: HTTP errors are wrapped with a cause."""
+    request = httpx.Request("POST", "https://hades.invalid/agent/work-items")
+    transport = httpx.ConnectError(
+        f"token={secret} connection refused",
+        request=request,
+    )
+    try:
+        raise transport
+    except httpx.TransportError as exc:
+        try:
+            raise HadesBackendError(str(exc)) from exc
+        except HadesBackendError as wrapped:
+            return wrapped
 
 
 def _child_try_sync_lock(db_path: str, queue) -> None:
@@ -203,7 +220,7 @@ def test_remote_heartbeat_is_wired_to_local_worker_heartbeat(monkeypatch):
 @pytest.mark.parametrize(
     ("exc", "expected_status"),
     [
-        (ConnectionError("token=super-secret transport down"), "acquired"),
+        (_wrapped_connect_error(), "acquired"),
         (
             HadesBackendError(
                 "token=super-secret lease expired",
@@ -245,7 +262,7 @@ def test_remote_heartbeat_classifies_transport_vs_expiry(monkeypatch, exc, expec
 @pytest.mark.parametrize(
     ("failure", "action", "reason"),
     [
-        (ConnectionError("offline"), "defer", "remote_backend_unavailable"),
+        (_wrapped_connect_error("offline-secret"), "defer", "remote_backend_unavailable"),
         (
             HadesBackendError("forbidden token=secret-value", status_code=403),
             "supersede",
@@ -282,6 +299,121 @@ def test_admission_has_structured_transport_and_permanent_outcomes(
     assert decision.action == action
     assert decision.reason == reason
     assert "secret-value" not in decision.reason
+
+
+def test_admission_classifies_wrapped_transport_during_client_construction():
+    kb.init_db()
+
+    def unavailable_factory(_context):
+        raise _wrapped_connect_error("factory-secret")
+
+    with kb.connect() as conn:
+        task_id = kb.create_task(conn, title="remote", assignee="default")
+        kb.upsert_remote_link(
+            conn,
+            task_id=task_id,
+            project_id="project-1",
+            workspace_binding_id="binding-1",
+            remote_work_item_id="work-1",
+        )
+        decision = remote_sync.make_remote_admission(
+            conn,
+            context=_linked_context(),
+            client_factory=unavailable_factory,
+        )(kb.get_task(conn, task_id))
+        link = kb.get_remote_link(conn, task_id)
+
+    assert decision.action == "defer"
+    assert decision.reason == "remote_backend_unavailable"
+    assert "factory-secret" not in (link.last_error or "")
+
+
+def test_wrapped_transport_heartbeat_then_completion_keeps_durable_intent(
+    monkeypatch,
+):
+    """The production Hades wrapper must not erase a live lease or its result."""
+    kb.init_db()
+
+    class Client:
+        def heartbeat_agent_work_item(self, *_args, **_kwargs):
+            raise _wrapped_connect_error()
+
+    monkeypatch.setattr(
+        kanban_backend,
+        "resolve_kanban_backend_context",
+        lambda **_kwargs: _linked_context(),
+    )
+    monkeypatch.setattr(
+        kanban_backend,
+        "make_kanban_client",
+        lambda *_args, **_kwargs: Client(),
+    )
+    monkeypatch.setattr(kb, "_fire_remote_terminal_delivery_hook", lambda *a, **k: None)
+
+    with kb.connect() as conn:
+        task_id = _remote_task(conn)
+        assert remote_sync.heartbeat_remote_for_local_task_context(
+            conn, task_id,
+        ) == "transport_unavailable"
+        assert kb.get_remote_link(conn, task_id).lease_status == "acquired"
+        assert kb.complete_task(conn, task_id, summary="completed while offline")
+        row = conn.execute(
+            "SELECT status FROM kanban_sync_outbox WHERE task_id=?",
+            (task_id,),
+        ).fetchone()
+
+    assert row["status"] == "pending"
+
+
+def test_expired_lease_completion_stays_pending_for_reconciliation(monkeypatch):
+    """A permanent heartbeat result must not make terminal intent disappear."""
+    kb.init_db()
+    calls: list[str] = []
+
+    class HeartbeatClient:
+        def heartbeat_agent_work_item(self, *_args, **_kwargs):
+            raise HadesBackendError(
+                "token=secret expired",
+                status_code=410,
+                code="lease_expired",
+            )
+
+    class DeliveryClient:
+        def complete_agent_work_item(self, *_args, **_kwargs):
+            calls.append("delivered")
+
+    monkeypatch.setattr(
+        kanban_backend,
+        "resolve_kanban_backend_context",
+        lambda **_kwargs: _linked_context(),
+    )
+    monkeypatch.setattr(
+        kanban_backend,
+        "make_kanban_client",
+        lambda *_args, **_kwargs: HeartbeatClient(),
+    )
+    monkeypatch.setattr(kb, "_fire_remote_terminal_delivery_hook", lambda *a, **k: None)
+
+    with kb.connect() as conn:
+        task_id = _remote_task(conn)
+        assert remote_sync.heartbeat_remote_for_local_task_context(
+            conn, task_id,
+        ) == "expired"
+        assert kb.complete_task(conn, task_id, summary="done after expiry")
+        assert remote_sync.drain_remote_outbox(
+            conn,
+            context=_linked_context(),
+            client_factory=lambda _context: DeliveryClient(),
+            now=2_000_000_000,
+        ) == (0, 1)
+        row = conn.execute(
+            "SELECT status, last_error FROM kanban_sync_outbox WHERE task_id=?",
+            (task_id,),
+        ).fetchone()
+
+    assert calls == []
+    assert row["status"] == "pending"
+    assert "reconciliation" in row["last_error"]
 
 
 def test_offline_exact_context_reuses_persisted_lease_without_client(monkeypatch):

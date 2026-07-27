@@ -560,7 +560,26 @@ def create_org_run(
     board: str | None = None,
     activate: bool = True,
 ) -> OrgRunCreated:
-    """Create or recover an idempotent OrgRun graph."""
+    """Create or recover an idempotent OrgRun graph atomically."""
+    with kb.write_txn(conn):
+        return _create_org_run_in_txn(
+            conn,
+            plan,
+            validation,
+            board=board,
+            activate=activate,
+        )
+
+
+def _create_org_run_in_txn(
+    conn: sqlite3.Connection,
+    plan: ExecutionPortfolio,
+    validation: PortfolioValidation,
+    *,
+    board: str | None,
+    activate: bool,
+) -> OrgRunCreated:
+    """Materialize the graph and immutable remote publication policy."""
     if plan.org_run_id == "":
         raise ValueError("org_run_id is required")
     created_by = "org-orchestrator"
@@ -579,6 +598,17 @@ def create_org_run(
     )
     existing = _topology_from_blackboard(conn, anchor_id)
     if existing is not None:
+        for task in plan.tasks:
+            remote = existing.remote_tasks.get(task.remote_task_id)
+            if remote is not None:
+                kb.upsert_remote_link(
+                    conn,
+                    task_id=remote.execution_id,
+                    project_id=plan.project_id,
+                    workspace_binding_id=plan.workspace_binding_id,
+                    remote_work_item_id=task.work_item_id,
+                    publication_policy="org_run_gated",
+                )
         _repair_legacy_review_tasks(conn, existing)
         return existing
     anchor = kb.get_task(conn, anchor_id)
@@ -631,6 +661,14 @@ def create_org_run(
             idempotency_key=f"org-run:{plan.org_run_id}:{task.remote_task_id}:execute",
             board=board,
             workspace_kind=runnable_ws_kind,
+        )
+        kb.upsert_remote_link(
+            conn,
+            task_id=execution_ids[task.remote_task_id],
+            project_id=plan.project_id,
+            workspace_binding_id=plan.workspace_binding_id,
+            remote_work_item_id=task.work_item_id,
+            publication_policy="org_run_gated",
         )
         review_ids[task.remote_task_id] = kb.create_task(
             conn,

@@ -18,7 +18,7 @@ from typing import Any
 
 from hermes_cli import kanban_db as kb
 from hermes_cli.hades_backend_client import HadesBackendError, redact_secret
-from hermes_cli.kanban_backend import KanbanBackendContext
+from hermes_cli.kanban_backend import KanbanBackendContext, _is_transport_failure
 
 SYNC_MODES = {"off", "pull_only", "mirror"}
 
@@ -401,6 +401,81 @@ def claim_remote_for_local_task(
     )
 
 
+def _claim_failure_admission(
+    conn,
+    *,
+    task_id: str,
+    exc: BaseException,
+) -> kb.DispatchAdmission:
+    """Persist and route one claim failure without exposing backend secrets."""
+    failure = _remote_failure_class(exc)
+    kb.record_remote_link_state(
+        conn,
+        task_id,
+        sync_status=failure,
+        error=redact_secret(str(exc)),
+    )
+    if failure == "transport_unavailable":
+        return kb.DispatchAdmission("defer", "remote_backend_unavailable")
+    if failure == "authorization_rejected":
+        return kb.DispatchAdmission(
+            "supersede", "remote_authorization_rejected",
+        )
+    if failure == "validation_rejected":
+        return kb.DispatchAdmission(
+            "supersede", "remote_validation_rejected",
+        )
+    return kb.DispatchAdmission("supersede", "remote_identity_rejected")
+
+
+def claim_remote_work_item_outcome(
+    conn,
+    client: object,
+    *,
+    task_id: str,
+    work_item_id: str,
+    local_workspace_id: str,
+) -> kb.DispatchAdmission:
+    """Acquire one mapped lease with typed, secret-safe failure semantics."""
+    link = kb.get_remote_link(conn, task_id)
+    if link is None or link.remote_work_item_id != work_item_id:
+        return kb.DispatchAdmission("supersede", "remote_mapping_missing")
+    if link.lease_status == "acquired" and link.lease_token:
+        return kb.DispatchAdmission("allow", "remote lease already acquired")
+    if not local_workspace_id:
+        kb.record_remote_link_state(
+            conn,
+            task_id,
+            sync_status="identity_rejected",
+            error="remote local workspace identity is unavailable",
+        )
+        return kb.DispatchAdmission("supersede", "remote_identity_rejected")
+    try:
+        response = client.claim_agent_work_item(
+            work_item_id,
+            local_workspace_id=local_workspace_id,
+        )
+        lease_token = str(response.get("lease_token") or "").strip()
+        if not lease_token:
+            kb.record_remote_link_state(
+                conn,
+                task_id,
+                sync_status="claim_malformed",
+                error="remote claim returned no lease token",
+            )
+            return kb.DispatchAdmission("supersede", "remote_claim_malformed")
+    except Exception as exc:
+        return _claim_failure_admission(conn, task_id=task_id, exc=exc)
+    with kb.write_txn(conn):
+        kb.set_remote_lease(
+            conn, task_id, lease_token=lease_token, lease_status="acquired",
+        )
+        kb.record_remote_link_state(
+            conn, task_id, sync_status="leased", error=None,
+        )
+    return kb.DispatchAdmission("allow", "remote lease acquired")
+
+
 def claim_remote_work_item(
     conn,
     client: object,
@@ -409,28 +484,15 @@ def claim_remote_work_item(
     work_item_id: str,
     local_workspace_id: str,
 ) -> tuple[bool, str]:
-    """Acquire and persist a lease for an explicitly mapped local task."""
-    link = kb.get_remote_link(conn, task_id)
-    if link is None or link.remote_work_item_id != work_item_id:
-        return False, "remote work item mapping is missing"
-    if link.lease_status == "acquired" and link.lease_token:
-        return True, "remote lease already acquired"
-    if not local_workspace_id:
-        return False, "remote local workspace identity is unavailable"
-    try:
-        response = client.claim_agent_work_item(
-            work_item_id,
-            local_workspace_id=local_workspace_id,
-        )
-        lease_token = str(response.get("lease_token") or "").strip()
-        if not lease_token:
-            return False, "remote claim returned no lease token"
-    except Exception as exc:
-        return False, f"remote claim deferred: {exc}"
-    kb.set_remote_lease(
-        conn, task_id, lease_token=lease_token, lease_status="acquired",
+    """Compatibility tuple adapter over the structured claim outcome."""
+    outcome = claim_remote_work_item_outcome(
+        conn,
+        client,
+        task_id=task_id,
+        work_item_id=work_item_id,
+        local_workspace_id=local_workspace_id,
     )
-    return True, "remote lease acquired"
+    return outcome.action == "allow", outcome.reason
 
 
 def make_remote_admission(
@@ -473,50 +535,19 @@ def make_remote_admission(
         client = None
         try:
             client = _make_remote_client(context, client_factory)
-            response = client.claim_agent_work_item(
-                link.remote_work_item_id,
+            return claim_remote_work_item_outcome(
+                conn,
+                client,
+                task_id=task.id,
+                work_item_id=link.remote_work_item_id,
                 local_workspace_id=context.local_workspace_id,
             )
-            lease_token = str(response.get("lease_token") or "").strip()
-            if not lease_token:
-                kb.record_remote_link_state(
-                    conn,
-                    task.id,
-                    sync_status="claim_malformed",
-                    error="remote claim returned no lease token",
-                )
-                return kb.DispatchAdmission("supersede", "remote_claim_malformed")
-            kb.set_remote_lease(
-                conn,
-                task.id,
-                lease_token=lease_token,
-                lease_status="acquired",
-            )
-            kb.record_remote_link_state(
-                conn, task.id, sync_status="leased", error=None,
-            )
         except Exception as exc:
-            failure = _remote_failure_class(exc)
-            kb.record_remote_link_state(
-                conn,
-                task.id,
-                sync_status=failure,
-                error=redact_secret(str(exc)),
+            return _claim_failure_admission(
+                conn, task_id=task.id, exc=exc,
             )
-            if failure == "transport_unavailable":
-                return kb.DispatchAdmission("defer", "remote_backend_unavailable")
-            if failure == "authorization_rejected":
-                return kb.DispatchAdmission(
-                    "supersede", "remote_authorization_rejected",
-                )
-            if failure == "validation_rejected":
-                return kb.DispatchAdmission(
-                    "supersede", "remote_validation_rejected",
-                )
-            return kb.DispatchAdmission("supersede", "remote_identity_rejected")
         finally:
             _close_client(client)
-        return kb.DispatchAdmission("allow", "remote lease acquired")
 
     return admission
 
@@ -537,8 +568,6 @@ def heartbeat_remote_for_local_task(conn, client: object, task_id: str) -> bool:
 
 
 def _remote_failure_class(exc: BaseException) -> str:
-    if isinstance(exc, (ConnectionError, TimeoutError, OSError)):
-        return "transport_unavailable"
     if isinstance(exc, HadesBackendError):
         status = exc.status_code
         if status is not None and (status == 408 or status == 429 or status >= 500):
@@ -547,6 +576,11 @@ def _remote_failure_class(exc: BaseException) -> str:
             return "authorization_rejected"
         if status in {400, 422}:
             return "validation_rejected"
+        if status is not None:
+            return "identity_rejected"
+    if _is_transport_failure(exc):
+        return "transport_unavailable"
+    if isinstance(exc, HadesBackendError):
         return "identity_rejected"
     if isinstance(exc, (PermissionError, ValueError, TypeError, KeyError)):
         return "validation_rejected"
@@ -747,8 +781,6 @@ def _deliver_remote_outbox_entry(
         or context.mode != "linked"
         or context.project_id != getattr(link, "project_id", None)
         or context.workspace_binding_id != getattr(link, "workspace_binding_id", None)
-        or link.lease_status != "acquired"
-        or not link.lease_token
     ):
         kb.mark_remote_result_retry(
             conn,
@@ -756,6 +788,16 @@ def _deliver_remote_outbox_entry(
             error="remote backend context or lease is unavailable",
             next_attempt_at=_delivery_retry_at(entry, now),
             dead_letter=True,
+            claim_token=entry.claim_token,
+        )
+        return False
+    if link.lease_status != "acquired" or not link.lease_token:
+        kb.mark_remote_result_retry(
+            conn,
+            entry.id,
+            error="remote lease reconciliation is required before delivery",
+            next_attempt_at=_delivery_retry_at(entry, now),
+            dead_letter=False,
             claim_token=entry.claim_token,
         )
         return False
