@@ -59,7 +59,100 @@ def test_init_creates_expected_tables(kanban_home):
             "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
         ).fetchall()
     names = {r["name"] for r in rows}
-    assert {"tasks", "task_links", "task_comments", "task_events"} <= names
+    assert {
+        "tasks",
+        "task_links",
+        "task_comments",
+        "task_events",
+        "kanban_remote_links",
+    } <= names
+
+
+def test_remote_link_is_unique_per_local_and_remote_identity(kanban_home):
+    """Repeated linking retains identity while updating sync metadata."""
+    kb.init_db()
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="remote")
+        link = kb.upsert_remote_link(
+            conn,
+            task_id=task_id,
+            project_id="project-1",
+            workspace_binding_id="binding-1",
+            remote_work_item_id="work-1",
+        )
+        same = kb.upsert_remote_link(
+            conn,
+            task_id=task_id,
+            project_id="project-1",
+            workspace_binding_id="binding-1",
+            remote_work_item_id="work-1",
+        )
+
+        assert link == same
+        assert kb.get_remote_link(conn, task_id) == link
+        assert kb.list_remote_links(conn) == [link]
+
+
+def test_remote_link_rejects_cross_task_remote_identity(kanban_home):
+    """A remote work item cannot be linked to more than one local task."""
+    kb.init_db()
+    with kb.connect_closing() as conn:
+        first = kb.create_task(conn, title="first")
+        second = kb.create_task(conn, title="second")
+        kb.upsert_remote_link(
+            conn,
+            task_id=first,
+            project_id="p",
+            workspace_binding_id="b",
+            remote_work_item_id="w",
+        )
+
+        with pytest.raises(sqlite3.IntegrityError):
+            kb.upsert_remote_link(
+                conn,
+                task_id=second,
+                project_id="p",
+                workspace_binding_id="b",
+                remote_work_item_id="w",
+            )
+
+
+def test_remote_link_lease_requires_a_link_and_valid_status(kanban_home):
+    """Lease updates persist only for an existing remote link and known state."""
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="lease")
+
+        with pytest.raises(KeyError):
+            kb.set_remote_lease(
+                conn,
+                task_id,
+                lease_token="lease-1",
+                lease_status="acquired",
+            )
+
+        kb.upsert_remote_link(
+            conn,
+            task_id=task_id,
+            project_id="p",
+            workspace_binding_id="b",
+            remote_work_item_id="w",
+        )
+        lease = kb.set_remote_lease(
+            conn,
+            task_id,
+            lease_token="lease-1",
+            lease_status="acquired",
+        )
+
+        assert lease.lease_token == "lease-1"
+        assert lease.lease_status == "acquired"
+        with pytest.raises(ValueError, match="invalid lease status: pending"):
+            kb.set_remote_lease(
+                conn,
+                task_id,
+                lease_token=None,
+                lease_status="pending",
+            )
 
 
 def test_connect_honors_kanban_busy_timeout_env(kanban_home, monkeypatch):

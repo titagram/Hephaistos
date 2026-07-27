@@ -1078,6 +1078,22 @@ class Attachment:
     created_at: int
 
 
+@dataclass(frozen=True)
+class RemoteLink:
+    """Persistent identity and synchronization state for a remote work item."""
+
+    task_id: str
+    project_id: str
+    workspace_binding_id: str
+    remote_work_item_id: str
+    lease_token: Optional[str]
+    lease_status: str
+    sync_status: str
+    last_error: Optional[str]
+    created_at: int
+    updated_at: int
+
+
 @dataclass
 class Event:
     id: int
@@ -1262,6 +1278,22 @@ CREATE TABLE IF NOT EXISTS kanban_notify_subs (
     last_event_id INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (task_id, platform, chat_id, thread_id)
 );
+
+CREATE TABLE IF NOT EXISTS kanban_remote_links (
+    task_id               TEXT PRIMARY KEY,
+    project_id            TEXT NOT NULL,
+    workspace_binding_id  TEXT NOT NULL,
+    remote_work_item_id   TEXT NOT NULL,
+    lease_token           TEXT,
+    lease_status          TEXT NOT NULL DEFAULT 'none',
+    sync_status           TEXT NOT NULL DEFAULT 'linked',
+    last_error            TEXT,
+    created_at            INTEGER NOT NULL,
+    updated_at            INTEGER NOT NULL,
+    UNIQUE(project_id, workspace_binding_id, remote_work_item_id)
+);
+CREATE INDEX IF NOT EXISTS idx_remote_links_binding
+ON kanban_remote_links(workspace_binding_id, sync_status);
 
 CREATE INDEX IF NOT EXISTS idx_tasks_assignee_status ON tasks(assignee, status);
 CREATE INDEX IF NOT EXISTS idx_tasks_status          ON tasks(status);
@@ -2341,6 +2373,114 @@ def write_txn(conn: sqlite3.Connection):
         # Post-commit file-length check: header page_count must match actual file pages.
         # A discrepancy means a torn-extend — raise now rather than silently corrupt.
         _check_file_length_invariant(conn)
+
+
+# ---------------------------------------------------------------------------
+# Remote links
+# ---------------------------------------------------------------------------
+
+_REMOTE_LINK_COLUMNS = (
+    "task_id, project_id, workspace_binding_id, remote_work_item_id, "
+    "lease_token, lease_status, sync_status, last_error, created_at, updated_at"
+)
+
+
+def _remote_link_from_row(row: sqlite3.Row) -> RemoteLink:
+    return RemoteLink(
+        task_id=row["task_id"],
+        project_id=row["project_id"],
+        workspace_binding_id=row["workspace_binding_id"],
+        remote_work_item_id=row["remote_work_item_id"],
+        lease_token=row["lease_token"],
+        lease_status=row["lease_status"],
+        sync_status=row["sync_status"],
+        last_error=row["last_error"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+def get_remote_link(
+    conn: sqlite3.Connection, task_id: str
+) -> Optional[RemoteLink]:
+    row = conn.execute(
+        f"SELECT {_REMOTE_LINK_COLUMNS} FROM kanban_remote_links WHERE task_id=?",
+        (task_id,),
+    ).fetchone()
+    return _remote_link_from_row(row) if row is not None else None
+
+
+def list_remote_links(conn: sqlite3.Connection) -> list[RemoteLink]:
+    rows = conn.execute(
+        f"SELECT {_REMOTE_LINK_COLUMNS} FROM kanban_remote_links "
+        "ORDER BY created_at ASC, task_id ASC"
+    ).fetchall()
+    return [_remote_link_from_row(row) for row in rows]
+
+
+def upsert_remote_link(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    project_id: str,
+    workspace_binding_id: str,
+    remote_work_item_id: str,
+    sync_status: str = "linked",
+    last_error: Optional[str] = None,
+) -> RemoteLink:
+    now = int(time.time())
+    existing = get_remote_link(conn, task_id)
+    if existing is not None and (
+        existing.project_id,
+        existing.workspace_binding_id,
+        existing.remote_work_item_id,
+    ) != (project_id, workspace_binding_id, remote_work_item_id):
+        raise ValueError("remote task identity cannot be rebound")
+    with write_txn(conn):
+        conn.execute(
+            "INSERT INTO kanban_remote_links "
+            "(task_id, project_id, workspace_binding_id, remote_work_item_id, "
+            " lease_status, sync_status, last_error, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, 'none', ?, ?, ?, ?) "
+            "ON CONFLICT(task_id) DO UPDATE SET "
+            "sync_status=excluded.sync_status, last_error=excluded.last_error, "
+            "updated_at=excluded.updated_at",
+            (
+                task_id,
+                project_id,
+                workspace_binding_id,
+                remote_work_item_id,
+                sync_status,
+                last_error,
+                now,
+                now,
+            ),
+        )
+    loaded = get_remote_link(conn, task_id)
+    assert loaded is not None
+    return loaded
+
+
+def set_remote_lease(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    lease_token: Optional[str],
+    lease_status: str,
+) -> RemoteLink:
+    if lease_status not in {"none", "acquired", "consumed", "expired"}:
+        raise ValueError(f"invalid lease status: {lease_status}")
+    with write_txn(conn):
+        changed = conn.execute(
+            "UPDATE kanban_remote_links SET lease_token=?, lease_status=?, "
+            "updated_at=? WHERE task_id=?",
+            (lease_token, lease_status, int(time.time()), task_id),
+        ).rowcount
+    if changed != 1:
+        raise KeyError(task_id)
+    loaded = get_remote_link(conn, task_id)
+    assert loaded is not None
+    return loaded
 
 
 # ---------------------------------------------------------------------------
