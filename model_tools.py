@@ -445,6 +445,15 @@ def _compute_tool_definitions(
             elif not quiet_mode:
                 print(f"⚠️  Unknown toolset: {toolset_name}")
 
+    if os.environ.get("HERMES_KANBAN_TASK"):
+        # A dispatcher-spawned worker cannot satisfy its lifecycle contract
+        # without the task-scoped handoff tools.  Profiles may disable the
+        # normal kanban surface for interactive chats, but that subtraction
+        # must not remove show/complete/block/heartbeat from a pinned worker.
+        # Registry check_fn gates still hide board-routing operations such as
+        # kanban_list and kanban_unblock from worker sessions.
+        tools_to_include.update(resolve_toolset("kanban"))
+
     # Plugin-registered tools are now resolved through the normal toolset
     # path — validate_toolset() / resolve_toolset() / get_all_toolsets()
     # all check the tool registry for plugin-provided toolsets.  No bypass

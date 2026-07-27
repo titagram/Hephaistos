@@ -1881,6 +1881,76 @@ def test_cli_complete_with_summary_and_metadata(kanban_home):
     assert r.metadata == {"files": 3}
 
 
+@pytest.mark.parametrize(
+    "handoff_args",
+    [
+        "",
+        '--summary "   "',
+        '--result "   "',
+    ],
+)
+def test_worker_cli_complete_requires_nonblank_handoff(
+    kanban_home, monkeypatch, handoff_args
+):
+    """A dispatcher worker must not close a run with no durable handoff."""
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="x", assignee="worker")
+        kb.claim_task(conn, tid)
+        run = kb.latest_run(conn, tid)
+        assert run is not None
+        run_id = run.id
+    finally:
+        conn.close()
+
+    monkeypatch.setenv("HERMES_KANBAN_TASK", tid)
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(run_id))
+    out = run_slash(f"complete {tid} {handoff_args}".strip())
+
+    assert "handoff" in out.lower()
+    conn = kb.connect()
+    try:
+        task = kb.get_task(conn, tid)
+        run = kb.latest_run(conn, tid)
+    finally:
+        conn.close()
+    assert task is not None
+    assert run is not None
+    assert task.status == "running"
+    assert run.ended_at is None
+
+
+def test_worker_cli_complete_cannot_bypass_handoff_with_duplicate_id(
+    kanban_home, monkeypatch
+):
+    """Repeating the worker task id must not turn an empty close into bulk mode."""
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="x", assignee="worker")
+        kb.claim_task(conn, tid)
+        run = kb.latest_run(conn, tid)
+        assert run is not None
+        run_id = run.id
+    finally:
+        conn.close()
+
+    monkeypatch.setenv("HERMES_KANBAN_TASK", tid)
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(run_id))
+    out = run_slash(f"complete {tid} {tid}")
+
+    assert "handoff" in out.lower()
+    conn = kb.connect()
+    try:
+        task = kb.get_task(conn, tid)
+        run = kb.latest_run(conn, tid)
+    finally:
+        conn.close()
+    assert task is not None
+    assert run is not None
+    assert task.status == "running"
+    assert run.ended_at is None
+
+
 def test_cli_edit_backfills_result_on_done_task(kanban_home):
     conn = kb.connect()
     try:

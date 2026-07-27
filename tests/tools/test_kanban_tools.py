@@ -87,6 +87,45 @@ def test_kanban_worker_env_overrides_profile_toolset_filter(monkeypatch, tmp_pat
     assert "kanban_list" not in names
 
 
+def test_kanban_worker_lifecycle_survives_disabled_kanban_toolset(
+    monkeypatch, tmp_path
+):
+    """A worker's mandatory handoff surface cannot be disabled by its profile.
+
+    Profiles may disable the normal kanban toolset to keep interactive chats
+    narrow.  Once the dispatcher pins HERMES_KANBAN_TASK, however, removing
+    lifecycle tools would make successful workers exit without recording a
+    terminal task state.
+    """
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_fake")
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+
+    import tools.kanban_tools  # ensure registered
+    from model_tools import _clear_tool_defs_cache, get_tool_definitions
+    from tools.registry import invalidate_check_fn_cache
+
+    invalidate_check_fn_cache()
+    _clear_tool_defs_cache()
+    schema = get_tool_definitions(
+        enabled_toolsets=["terminal"],
+        disabled_toolsets=["kanban"],
+        quiet_mode=True,
+    )
+    names = {s["function"].get("name") for s in schema if "function" in s}
+
+    assert {
+        "kanban_show",
+        "kanban_complete",
+        "kanban_block",
+        "kanban_heartbeat",
+        "kanban_comment",
+    }.issubset(names)
+    assert "kanban_list" not in names
+    assert "kanban_unblock" not in names
+
+
 def test_worker_with_kanban_toolset_still_hides_board_routing(monkeypatch, tmp_path):
     """Task scope wins over profile config for board-routing tools.
 

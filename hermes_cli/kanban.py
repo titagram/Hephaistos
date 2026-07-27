@@ -1870,6 +1870,25 @@ def _cmd_complete(args: argparse.Namespace) -> int:
         print("at least one task_id is required", file=sys.stderr)
         return 1
     summary = getattr(args, "summary", None)
+    result = getattr(args, "result", None)
+    worker_scoped = any(_worker_run_id_for(tid) is not None for tid in ids)
+    has_handoff = any(
+        isinstance(value, str) and bool(value.strip())
+        for value in (summary, result)
+    )
+    # Dispatcher workers must leave a durable handoff. Their prose final
+    # response is only written to a worker log, so an empty CLI completion
+    # otherwise closes the run with result/summary both NULL and silently
+    # loses the only downstream-readable account of the work. Manual
+    # completion remains backward-compatible. Check every id instead of only
+    # the single-id shape so repeating the worker id cannot bypass the gate.
+    if worker_scoped and not has_handoff:
+        print(
+            "kanban: worker completion requires --summary or --result so the "
+            "run has a durable handoff",
+            file=sys.stderr,
+        )
+        return 2
     raw_meta = getattr(args, "metadata", None)
     # Guard: structured handoff fields are per-run, so they'd be
     # copy-pasted identically across N runs — almost always a footgun.
@@ -1896,7 +1915,7 @@ def _cmd_complete(args: argparse.Namespace) -> int:
         for tid in ids:
             if not kb.complete_task(
                 conn, tid,
-                result=args.result,
+                result=result,
                 summary=summary,
                 metadata=metadata,
                 expected_run_id=_worker_run_id_for(tid),
