@@ -112,15 +112,15 @@ def _read_config_key(*path: str) -> Optional[str]:
 
 # Legacy preference order — preserves behaviour for users who set no
 # ``web.backend`` / ``web.<capability>_backend`` config key at all. Matches
-# the historic candidate order in :func:`tools.web_tools._get_backend`
-# (paid providers first, then self-hosted/free fallbacks). Filtered by
+# the candidate order in :func:`tools.web_tools._get_backend` (free and
+# self-hosted providers first, then paid fallbacks). Filtered by
 # ``is_available()`` at walk time so we don't surface a provider the user has
 # no credentials for.
 _LEGACY_PREFERENCE = (
-    "parallel",
     "searxng",
     "brave-free",
     "ddgs",
+    "parallel",
 )
 
 
@@ -140,9 +140,9 @@ def _resolve(configured: Optional[str], *, capability: str) -> Optional[WebSearc
     2. **Single-provider shortcut.** When only one registered provider
        supports *capability* AND ``is_available()`` reports True, return it.
 
-    3. **Legacy preference walk, filtered by availability.** Walk the
-       :data:`_LEGACY_PREFERENCE` order (parallel → searxng → brave-free →
-       ddgs) looking for a provider whose
+    3. **Preference walk, filtered by availability.** Walk the
+       :data:`_LEGACY_PREFERENCE` order (searxng → brave-free → ddgs →
+       parallel) looking for a provider whose
        ``supports_<capability>()`` is True AND whose ``is_available()`` is
        True. Matches the historic ``tools.web_tools._get_backend()``
        candidate order so users with credentials but no explicit config

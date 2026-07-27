@@ -189,7 +189,13 @@ class TestCmdUpdatePipUsesUvTool:
              patch("hermes_cli.config.is_uv_tool_install", return_value=True):
             _cmd_update_pip(SimpleNamespace())
 
-        assert mock_run.call_args[0][0] == ["/usr/local/bin/uv", "tool", "upgrade", "hermes-agent"]
+        install_call = mock_run.call_args_list[0]
+        assert install_call.args[0] == [
+            "/usr/local/bin/uv",
+            "tool",
+            "upgrade",
+            "hermes-agent",
+        ]
 
     @patch("subprocess.run")
     def test_runs_uv_pip_install_when_not_uv_tool(self, mock_run):
@@ -201,7 +207,8 @@ class TestCmdUpdatePipUsesUvTool:
              patch("hermes_cli.config.is_uv_tool_install", return_value=False):
             _cmd_update_pip(SimpleNamespace())
 
-        assert mock_run.call_args[0][0] == [
+        install_call = mock_run.call_args_list[0]
+        assert install_call.args[0] == [
             "/usr/local/bin/uv",
             "pip",
             "install",
@@ -218,7 +225,7 @@ class TestCmdUpdatePipUsesUvTool:
              patch("hermes_cli.config.is_uv_tool_install", return_value=False):
             _cmd_update_pip(SimpleNamespace())
 
-        cmd = mock_run.call_args[0][0]
+        cmd = mock_run.call_args_list[0].args[0]
         assert cmd[1:] == ["-m", "pip", "install", "--upgrade", "hermes-agent"]
 
     @patch("subprocess.run")
@@ -277,9 +284,14 @@ class TestCmdUpdatePipInstallLayouts:
              patch("hermes_cli.config.is_uv_tool_install", return_value=False):
             hm._cmd_update_pip(SimpleNamespace())
 
-        assert mock_run.call_args[0][0] == ["/usr/bin/pipx", "upgrade", "hermes-agent"]
+        install_call = mock_run.call_args_list[0]
+        assert install_call.args[0] == [
+            "/usr/bin/pipx",
+            "upgrade",
+            "hermes-agent",
+        ]
         # pipx upgrade ignores VIRTUAL_ENV; we must not set it.
-        assert "env" not in mock_run.call_args.kwargs
+        assert "env" not in install_call.kwargs
 
     @patch("subprocess.run")
     def test_pipx_layout_without_pipx_binary_treated_as_venv(
@@ -300,10 +312,11 @@ class TestCmdUpdatePipInstallLayouts:
             hm._cmd_update_pip(SimpleNamespace())
 
         # prefix != base_prefix, so this is treated as a venv -> overlay, no --system.
-        assert mock_run.call_args[0][0] == [
+        install_call = mock_run.call_args_list[0]
+        assert install_call.args[0] == [
             "/usr/bin/uv", "pip", "install", "--upgrade", "hermes-agent",
         ]
-        assert mock_run.call_args.kwargs["env"]["VIRTUAL_ENV"].endswith("hermes-agent")
+        assert install_call.kwargs["env"]["VIRTUAL_ENV"].endswith("hermes-agent")
 
     @patch("subprocess.run")
     def test_bare_pip_outside_venv_adds_system(self, mock_run, monkeypatch):
@@ -318,10 +331,11 @@ class TestCmdUpdatePipInstallLayouts:
              patch("hermes_cli.config.is_uv_tool_install", return_value=False):
             hm._cmd_update_pip(SimpleNamespace())
 
-        assert mock_run.call_args[0][0] == [
+        install_call = mock_run.call_args_list[0]
+        assert install_call.args[0] == [
             "/usr/bin/uv", "pip", "install", "--system", "--upgrade", "hermes-agent",
         ]
-        assert "env" not in mock_run.call_args.kwargs
+        assert "env" not in install_call.kwargs
 
     @patch("subprocess.run")
     def test_venv_exports_virtualenv_and_omits_system(self, mock_run, monkeypatch):
@@ -336,7 +350,11 @@ class TestCmdUpdatePipInstallLayouts:
              patch("hermes_cli.config.is_uv_tool_install", return_value=False):
             hm._cmd_update_pip(SimpleNamespace())
 
-        cmd = mock_run.call_args[0][0]
+        install_call = mock_run.call_args_list[0]
+        cmd = install_call.args[0]
         assert "--system" not in cmd
         assert cmd == ["/usr/bin/uv", "pip", "install", "--upgrade", "hermes-agent"]
-        assert mock_run.call_args.kwargs["env"]["VIRTUAL_ENV"] == "/home/u/.hermes/hermes-agent/venv"
+        assert (
+            install_call.kwargs["env"]["VIRTUAL_ENV"]
+            == "/home/u/.hermes/hermes-agent/venv"
+        )

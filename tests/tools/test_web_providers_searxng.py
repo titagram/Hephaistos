@@ -255,18 +255,6 @@ class TestGetBackendSearXNG:
         monkeypatch.setattr(web_tools, "_is_tool_gateway_ready", lambda: False)
         assert web_tools._get_backend() == "searxng"
 
-    def test_searxng_does_not_override_higher_priority_provider(self, monkeypatch):
-        """Tavily (higher priority than searxng) should win in auto-detect."""
-        from tools import web_tools
-        monkeypatch.setattr(web_tools, "_load_web_config", lambda: {})
-        monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
-        monkeypatch.delenv("FIRECRAWL_API_URL", raising=False)
-        monkeypatch.delenv("PARALLEL_API_KEY", raising=False)
-        monkeypatch.setenv("TAVILY_API_KEY", "tvly-key")
-        monkeypatch.setenv("SEARXNG_URL", "http://localhost:8080")
-        monkeypatch.setattr(web_tools, "_is_tool_gateway_ready", lambda: False)
-        assert web_tools._get_backend() == "tavily"
-
     def test_auto_detect_picks_searxng_when_url_only_in_hermes_config(self, monkeypatch):
         """#34290 follow-up: a config-only SEARXNG_URL (absent from process env)
         must still drive auto-detect via the now config-aware ``_has_env``."""
@@ -285,6 +273,15 @@ class TestGetBackendSearXNG:
             lambda key: "http://config-only:8080" if key == "SEARXNG_URL" else None,
         )
         monkeypatch.setattr(web_tools, "_is_tool_gateway_ready", lambda: False)
+        assert web_tools._get_backend() == "searxng"
+
+    def test_searxng_has_priority_over_paid_provider(self, monkeypatch):
+        from tools import web_tools
+
+        monkeypatch.setattr(web_tools, "_load_web_config", lambda: {})
+        monkeypatch.setenv("SEARXNG_URL", "http://localhost:8080")
+        monkeypatch.setenv("PARALLEL_API_KEY", "paid-key")
+
         assert web_tools._get_backend() == "searxng"
 
 

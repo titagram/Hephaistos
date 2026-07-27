@@ -182,7 +182,7 @@ def test_setup_gateway_skips_service_install_when_systemctl_missing(monkeypatch,
     out = capsys.readouterr().out
     assert "Messaging platforms configured!" in out
     assert "Start the gateway to bring your bots online:" in out
-    assert "hermes gateway" in out
+    assert "hades gateway" in out
 
 
 def test_setup_gateway_in_container_shows_docker_guidance(monkeypatch, capsys):
@@ -539,4 +539,3 @@ def test_prompt_yes_no_keyboard_interrupt_still_exits(monkeypatch):
 
     with pytest.raises(SystemExit):
         setup_mod.prompt_yes_no("Install it now?", True)
-

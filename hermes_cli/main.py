@@ -12022,11 +12022,11 @@ _BUILTIN_SUBCOMMANDS = frozenset(
     {
         "acp", "auth", "backend", "backup", "bundles", "checkpoints", "claw", "completion",
         "computer-use",
-        "config", "cron", "curator", "dashboard", "serve", "debug", "doctor",
+        "config", "cron", "curator", "dashboard", "serve", "debug", "delegation", "doctor",
         "dump", "fallback", "gateway", "hooks", "import", "insights",
         "gnothi-seauton", "gui", "desktop", "kanban", "login", "logout", "logs", "lsp", "mcp", "memory", "migrate", "moa",
         "model", "pairing", "pets", "plugins", "portal", "postinstall", "profile",
-        "project", "proxy",
+        "project", "proxy", "org",
         "prompt-size",
         "review", "send", "sessions", "setup",
         "skills", "slack", "status", "tools", "uninstall", "update",

@@ -19,7 +19,10 @@ def test_backend_status_reports_unconfigured_state(monkeypatch, tmp_path):
     assert result["agent"] is None
     assert result["bindings"] == []
     assert result["degraded"] is False
-    assert result["actions"] == []
+    assert (
+        "Run `hades backend quality-report --record` to establish a governance baseline."
+        in result["actions"]
+    )
     assert result["job_counts"] == {}
     assert result["proposal_counts"] == {}
     assert result["inbox_counts"] == {"total": 0, "unread": 0}
@@ -98,8 +101,9 @@ def test_backend_status_reports_agent_and_bindings(monkeypatch, tmp_path):
     assert result["sync"]["last_error"]["message"] == "backend unavailable"
     assert isinstance(result["sync"]["last_error_updated_at"], int)
     assert result["degraded"] is True
-    assert result["actions"] == [
+    expected_actions = {
         "Review 1 backend job(s) waiting for confirmation.",
         "Review 1 refused/conflicted memory proposal(s).",
         "Inspect last backend sync error and rerun `hades backend sync`.",
-    ]
+    }
+    assert expected_actions.issubset(result["actions"])

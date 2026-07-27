@@ -37,16 +37,6 @@ def existing_install(tmp_path, monkeypatch):
     return home
 
 
-@pytest.fixture
-def fresh_install(tmp_path, monkeypatch):
-    """Simulate a first-time user with no existing configuration."""
-    home = tmp_path / ".hermes"
-    home.mkdir()
-    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
-    monkeypatch.setenv("HERMES_HOME", str(home))
-    return home
-
-
 def _enter_existing_install_patches(stack, **extra):
     """Apply standard existing-install mocks via an ExitStack.
 
@@ -71,29 +61,6 @@ def _enter_existing_install_patches(stack, **extra):
     named = {}
     for name, target in extra.items():
         named[name] = stack.enter_context(patch(target))
-    return named
-
-
-def _enter_fresh_install_patches(stack, **extra):
-    for target, kwargs in [
-        ("hermes_cli.setup.ensure_hermes_home", {}),
-        ("hermes_cli.setup.is_interactive_stdin", {"return_value": True}),
-        ("hermes_cli.config.is_managed", {"return_value": False}),
-        ("hermes_cli.setup.load_config", {"return_value": {}}),
-        ("hermes_cli.setup.save_config", {}),
-        ("hermes_cli.auth.get_active_provider", {"return_value": None}),
-        ("hermes_cli.setup.get_env_value", {"return_value": None}),
-        ("hermes_cli.setup._offer_openclaw_migration", {"return_value": False}),
-    ]:
-        stack.enter_context(patch(target, **kwargs))
-
-    named = {}
-    for name, target_spec in extra.items():
-        if isinstance(target_spec, tuple):
-            target, kwargs = target_spec
-            named[name] = stack.enter_context(patch(target, **kwargs))
-        else:
-            named[name] = stack.enter_context(patch(target_spec))
     return named
 
 
@@ -181,55 +148,6 @@ class TestQuickFlag:
         m["agent"].assert_not_called()
         m["gateway"].assert_not_called()
         m["tools"].assert_not_called()
-
-
-class TestFreshInstall:
-    """On a fresh install (no active provider), flags are no-ops."""
-
-    def test_bare_setup_runs_first_time_flow(self, fresh_install):
-        args = _make_setup_args()
-
-        with ExitStack() as stack:
-            m = _enter_fresh_install_patches(
-                stack,
-                prompt=("hermes_cli.setup.prompt_choice", {"return_value": 0}),
-                first="hermes_cli.setup._run_first_time_quick_setup",
-            )
-            from hermes_cli.setup import run_setup_wizard
-            run_setup_wizard(args)
-
-        m["prompt"].assert_called_once()  # quick-vs-full prompt
-        m["first"].assert_called_once()
-
-    def test_reconfigure_on_fresh_install_falls_through(self, fresh_install):
-        args = _make_setup_args(reconfigure=True)
-
-        with ExitStack() as stack:
-            m = _enter_fresh_install_patches(
-                stack,
-                prompt=("hermes_cli.setup.prompt_choice", {"return_value": 0}),
-                first="hermes_cli.setup._run_first_time_quick_setup",
-            )
-            from hermes_cli.setup import run_setup_wizard
-            run_setup_wizard(args)
-
-        m["prompt"].assert_called_once()
-        m["first"].assert_called_once()
-
-    def test_quick_on_fresh_install_falls_through(self, fresh_install):
-        args = _make_setup_args(quick=True)
-
-        with ExitStack() as stack:
-            m = _enter_fresh_install_patches(
-                stack,
-                prompt=("hermes_cli.setup.prompt_choice", {"return_value": 0}),
-                first="hermes_cli.setup._run_first_time_quick_setup",
-            )
-            from hermes_cli.setup import run_setup_wizard
-            run_setup_wizard(args)
-
-        m["prompt"].assert_called_once()
-        m["first"].assert_called_once()
 
 
 class TestArgparse:

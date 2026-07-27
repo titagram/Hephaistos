@@ -25,7 +25,7 @@ class TestHermesApiServerToolset:
         expected = [
             "terminal", "process",
             "read_file", "write_file", "patch", "search_files",
-            "vision_analyze", "image_generate",
+            "vision_analyze",
             "execute_code", "delegate_task",
             "todo", "memory", "session_search", "cronjob",
         ]

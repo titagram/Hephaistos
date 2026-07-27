@@ -219,16 +219,16 @@ class TestBraveFreeBackendWiring:
         monkeypatch.setattr(web_tools, "_ddgs_package_importable", lambda: False)
         assert web_tools._get_backend() == "brave-free"
 
-    def test_brave_free_does_not_override_paid_provider(self, monkeypatch):
-        """Tavily (higher priority) should win in auto-detect."""
+    def test_brave_free_has_priority_over_paid_provider(self, monkeypatch):
         from tools import web_tools
+
         monkeypatch.setattr(web_tools, "_load_web_config", lambda: {})
-        for key in ("FIRECRAWL_API_KEY", "FIRECRAWL_API_URL", "PARALLEL_API_KEY", "EXA_API_KEY", "SEARXNG_URL"):
-            monkeypatch.delenv(key, raising=False)
-        monkeypatch.setenv("TAVILY_API_KEY", "tvly")
         monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "BSAkey123")
-        monkeypatch.setattr(web_tools, "_is_tool_gateway_ready", lambda: False)
-        assert web_tools._get_backend() == "tavily"
+        monkeypatch.setenv("PARALLEL_API_KEY", "paid-key")
+        monkeypatch.delenv("SEARXNG_URL", raising=False)
+        monkeypatch.setattr(web_tools, "_ddgs_package_importable", lambda: False)
+
+        assert web_tools._get_backend() == "brave-free"
 
     def test_check_web_api_key_true_when_brave_free_configured(self, monkeypatch):
         from tools import web_tools

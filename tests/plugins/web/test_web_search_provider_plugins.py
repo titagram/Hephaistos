@@ -255,6 +255,20 @@ class TestRegistryResolution:
         assert result is not None
         assert result.is_available() is True
 
+    def test_free_provider_precedes_paid_provider_in_fallback(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _ensure_plugins_loaded()
+        from agent.web_search_registry import _resolve
+
+        monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "free-tier-key")
+        monkeypatch.setenv("PARALLEL_API_KEY", "paid-key")
+
+        result = _resolve(None, capability="search")
+
+        assert result is not None
+        assert result.name == "brave-free"
+
     def test_explicit_search_only_provider_for_extract_falls_back(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

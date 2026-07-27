@@ -274,8 +274,11 @@ def test_openapi_freezes_queue_gate_envelope_and_targeted_cursors():
             assert params[field]["schema"]["minLength"] == 1, (route, field)
             assert params[field]["schema"]["pattern"] == r".*\S.*", (route, field)
 
-    capabilities = spec["paths"]["/api/hades/v1/capabilities"]["get"]["responses"]["200"]
-    assert "persephone_agent_queue_v1" in json.dumps(capabilities)
+    capabilities = spec["components"]["schemas"]["CapabilitiesResponse"]
+    queue_gate = capabilities["properties"]["persephone_agent_queue_v1"]
+    assert "persephone_agent_queue_v1" in capabilities["required"]
+    assert queue_gate["type"] == "boolean"
+    assert queue_gate["const"] is True
 
 
 def test_operations_marks_agent_queue_as_a_capability_gated_handoff_contract():

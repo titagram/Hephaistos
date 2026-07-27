@@ -153,6 +153,7 @@ class TestTextOnlyMainSkippedForVision:
 model:
   provider: deepseek
   default: deepseek-v4-pro
+  supports_vision: false
 """)
         monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
         _fresh_modules()
@@ -241,6 +242,7 @@ auxiliary:
 model:
   provider: deepseek
   default: deepseek-v4-pro
+  supports_vision: false
 """)
         monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
         _fresh_modules()
@@ -256,6 +258,7 @@ model:
 model:
   provider: deepseek
   default: deepseek-v4-pro
+  supports_vision: false
 """)
         monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
         _fresh_modules()

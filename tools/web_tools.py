@@ -150,17 +150,14 @@ def _get_backend() -> str:
         return configured
 
     # Fallback for manual / legacy config — pick the highest-priority
-    # available backend. Explicit user credentials (TAVILY_API_KEY etc.)
-    # beat the managed-tool-gateway probe so a deliberate setup is not
-    # pre-empted by a Nous OAuth token whose subscription tier may not
-    # actually grant web-search access (the gateway then fails at runtime
-    # with "no subscription" and the tool returns an error to the agent
-    # without falling back). Free-tier backends trail the paid ones.
+    # available backend. Free and self-hosted providers precede paid
+    # providers so an unconfigured fallback does not incur avoidable cost.
+    # Explicit ``web.backend`` configuration above always wins.
     backend_candidates = (
-        ("parallel", _has_env("PARALLEL_API_KEY")),
         ("searxng", _has_env("SEARXNG_URL")),
         ("brave-free", _has_env("BRAVE_SEARCH_API_KEY")),
         ("ddgs", _ddgs_package_importable()),
+        ("parallel", _has_env("PARALLEL_API_KEY")),
     )
     for backend, available in backend_candidates:
         if available:

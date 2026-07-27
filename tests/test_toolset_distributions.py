@@ -60,13 +60,13 @@ class TestSampleToolsetsFromDistribution:
             sample_toolsets_from_distribution("nonexistent")
 
     def test_default_returns_all_toolsets(self):
-        # default has all at 100%, so all should be selected
+        from hermes_cli.hades_exclusions import is_excluded_toolset
+
         result = sample_toolsets_from_distribution("default")
         assert len(result) > 0
-        # With 100% probability, all valid toolsets should be present
         dist = get_distribution("default")
         for ts in dist["toolsets"]:
-            assert ts in result
+            assert (ts in result) is not is_excluded_toolset(ts)
 
     def test_minimal_returns_web_only(self):
         result = sample_toolsets_from_distribution("minimal")

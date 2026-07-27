@@ -87,9 +87,16 @@ class TestCmdUpdatePip:
 
         hm._cmd_update_pip(mock_args)
 
-        assert mock_run.call_count == 1
-        assert mock_run.call_args.args[0] == ["/usr/bin/uv", "pip", "install", "--upgrade", "hermes-agent"]
-        assert mock_run.call_args.kwargs["env"]["VIRTUAL_ENV"] == "/tmp/hermes-launcher-venv"
+        assert mock_run.call_count == 2
+        install_call = mock_run.call_args_list[0]
+        assert install_call.args[0] == [
+            "/usr/bin/uv",
+            "pip",
+            "install",
+            "--upgrade",
+            "hermes-agent",
+        ]
+        assert install_call.kwargs["env"]["VIRTUAL_ENV"] == "/tmp/hermes-launcher-venv"
 
     @patch("shutil.which", return_value="/usr/bin/uv")
     @patch("subprocess.run")
@@ -105,8 +112,8 @@ class TestCmdUpdatePip:
 
         hm._cmd_update_pip(mock_args)
 
-        assert mock_run.call_count == 1
-        assert "env" not in mock_run.call_args.kwargs
+        assert mock_run.call_count == 2
+        assert "env" not in mock_run.call_args_list[0].kwargs
 
 
 class TestCmdUpdateTermuxUvBootstrap:
