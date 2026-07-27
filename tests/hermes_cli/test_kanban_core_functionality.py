@@ -26,6 +26,31 @@ from hermes_cli.kanban import run_slash
 
 
 # ---------------------------------------------------------------------------
+# Local-first backend independence
+# ---------------------------------------------------------------------------
+
+def test_local_only_board_completes_without_backend_configuration(kanban_home, monkeypatch):
+    """A board with no backend database, token, or binding stays operational."""
+    monkeypatch.setattr("hermes_cli.profiles.profile_exists", lambda _name: True)
+    kb.init_db(board="offline")
+    spawned = []
+
+    with kb.scoped_current_board("offline"), kb.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="offline work", assignee="leaf")
+        result = kb.dispatch_once(
+            conn,
+            spawn_fn=lambda task, _workspace: spawned.append(task.id) or 12345,
+        )
+
+        assert [spawned_task_id for spawned_task_id, *_ in result.spawned] == [task_id]
+        assert spawned == [task_id]
+        assert kb.complete_task(conn, task_id, result="offline complete")
+        task = kb.get_task(conn, task_id)
+        assert task is not None
+        assert task.status == "done"
+
+
+# ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
 

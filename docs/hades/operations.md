@@ -55,6 +55,46 @@ silently.
 `hades backend sync` remains the manual repair path and bypasses any background
 backoff. A successful manual sync clears stale background-sync failure state.
 
+### Local-first Kanban
+
+Kanban has its own local SQLite runtime and is usable without a backend
+database, workspace binding, agent token, or network connection. A board with
+no matching backend binding reports `local_only`; this is healthy, not a
+degraded state. Create, dispatch, review, complete, and inspect local cards as
+usual. Selecting `memory.provider: holographic` (or any other local memory
+provider) neither enables nor disables Kanban synchronization.
+
+Open a board in the existing authenticated local dashboard:
+
+```bash
+hades kanban serve --board ariadne
+```
+
+The server binds to `127.0.0.1` by default and reuses the existing dashboard;
+it does not start a second Kanban frontend or expose the board on the network.
+
+Inspect or explicitly run only the selected board's optional synchronization:
+
+```bash
+hades kanban sync --board ariadne --status
+hades kanban sync --board ariadne --status --json
+```
+
+When the workspace is linked and the backend is reachable, sync imports
+eligible remote cards and delivers queued terminal results. If that backend is
+temporarily unavailable, the board reports `backend_offline` but local-origin
+cards remain dispatchable. Remote-origin cards fail closed: without a valid
+lease they stay deferred with `remote_backend_unavailable` and are never
+silently converted into local work. A completed remote card whose result cannot
+be delivered is retained in the durable Kanban outbox and retried by later
+Kanban sync runs; do not mark its remote lifecycle delivered until the outbox
+reports success.
+
+Kanban sync is independent from general `hades backend sync` and memory
+synchronization. In particular, `memory.provider: holographic` keeps memory
+local and must not call backend-memory endpoints; it does not prevent an
+explicitly linked Kanban board from synchronizing its remote work items.
+
 ### Project Logbook delivery and recovery
 
 Logbook writes are first persisted locally, then sent by authenticated sync.

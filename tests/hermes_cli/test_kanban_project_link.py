@@ -12,8 +12,14 @@ from hermes_cli import projects_db as pdb
 
 
 @pytest.fixture
-def kanban_conn(tmp_path):
-    c = kb.connect(db_path=tmp_path / "kanban.db")
+def kanban_conn(tmp_path, monkeypatch):
+    """A board-backed connection so dispatch uses the same isolated lock path."""
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr("hermes_cli.kanban_db.Path.home", lambda: tmp_path)
+    kb.init_db()
+    c = kb.connect()
     try:
         yield c
     finally:
@@ -62,6 +68,34 @@ def test_unlinked_task_unchanged(kanban_conn):
     # No branch is persisted — the worker still owns the wt/<id> fallback for
     # genuinely ad-hoc worktree tasks, but unlinked scratch tasks have none.
     assert task.branch_name is None
+
+
+def test_project_linked_task_is_still_local_without_remote_link(
+    kanban_conn, monkeypatch, tmp_path,
+):
+    """A local project association never implies a backend lease requirement."""
+    monkeypatch.setattr("hermes_cli.profiles.profile_exists", lambda _name: True)
+    project = _make_project()
+    local_workspace = tmp_path / "local-project-workspace"
+    local_workspace.mkdir()
+    task_id = kb.create_task(
+        kanban_conn,
+        title="local project work",
+        project_id=project.slug,
+        assignee="leaf",
+        workspace_kind="dir",
+        workspace_path=str(local_workspace),
+    )
+    spawned = []
+
+    result = kb.dispatch_once(
+        kanban_conn,
+        spawn_fn=lambda task, _workspace: spawned.append(task.id) or 12345,
+    )
+
+    assert [spawned_task_id for spawned_task_id, *_ in result.spawned] == [task_id]
+    assert spawned == [task_id]
+    assert kb.get_remote_link(kanban_conn, task_id) is None
 
 
 def test_unknown_project_id_falls_back_gracefully(kanban_conn):
