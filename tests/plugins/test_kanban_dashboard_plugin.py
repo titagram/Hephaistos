@@ -205,7 +205,11 @@ def test_board_sync_coalesces_repeated_linked_gets_and_releases_after_run(client
 def test_board_sync_redacts_persisted_and_resolver_secrets(client, monkeypatch):
     from hermes_cli.kanban_backend import KanbanBackendContext
 
-    stored_secret = "Bearer stored-secret-value api_key=stored-api-key"
+    hades_agent_token = "hades_agent_0123456789ABCDEFGHJKMNPQRS|" + "A" * 64
+    stored_secret = (
+        "Bearer stored-secret-value api_key=stored-api-key "
+        "sk-live-abcdefghijk " + hades_agent_token
+    )
     with kb.connect_closing() as conn:
         kb.record_kanban_sync_state(
             conn, workspace_binding_id="binding", state="backend_offline",
@@ -224,19 +228,24 @@ def test_board_sync_redacts_persisted_and_resolver_secrets(client, monkeypatch):
     assert persisted is not None
     assert "stored-secret-value" not in persisted
     assert "stored-api-key" not in persisted
+    assert "sk-live-abcdefghijk" not in persisted
+    assert hades_agent_token not in persisted
     assert "backend refused" in persisted
     assert len(persisted) <= 500
 
     monkeypatch.setattr(
         "hermes_cli.kanban_backend.resolve_kanban_backend_context",
         lambda **_: (_ for _ in ()).throw(
-            RuntimeError("sync failed token=resolver-token Authorization: Bearer resolver-bearer"),
+            RuntimeError(
+                "sync failed token=Bearer leaked-token-value "
+                "Authorization: Bearer resolver-bearer"
+            ),
         ),
     )
     resolver = client.get("/api/plugins/kanban/board").json()["sync"]["last_error"]
 
     assert resolver is not None
-    assert "resolver-token" not in resolver
+    assert "leaked-token-value" not in resolver
     assert "resolver-bearer" not in resolver
     assert "sync failed" in resolver
 

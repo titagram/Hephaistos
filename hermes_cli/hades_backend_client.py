@@ -34,7 +34,7 @@ _SECRET_PATTERNS = (
     ),
     re.compile(r"sk-[A-Za-z0-9][A-Za-z0-9_\-]{6,}"),
     re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._\-]{8,}"),
-    re.compile(r"(?i)(token[=:]\s*)[A-Za-z0-9._\-]{8,}"),
+    re.compile(r"(?i)(token[=:]\s*(?:bearer\s+)?)[A-Za-z0-9._\-]{8,}"),
     re.compile(r"(?i)(api[_-]?key[=:]\s*)[A-Za-z0-9._\-]{8,}"),
 )
 _WIKI_PAGE_ID = re.compile(r"\A[0-9A-HJKMNP-TV-Z]{26}\Z")

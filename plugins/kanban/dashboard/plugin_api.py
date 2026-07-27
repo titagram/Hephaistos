@@ -38,7 +38,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
 import sqlite3
 import threading
 import time
@@ -157,28 +156,15 @@ BOARD_COLUMNS: list[str] = [
 _CARD_SUMMARY_PREVIEW_CHARS = 200
 _DASHBOARD_SYNC_LOCK = threading.Lock()
 _DASHBOARD_SYNC_INFLIGHT: set[tuple[str, str]] = set()
-_SYNC_SECRET_RE = re.compile(
-    r"(?ix)"
-    r"(?P<authorization>\bauthorization\s*:\s*bearer\s+)(?P<authorization_value>[^\s,;]+)"
-    r"|(?P<bearer>\bbearer\s+)(?P<bearer_value>[^\s,;]+)"
-    r"|\b(?P<key>api[_-]?key|access[_-]?token|refresh[_-]?token|token)"
-    r"(?P<separator>\s*[:=]\s*)(?P<value>[^\s,;]+)"
-)
 
 
 def _safe_sync_error(error: object | None) -> str | None:
     """Return a compact diagnostic without credentials from persisted errors."""
     if error is None:
         return None
+    from hermes_cli.hades_backend_client import redact_secret
 
-    def _redact(match: re.Match[str]) -> str:
-        if match.group("authorization"):
-            return f"{match.group('authorization')}[redacted]"
-        if match.group("bearer"):
-            return f"{match.group('bearer')}[redacted]"
-        return f"{match.group('key')}{match.group('separator')}[redacted]"
-
-    return _SYNC_SECRET_RE.sub(_redact, str(error))[:500]
+    return redact_secret(error)[:500]
 
 
 def _board_sync_payload(conn: sqlite3.Connection, *, board: str | None) -> dict[str, Any]:
