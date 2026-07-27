@@ -1116,7 +1116,7 @@ def _binding_contains_path(binding: db.WorkspaceBinding, path: str | Path) -> bo
         return False
 
 
-def _matching_workspace_binding_ids(
+def matching_workspace_binding_ids(
     *,
     cwd: str | Path | None = None,
     changed_paths: list[str] | tuple[str, ...] | set[str] | None = None,
@@ -1149,6 +1149,11 @@ def _matching_workspace_binding_ids(
     # repository root while preferring the most specific containing root.
     matches.sort(key=lambda binding: len(str(Path(binding.repo_root).expanduser().resolve())), reverse=True)
     return [matches[0].backend_workspace_binding_id] if matches else []
+
+
+def _matching_workspace_binding_ids(**kwargs):
+    """Backward-compatible private alias for workspace binding matching."""
+    return matching_workspace_binding_ids(**kwargs)
 
 
 def maybe_run_backend_sync_for_workspace(
