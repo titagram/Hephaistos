@@ -782,6 +782,7 @@ class HadesBackendMemoryProvider(MemoryProvider):
             quiet=True,
             project_id=self._binding.project_id,
             workspace_binding_ids=[self._binding.backend_workspace_binding_id],
+            include_memory=True,
         )
         return None
 

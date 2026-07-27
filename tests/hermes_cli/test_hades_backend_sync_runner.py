@@ -583,6 +583,11 @@ def test_sync_runner_logs_redacted_backend_errors(monkeypatch, tmp_path, caplog)
     from hermes_cli import hades_backend_db as hdb
     from hermes_cli.hades_backend_sync import run_backend_sync
 
+    monkeypatch.setattr(
+        "hermes_cli.hades_backend_sync.load_config_readonly",
+        lambda: {"memory": {"provider": "hades_backend"}},
+    )
+
     workspace = tmp_path / "repo"
     workspace.mkdir()
 
@@ -4063,3 +4068,152 @@ def test_background_sync_skips_when_already_running(monkeypatch, tmp_path):
 
     assert decision.status == "skipped"
     assert decision.reason == "already_running"
+
+
+def test_general_backend_sync_skips_memory_for_holographic(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(
+        "hermes_cli.hades_backend_sync.load_config_readonly",
+        lambda: {"memory": {"provider": "holographic"}},
+    )
+
+    from hermes_cli import hades_backend_db as hdb
+    from hermes_cli.hades_backend_sync import run_backend_sync
+
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn,
+            agent_id="a1",
+            project_id="p1",
+            base_url="https://backend.example",
+            label="test",
+            token_env_key="TOKEN_TEST",
+            capabilities={"jobs": True, "memory": True, "sync_git_tree": False, "populate_backend_ast": False},
+        )
+        hdb.upsert_workspace_binding(
+            conn,
+            project_id="p1",
+            agent_id="a1",
+            local_project_id="lw1",
+            workspace_fingerprint="fp1",
+            display_path=str(workspace),
+            repo_root=str(workspace),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="",
+            backend_workspace_binding_id="b1",
+        )
+
+    class JobsAndMemorySpy:
+        def __init__(self):
+            self.pull_jobs_calls = 0
+            self.memory_snapshot_calls = 0
+
+        def capabilities(self):
+            return {}
+
+        def list_inbox(self, **_payload):
+            return {"events": []}
+
+        def pull_jobs(self, **_payload):
+            self.pull_jobs_calls += 1
+            return {"jobs": []}
+
+        def memory_snapshot(self, **_payload):
+            self.memory_snapshot_calls += 1
+            return {"items": []}
+
+    client = JobsAndMemorySpy()
+    result = run_backend_sync(client_factory=lambda: client, quiet=True)
+
+    assert result.exit_code == 0
+    assert client.pull_jobs_calls == 1
+    assert client.memory_snapshot_calls == 0
+    assert result.summary["memory_enabled"] is False
+
+    forced_client = JobsAndMemorySpy()
+    forced = run_backend_sync(
+        client_factory=lambda: forced_client,
+        include_memory=True,
+        quiet=True,
+    )
+    assert forced.exit_code == 0
+    assert forced_client.memory_snapshot_calls == 1
+    assert forced.summary["memory_enabled"] is True
+
+    disabled_client = JobsAndMemorySpy()
+    disabled = run_backend_sync(
+        client_factory=lambda: disabled_client,
+        include_memory=False,
+        quiet=True,
+    )
+    assert disabled.exit_code == 0
+    assert disabled_client.memory_snapshot_calls == 0
+    assert disabled.summary["memory_enabled"] is False
+
+
+def test_background_failure_for_other_binding_does_not_degrade_current_status(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    from hermes_cli import hades_backend_db as hdb
+    from hermes_cli.hades_backend_status import load_backend_status_payload
+    from hermes_cli.hades_backend_sync import background_sync_state_key
+
+    workspace_a = tmp_path / "a"
+    workspace_b = tmp_path / "b"
+    workspace_a.mkdir()
+    workspace_b.mkdir()
+    with hdb.connect_closing() as conn:
+        for suffix, workspace in (("a", workspace_a), ("b", workspace_b)):
+            hdb.save_agent(
+                conn,
+                agent_id=f"agent-{suffix}",
+                project_id=f"project-{suffix}",
+                base_url="https://backend.example",
+                label=suffix,
+                token_env_key=f"TOKEN_{suffix.upper()}",
+                capabilities={"jobs": True, "memory": True},
+            )
+            hdb.upsert_workspace_binding(
+                conn,
+                project_id=f"project-{suffix}",
+                agent_id=f"agent-{suffix}",
+                local_project_id=f"local-{suffix}",
+                workspace_fingerprint=f"fingerprint-{suffix}",
+                display_path=str(workspace),
+                repo_root=str(workspace),
+                git_remote_display="",
+                git_remote_hash="",
+                head_commit="",
+                backend_workspace_binding_id=f"binding-{suffix}",
+            )
+        hdb.record_sync_state(
+            conn,
+            background_sync_state_key("binding-b"),
+            {"status": "failed", "last_error": "unsafe_structural_path"},
+        )
+        hdb.record_sync_state(
+            conn,
+            background_sync_state_key("binding-a"),
+            {"status": "ok", "last_error": "Bearer local-background-token"},
+        )
+        hdb.record_sync_state(
+            conn,
+            "last_sync_error",
+            {
+                "workspace_binding_id": "binding-b",
+                "project_id": "project-b",
+                "message": "Bearer should-not-affect-binding-a",
+            },
+        )
+
+    payload = load_backend_status_payload(cwd=workspace_a)
+
+    assert payload["sync"]["background"]["status"] == "ok"
+    assert payload["sync"]["other_bindings_failed"] == 1
+    assert payload["degraded"] is False
+    assert "local-background-token" not in str(payload["sync"]["background"])

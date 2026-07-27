@@ -14,6 +14,7 @@ import time
 from typing import Callable
 
 from hermes_cli import hades_backend_db as db
+from hermes_cli.config import cfg_get, load_config_readonly
 from hermes_cli.hades_artifact_hash import (
     artifact_payload_hash as _artifact_payload_hash,
     canonical_artifact_bytes,
@@ -24,7 +25,7 @@ logger = logging.getLogger("hermes_cli.hades_backend")
 
 @dataclass(frozen=True)
 class SyncResult:
-    summary: dict[str, int]
+    summary: dict[str, object]
     exit_code: int
 
 
@@ -32,7 +33,7 @@ class SyncResult:
 class BackgroundSyncDecision:
     status: str
     reason: str
-    summary: dict[str, int] | None = None
+    summary: dict[str, object] | None = None
 
 
 BACKGROUND_SYNC_STATE_KEY = "background_sync"
@@ -45,6 +46,34 @@ GRAPH_IMPORT_POLL_TIMEOUT_SECONDS = 180.0
 GRAPH_IMPORT_POLL_INTERVAL_SECONDS = 2.0
 _BACKGROUND_SYNC_LOCK = threading.Lock()
 _BACKGROUND_SYNC_RUNNING = False
+
+
+def background_sync_state_key(workspace_binding_id: str) -> str:
+    """Return the isolated background-sync state key for one binding."""
+    return f"{BACKGROUND_SYNC_STATE_KEY}:{workspace_binding_id}"
+
+
+def _background_sync_state_key(
+    workspace_binding_ids: list[str] | tuple[str, ...] | None,
+) -> str:
+    selected = [
+        str(binding_id).strip()
+        for binding_id in (workspace_binding_ids or [])
+        if str(binding_id or "").strip()
+    ]
+    return (
+        background_sync_state_key(selected[0])
+        if len(selected) == 1
+        else BACKGROUND_SYNC_STATE_KEY
+    )
+
+
+def _memory_sync_enabled(include_memory: bool | None) -> bool:
+    """Keep backend memory calls opt-in unless its provider owns memory."""
+    if include_memory is not None:
+        return bool(include_memory)
+    config = load_config_readonly()
+    return cfg_get(config, "memory", "provider", default="") == "hades_backend"
 
 
 def _logbook_summary_for_sync(
@@ -198,6 +227,7 @@ def run_backend_sync(
     quiet: bool = False,
     project_id: str | None = None,
     workspace_binding_ids: list[str] | tuple[str, ...] | None = None,
+    include_memory: bool | None = None,
 ) -> SyncResult:
     from hermes_cli import hades_backend_runtime as runtime
     from hermes_cli.hades_backend_cmd import (
@@ -221,6 +251,8 @@ def run_backend_sync(
     from hermes_cli.hades_persephone_store import get_cursor
 
     started_monotonic = time.monotonic()
+    memory_enabled = _memory_sync_enabled(include_memory)
+    background_state_key = _background_sync_state_key(workspace_binding_ids)
     with db.connect_closing() as conn:
         agent = db.get_default_agent(conn)
         bindings = db.list_workspace_bindings(conn, status="linked") if agent else []
@@ -280,6 +312,7 @@ def run_backend_sync(
             "failed": 0,
             "skipped": 0,
             "expired": len(expired_jobs),
+            "memory_enabled": memory_enabled,
             **initial_logbook_summary,
             "duration_ms": max(0, int((time.monotonic() - started_monotonic) * 1000)),
         }
@@ -454,21 +487,22 @@ def run_backend_sync(
             supported=queue_supported,
         )
 
-        try:
-            snapshots, synced, errors = _sync_memory(client, binding)
-            auth_observation["success"] = True
-            memory_snapshots += snapshots
-            proposals_synced += synced
-            proposal_errors += errors
-            sync_errors += errors
-        except Exception as exc:
-            if _is_unauthorized_error(exc):
-                auth_observation["unauthorized"] = True
-                auth_observation["unauthorized_errors"] += 1
-            sync_errors += 1
-            _record_sync_error(binding, str(exc))
-            if not quiet:
-                print(f"backend sync: failed to sync memory for {binding.display_path}: {redact_secret(str(exc))}")
+        if memory_enabled:
+            try:
+                snapshots, synced, errors = _sync_memory(client, binding)
+                auth_observation["success"] = True
+                memory_snapshots += snapshots
+                proposals_synced += synced
+                proposal_errors += errors
+                sync_errors += errors
+            except Exception as exc:
+                if _is_unauthorized_error(exc):
+                    auth_observation["unauthorized"] = True
+                    auth_observation["unauthorized_errors"] += 1
+                sync_errors += 1
+                _record_sync_error(binding, str(exc))
+                if not quiet:
+                    print(f"backend sync: failed to sync memory for {binding.display_path}: {redact_secret(str(exc))}")
 
         queue_key = (binding.project_id, binding_agent.agent_id)
         if not queue_supported or queue_key not in polled_agent_queues:
@@ -731,6 +765,7 @@ def run_backend_sync(
         "failed": failed,
         "skipped": skipped,
         "expired": expired,
+        "memory_enabled": memory_enabled,
         "memory_snapshots": memory_snapshots,
         "proposals_synced": proposals_synced,
         "proposal_errors": proposal_errors,
@@ -755,7 +790,7 @@ def run_backend_sync(
         db.record_sync_state(conn, "last_sync_summary", summary)
         if sync_errors == 0:
             db.clear_sync_state(conn, "last_sync_error")
-            db.clear_sync_state(conn, BACKGROUND_SYNC_STATE_KEY)
+            db.clear_sync_state(conn, background_state_key)
 
     logger.info(
         "hades_backend.sync.complete",
@@ -962,7 +997,8 @@ def maybe_run_backend_sync(
             project_id=project_id,
             workspace_binding_ids=workspace_binding_ids,
         )
-        state = db.get_sync_state(conn, BACKGROUND_SYNC_STATE_KEY) or {}
+        state_key = _background_sync_state_key(workspace_binding_ids)
+        state = db.get_sync_state(conn, state_key) or {}
     if agent is None or not bindings:
         return BackgroundSyncDecision("skipped", "not_configured")
 
@@ -986,7 +1022,8 @@ def maybe_run_backend_sync(
             "last_attempt_at": current,
             "failure_count": _as_int(state.get("failure_count")),
             "next_attempt_at": current + max(0, int(min_interval_seconds)),
-        }
+        },
+        state_key=state_key,
     )
 
     if run_inline:
@@ -1000,6 +1037,7 @@ def maybe_run_backend_sync(
             sync_runner=sync_runner,
             project_id=project_id,
             workspace_binding_ids=workspace_binding_ids,
+            state_key=state_key,
         )
 
     thread = threading.Thread(
@@ -1014,6 +1052,7 @@ def maybe_run_backend_sync(
             "sync_runner": sync_runner,
             "project_id": project_id,
             "workspace_binding_ids": workspace_binding_ids,
+            "state_key": state_key,
         },
         name="hades-backend-sync",
         daemon=True,
@@ -1033,6 +1072,7 @@ def _run_background_sync_once(
     sync_runner: Callable[..., SyncResult],
     project_id: str | None = None,
     workspace_binding_ids: list[str] | tuple[str, ...] | None = None,
+    state_key: str = BACKGROUND_SYNC_STATE_KEY,
 ) -> BackgroundSyncDecision:
     global _BACKGROUND_SYNC_RUNNING
     try:
@@ -1055,7 +1095,7 @@ def _run_background_sync_once(
                 "summary": result.summary,
                 "exit_code": result.exit_code,
             }
-            _record_background_sync_state(state)
+            _record_background_sync_state(state, state_key=state_key)
             return BackgroundSyncDecision("ran", "ok", result.summary)
 
         failure_count = _as_int(previous_state.get("failure_count")) + 1
@@ -1072,16 +1112,18 @@ def _run_background_sync_once(
             "summary": result.summary,
             "exit_code": result.exit_code,
         }
-        _record_background_sync_state(state)
+        _record_background_sync_state(state, state_key=state_key)
         return BackgroundSyncDecision("ran", "failed", result.summary)
     finally:
         with _BACKGROUND_SYNC_LOCK:
             _BACKGROUND_SYNC_RUNNING = False
 
 
-def _record_background_sync_state(value: dict) -> None:
+def _record_background_sync_state(
+    value: dict, *, state_key: str = BACKGROUND_SYNC_STATE_KEY,
+) -> None:
     with db.connect_closing() as conn:
-        db.record_sync_state(conn, BACKGROUND_SYNC_STATE_KEY, value)
+        db.record_sync_state(conn, state_key, value)
 
 
 def _filter_sync_bindings(

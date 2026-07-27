@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import re
 import time
@@ -11,7 +12,10 @@ from hermes_cli import hades_backend_db as db
 from hermes_cli import hades_backend_runtime as runtime
 from hermes_cli.config import load_config
 from hermes_cli.hades_backend_client import redact_secret
-from hermes_cli.hades_backend_sync import BACKGROUND_SYNC_STATE_KEY
+from hermes_cli.hades_backend_sync import (
+    BACKGROUND_SYNC_STATE_KEY,
+    background_sync_state_key,
+)
 
 ABSOLUTE_PATH_RE = re.compile(r"(?<![A-Za-z0-9:/])(?:/[^\s,;:]+)+")
 WINDOWS_PATH_RE = re.compile(r"\b[A-Za-z]:\\[^\s,;:]+")
@@ -27,7 +31,9 @@ PERSEPHONE_STATES = frozenset(
 )
 
 
-def load_backend_status_payload() -> dict[str, Any]:
+def load_backend_status_payload(
+    *, cwd: str | Path | None = None,
+) -> dict[str, Any]:
     """Return the canonical local Hades backend status payload."""
     config = load_config()
     memory_config = config.get("memory") if isinstance(config.get("memory"), dict) else {}
@@ -54,7 +60,7 @@ def load_backend_status_payload() -> dict[str, Any]:
         default_agent = db.get_default_agent(conn)
         current_binding = runtime.select_workspace_binding(
             profile_linked_bindings,
-            Path.cwd(),
+            Path(cwd or Path.cwd()),
             preferred_agent=default_agent,
         )
         agent = (
@@ -78,7 +84,35 @@ def load_backend_status_payload() -> dict[str, Any]:
             inbox_counts = db.count_inbox_events(conn)
             last_summary = db.get_sync_state(conn, "last_sync_summary")
             last_error = db.get_sync_state(conn, "last_sync_error")
-            background_sync = db.get_sync_state(conn, BACKGROUND_SYNC_STATE_KEY)
+            last_error_updated_at = db.get_sync_state_updated_at(
+                conn, "last_sync_error"
+            )
+            if (
+                current_binding is not None
+                and isinstance(last_error, dict)
+                and str(last_error.get("workspace_binding_id") or "")
+                != current_binding.backend_workspace_binding_id
+            ):
+                last_error = None
+                last_error_updated_at = None
+            scoped_background_key = (
+                background_sync_state_key(current_binding.backend_workspace_binding_id)
+                if current_binding is not None
+                else BACKGROUND_SYNC_STATE_KEY
+            )
+            background_sync = db.get_sync_state(conn, scoped_background_key)
+            background_sync_updated_at = db.get_sync_state_updated_at(
+                conn, scoped_background_key
+            )
+            if background_sync is None and scoped_background_key != BACKGROUND_SYNC_STATE_KEY:
+                background_sync = db.get_sync_state(conn, BACKGROUND_SYNC_STATE_KEY)
+                background_sync_updated_at = db.get_sync_state_updated_at(
+                    conn, BACKGROUND_SYNC_STATE_KEY
+                )
+            background_sync = _safe_background_sync_state(background_sync)
+            other_bindings_failed = _count_other_binding_failures(
+                conn, current_key=scoped_background_key
+            )
             last_quality_report = db.get_sync_state(conn, "last_quality_report")
             quality_report_history = db.get_sync_state(conn, QUALITY_REPORT_HISTORY_KEY)
             persephone = _load_persephone_status(
@@ -90,8 +124,6 @@ def load_backend_status_payload() -> dict[str, Any]:
                 if item.project_id == agent.project_id
             ]
             last_summary_updated_at = db.get_sync_state_updated_at(conn, "last_sync_summary")
-            last_error_updated_at = db.get_sync_state_updated_at(conn, "last_sync_error")
-            background_sync_updated_at = db.get_sync_state_updated_at(conn, BACKGROUND_SYNC_STATE_KEY)
             last_quality_report_updated_at = db.get_sync_state_updated_at(conn, "last_quality_report")
             quality_report_history_updated_at = db.get_sync_state_updated_at(conn, QUALITY_REPORT_HISTORY_KEY)
         else:
@@ -103,6 +135,7 @@ def load_backend_status_payload() -> dict[str, Any]:
             last_summary = None
             last_error = None
             background_sync = None
+            other_bindings_failed = 0
             last_quality_report = None
             quality_report_history = None
             persephone = _load_persephone_status(conn, agent=None, bindings=[])
@@ -125,6 +158,7 @@ def load_backend_status_payload() -> dict[str, Any]:
         last_summary=last_summary,
         last_error=last_error,
         background_sync=background_sync,
+        other_bindings_failed=other_bindings_failed,
         memory_provider=memory_provider,
         last_summary_updated_at=last_summary_updated_at,
         last_error_updated_at=last_error_updated_at,
@@ -235,6 +269,52 @@ def _safe_text(value: Any) -> str:
     return ABSOLUTE_PATH_RE.sub("[path]", redacted)
 
 
+def _safe_background_sync_state(value: Any) -> dict[str, Any] | None:
+    """Expose only diagnostic background state, never its raw error payload."""
+    if not isinstance(value, dict):
+        return None
+    result = {
+        key: value[key]
+        for key in (
+            "status",
+            "last_attempt_at",
+            "last_success_at",
+            "failure_count",
+            "next_attempt_at",
+            "exit_code",
+        )
+        if key in value
+    }
+    if isinstance(value.get("last_error"), str):
+        result["last_error"] = _safe_text(value["last_error"])
+    summary = value.get("summary")
+    if isinstance(summary, dict):
+        result["summary"] = {
+            str(key): item
+            for key, item in summary.items()
+            if type(item) in {bool, int, float}
+        }
+    return result
+
+
+def _count_other_binding_failures(conn: Any, *, current_key: str) -> int:
+    rows = conn.execute(
+        "SELECT key, value FROM sync_state WHERE key LIKE ?",
+        (f"{BACKGROUND_SYNC_STATE_KEY}:%",),
+    ).fetchall()
+    failed = 0
+    for row in rows:
+        if str(row["key"]) == current_key:
+            continue
+        try:
+            value = json.loads(row["value"])
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if isinstance(value, dict) and value.get("status") == "failed":
+            failed += 1
+    return failed
+
+
 def backend_status_payload(
     *,
     agent: Any,
@@ -248,6 +328,7 @@ def backend_status_payload(
     remote_awarenesses: dict[str, dict[str, Any]] | None = None,
     memory_provider: str = "local",
     background_sync: dict[str, Any] | None = None,
+    other_bindings_failed: int = 0,
     last_summary_updated_at: int | None = None,
     last_error_updated_at: int | None = None,
     background_sync_updated_at: int | None = None,
@@ -370,6 +451,7 @@ def backend_status_payload(
             "last_error_updated_at": last_error_updated_at,
             "background": background_sync,
             "background_updated_at": background_sync_updated_at,
+            "other_bindings_failed": _nonnegative_int(other_bindings_failed),
         },
         "persephone": persephone_state,
         "auth_quarantine": auth_quarantine_state,

@@ -55,6 +55,7 @@ def test_hades_backend_memory_provider_piggybacks_sync_once_per_interval(monkeyp
         "quiet": True,
         "project_id": "proj_1",
         "workspace_binding_ids": ["wb_1"],
+        "include_memory": True,
     }
 
 
@@ -215,6 +216,7 @@ def test_hades_backend_memory_provider_ignores_newer_more_specific_historical_bi
             "quiet": True,
             "project_id": "project_current",
             "workspace_binding_ids": ["binding_current"],
+            "include_memory": True,
         }
     ]
 
@@ -292,6 +294,7 @@ def test_hades_backend_memory_provider_revalidates_binding_when_default_agent_ch
             "quiet": True,
             "project_id": "project_b",
             "workspace_binding_ids": ["binding_b"],
+            "include_memory": True,
         }
     ]
 
