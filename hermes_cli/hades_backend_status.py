@@ -58,10 +58,11 @@ def load_backend_status_payload(
         # to the most recently configured agent.
         profile_linked_bindings = db.list_workspace_bindings(conn, status="linked")
         default_agent = db.get_default_agent(conn)
+        # Status belongs to the most-specific binding containing this cwd.
+        # The default agent is a fallback identity only when no binding matches.
         current_binding = runtime.select_workspace_binding(
             profile_linked_bindings,
             Path(cwd or Path.cwd()),
-            preferred_agent=default_agent,
         )
         agent = (
             db.get_agent(conn, current_binding.agent_id)
@@ -104,11 +105,6 @@ def load_backend_status_payload(
             background_sync_updated_at = db.get_sync_state_updated_at(
                 conn, scoped_background_key
             )
-            if background_sync is None and scoped_background_key != BACKGROUND_SYNC_STATE_KEY:
-                background_sync = db.get_sync_state(conn, BACKGROUND_SYNC_STATE_KEY)
-                background_sync_updated_at = db.get_sync_state_updated_at(
-                    conn, BACKGROUND_SYNC_STATE_KEY
-                )
             background_sync = _safe_background_sync_state(background_sync)
             other_bindings_failed = _count_other_binding_failures(
                 conn, current_key=scoped_background_key

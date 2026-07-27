@@ -1007,7 +1007,11 @@ def maybe_run_backend_sync(
         if next_attempt and current < next_attempt:
             return BackgroundSyncDecision("skipped", "backoff")
         last_attempt = _as_int(state.get("last_attempt_at"))
-        if last_attempt and current - last_attempt < max(0, int(min_interval_seconds)):
+        if (
+            state.get("status") != "failed"
+            and last_attempt
+            and current - last_attempt < max(0, int(min_interval_seconds))
+        ):
             return BackgroundSyncDecision("skipped", "interval")
 
     global _BACKGROUND_SYNC_RUNNING
@@ -1114,6 +1118,27 @@ def _run_background_sync_once(
         }
         _record_background_sync_state(state, state_key=state_key)
         return BackgroundSyncDecision("ran", "failed", result.summary)
+    except Exception as exc:
+        from hermes_cli.hades_backend_client import redact_secret
+
+        failure_count = _as_int(previous_state.get("failure_count")) + 1
+        delay = min(
+            max(0, int(max_backoff_seconds)),
+            max(0, int(failure_base_delay_seconds)) * (2 ** max(0, failure_count - 1)),
+        )
+        summary: dict[str, object] = {"error": 1}
+        state = {
+            "status": "failed",
+            "last_attempt_at": started_at,
+            "last_success_at": previous_state.get("last_success_at"),
+            "failure_count": failure_count,
+            "next_attempt_at": started_at + delay,
+            "summary": summary,
+            "exit_code": 1,
+            "last_error": redact_secret(str(exc)),
+        }
+        _record_background_sync_state(state, state_key=state_key)
+        return BackgroundSyncDecision("ran", "failed", summary)
     finally:
         with _BACKGROUND_SYNC_LOCK:
             _BACKGROUND_SYNC_RUNNING = False

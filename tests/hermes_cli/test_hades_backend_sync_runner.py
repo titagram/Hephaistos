@@ -4070,6 +4070,69 @@ def test_background_sync_skips_when_already_running(monkeypatch, tmp_path):
     assert decision.reason == "already_running"
 
 
+def test_background_sync_runner_exception_records_scoped_redacted_backoff(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    from hermes_cli import hades_backend_db as hdb
+    import hermes_cli.hades_backend_sync as sync
+
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn, agent_id="agent", project_id="project",
+            base_url="https://backend.example", label="test",
+            token_env_key="TOKEN_TEST", capabilities={"jobs": True},
+        )
+        hdb.upsert_workspace_binding(
+            conn, project_id="project", agent_id="agent",
+            local_project_id="local", workspace_fingerprint="fp",
+            display_path=str(workspace), repo_root=str(workspace),
+            git_remote_display="", git_remote_hash="", head_commit="",
+            backend_workspace_binding_id="binding-1",
+        )
+
+    def exploding_sync_runner(**_kwargs):
+        raise RuntimeError("Bearer background-secret")
+
+    decision = sync.maybe_run_backend_sync(
+        now=100,
+        run_inline=True,
+        failure_base_delay_seconds=30,
+        workspace_binding_ids=["binding-1"],
+        sync_runner=exploding_sync_runner,
+    )
+
+    with hdb.connect_closing() as conn:
+        state = hdb.get_sync_state(conn, sync.background_sync_state_key("binding-1"))
+
+    assert decision.status == "ran"
+    assert decision.reason == "failed"
+    assert state["status"] == "failed"
+    assert state["failure_count"] == 1
+    assert state["next_attempt_at"] == 130
+    assert "background-secret" not in state["last_error"]
+    assert sync._BACKGROUND_SYNC_RUNNING is False
+
+    skipped = sync.maybe_run_backend_sync(
+        now=129,
+        run_inline=True,
+        workspace_binding_ids=["binding-1"],
+        sync_runner=exploding_sync_runner,
+    )
+    assert skipped.reason == "backoff"
+
+    retried = sync.maybe_run_backend_sync(
+        now=130,
+        run_inline=True,
+        workspace_binding_ids=["binding-1"],
+        sync_runner=lambda **_kwargs: sync.SyncResult({"pulled": 0}, 0),
+    )
+    assert retried.reason == "ok"
+
+
 def test_general_backend_sync_skips_memory_for_holographic(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
     monkeypatch.setattr(

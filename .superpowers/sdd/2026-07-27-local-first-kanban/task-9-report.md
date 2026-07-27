@@ -50,3 +50,30 @@ showed every selected test passing before that teardown failure.
 
 - `git diff --check` clean.
 - No Kanban Task 10 documentation or live-validation files changed.
+
+## Fix Round 1
+
+Addressed three P1 review findings with RED/GREEN regressions:
+
+- Status now selects the most-specific binding containing the requested cwd
+  without default-agent preference; the default agent is used only when no cwd
+  binding exists.
+- A selected binding no longer falls back to the legacy aggregate
+  `background_sync` state. The aggregate remains available only when there is
+  no selected binding, so a historical/all-binding failure cannot degrade a
+  healthy current workspace.
+- Exceptions thrown by a background sync runner now persist a redacted,
+  binding-scoped failed state with exponential backoff and always release the
+  in-memory running guard. Backoff expiry is retry-eligible rather than being
+  masked by the normal success interval.
+
+Verification:
+
+```text
+python -m pytest tests/hermes_cli/test_hades_backend_sync_runner.py \
+  tests/hermes_cli/test_hades_backend_status.py \
+  tests/agent/test_hades_backend_memory_provider_sync.py \
+  tests/agent/test_hades_backend_conversation_sync.py \
+  tests/agent/test_turn_finalizer_cleanup_guard.py -q --basetemp=<fresh-temp>
+92 passed
+```

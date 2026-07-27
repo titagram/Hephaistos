@@ -412,6 +412,102 @@ def test_loaded_status_uses_identity_bound_to_current_workspace(
     assert payload["identity"]["workspace_binding"]["current_status"] == "partial"
 
 
+def test_loaded_status_prefers_nested_workspace_binding_over_default_agent(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    repo = tmp_path / "repo"
+    subproject = repo / "subproject"
+    subproject.mkdir(parents=True)
+
+    from hermes_cli import hades_backend_db as db
+    from hermes_cli.hades_backend_status import load_backend_status_payload
+    from hermes_cli.hades_backend_sync import background_sync_state_key
+
+    with db.connect_closing() as conn:
+        db.save_agent(
+            conn, agent_id="nested-agent", project_id="nested-project",
+            base_url="https://example.invalid", label="nested",
+            token_env_key="TOKEN_NESTED", capabilities={},
+        )
+        db.upsert_workspace_binding(
+            conn, project_id="nested-project", agent_id="nested-agent",
+            local_project_id="nested", workspace_fingerprint="nested",
+            display_path=str(subproject), repo_root=str(subproject),
+            git_remote_display="", git_remote_hash="", head_commit="",
+            backend_workspace_binding_id="nested-binding",
+        )
+        db.save_agent(
+            conn, agent_id="default-agent", project_id="default-project",
+            base_url="https://example.invalid", label="default",
+            token_env_key="TOKEN_DEFAULT", capabilities={},
+        )
+        db.upsert_workspace_binding(
+            conn, project_id="default-project", agent_id="default-agent",
+            local_project_id="default", workspace_fingerprint="default",
+            display_path=str(repo), repo_root=str(repo),
+            git_remote_display="", git_remote_hash="", head_commit="",
+            backend_workspace_binding_id="default-binding",
+        )
+        db.record_sync_state(
+            conn, background_sync_state_key("nested-binding"), {"status": "ok"},
+        )
+        db.record_sync_state(
+            conn, background_sync_state_key("default-binding"), {"status": "failed"},
+        )
+
+    monkeypatch.setattr(
+        "hermes_cli.hades_backend_status._load_remote_awarenesses",
+        lambda agent, bindings: {},
+    )
+    payload = load_backend_status_payload(cwd=subproject)
+
+    assert payload["agent"]["agent_id"] == "nested-agent"
+    assert [item["workspace_binding_id"] for item in payload["bindings"]] == [
+        "nested-binding"
+    ]
+    assert payload["sync"]["background"]["status"] == "ok"
+
+
+def test_loaded_status_does_not_fallback_to_failed_aggregate_for_current_binding(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+
+    from hermes_cli import hades_backend_db as db
+    from hermes_cli.hades_backend_status import load_backend_status_payload
+    from hermes_cli.hades_backend_sync import BACKGROUND_SYNC_STATE_KEY
+
+    with db.connect_closing() as conn:
+        db.save_agent(
+            conn, agent_id="agent", project_id="project",
+            base_url="https://example.invalid", label="current",
+            token_env_key="TOKEN_CURRENT", capabilities={},
+        )
+        db.upsert_workspace_binding(
+            conn, project_id="project", agent_id="agent",
+            local_project_id="current", workspace_fingerprint="current",
+            display_path=str(workspace), repo_root=str(workspace),
+            git_remote_display="", git_remote_hash="", head_commit="",
+            backend_workspace_binding_id="current-binding",
+        )
+        db.record_sync_state(
+            conn, BACKGROUND_SYNC_STATE_KEY,
+            {"status": "failed", "failure_count": 1},
+        )
+
+    monkeypatch.setattr(
+        "hermes_cli.hades_backend_status._load_remote_awarenesses",
+        lambda agent, bindings: {},
+    )
+    payload = load_backend_status_payload(cwd=workspace)
+
+    assert payload["sync"]["background"] is None
+    assert payload["degraded"] is False
+
+
 def test_loaded_status_reports_auth_quarantine_without_counting_receiver_routes(
     monkeypatch, tmp_path
 ) -> None:
