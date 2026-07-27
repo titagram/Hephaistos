@@ -3,7 +3,9 @@ from pathlib import Path
 from hermes_cli import kanban_db as kb
 from hermes_cli.hades_kanban_sync import (
     claim_remote_for_local_task,
+    drain_remote_outbox,
     heartbeat_remote_for_local_task,
+    make_remote_admission,
     migrate_legacy_remote_links,
     publish_remote_result,
     run_kanban_sync,
@@ -46,6 +48,18 @@ class FakeClient:
 
     def fail_agent_work_item(self, work_item_id, *, lease_token, message):
         self.failed = (work_item_id, lease_token, message)
+        return {}
+
+
+class FlakyCompletionClient:
+    def __init__(self, failures: int):
+        self.failures = failures
+        self.complete_calls = 0
+
+    def complete_agent_work_item(self, *args, **kwargs):
+        self.complete_calls += 1
+        if self.complete_calls <= self.failures:
+            raise ConnectionError("offline")
         return {}
 
 
@@ -222,6 +236,77 @@ def test_high_level_sync_reports_local_only_without_constructing_a_client(_herme
     assert not constructed
 
 
+def test_local_card_admission_never_constructs_backend_client(_hermetic_environment):
+    """Removing the local-card branch must not make local dispatch depend on Hades."""
+    calls = []
+    kb.init_db()
+    with kb.connect() as conn:
+        task_id = kb.create_task(conn, title="local")
+        admission = make_remote_admission(
+            conn,
+            context=KanbanBackendContext("local_only", Path.cwd()),
+            client_factory=lambda: calls.append("client"),
+        )
+        assert admission(kb.get_task(conn, task_id)).action == "allow"
+    assert calls == []
+
+
+def test_remote_card_defers_when_backend_is_offline(_hermetic_environment):
+    """Removing the remote fail-closed branch would dispatch without a lease."""
+    kb.init_db()
+    with kb.connect() as conn:
+        task_id = kb.create_task(conn, title="remote")
+        kb.upsert_remote_link(
+            conn, task_id=task_id, project_id="p1",
+            workspace_binding_id="b1", remote_work_item_id="w1",
+        )
+        admission = make_remote_admission(
+            conn,
+            context=KanbanBackendContext(
+                "linked", Path.cwd(), project_id="p1",
+                workspace_binding_id="b1", local_workspace_id="lw1", agent_id="a1",
+            ),
+            client_factory=lambda: (_ for _ in ()).throw(ConnectionError("offline")),
+        )
+        decision = admission(kb.get_task(conn, task_id))
+    assert decision.action == "defer"
+    assert decision.reason == "remote_backend_unavailable"
+
+
+def test_terminal_result_is_queued_then_delivered_once(_hermetic_environment):
+    """Removing durable enqueue or sent state loses/duplicates a terminal result."""
+    kb.init_db()
+    client = FlakyCompletionClient(failures=1)
+    with kb.connect() as conn:
+        task_id = kb.create_task(conn, title="remote")
+        kb.upsert_remote_link(
+            conn, task_id=task_id, project_id="p1",
+            workspace_binding_id="b1", remote_work_item_id="w1",
+        )
+        kb.set_remote_lease(
+            conn, task_id, lease_token="lease-1", lease_status="acquired",
+        )
+        assert kb.complete_task(conn, task_id, summary="done locally")
+        context = KanbanBackendContext(
+            "linked", Path.cwd(), project_id="p1",
+            workspace_binding_id="b1", local_workspace_id="lw1", agent_id="a1",
+        )
+        assert not publish_remote_result(
+            conn, context=context, task_id=task_id,
+            success=True, message="done", client_factory=lambda: client,
+        )
+        assert kb.get_task(conn, task_id).status == "done"
+        pending = kb.list_due_remote_results(conn, now=2_000_000_000)
+        assert len(pending) == 1
+        delivered, failed = drain_remote_outbox(
+            conn, context=context,
+            client_factory=lambda: client, now=2_000_000_000,
+        )
+        assert (delivered, failed) == (1, 0)
+        assert client.complete_calls == 2
+        assert kb.list_due_remote_results(conn, now=2_000_000_000) == []
+
+
 def test_remote_lease_claim_heartbeat_and_result_are_idempotent(_hermetic_environment):
     kb.init_db()
     client = FakeClient()
@@ -233,14 +318,28 @@ def test_remote_lease_claim_heartbeat_and_result_are_idempotent(_hermetic_enviro
             idempotency_key="remote-kanban:p:awi-1",
             triage=True,
         )
+        kb.upsert_remote_link(
+            conn, task_id=task_id, project_id="p", workspace_binding_id="b",
+            remote_work_item_id="awi-1",
+        )
         task = kb.get_task(conn, task_id)
         allowed, reason = claim_remote_for_local_task(
             conn, client, task, local_workspace_id="lw-1"
         )
         assert allowed and "acquired" in reason
         assert heartbeat_remote_for_local_task(conn, client, task_id)
-        assert publish_remote_result(conn, client, task_id, success=True, message="done")
-        assert not publish_remote_result(conn, client, task_id, success=True, message="again")
+        context = KanbanBackendContext(
+            "linked", Path.cwd(), project_id="p", workspace_binding_id="b",
+            local_workspace_id="lw-1", agent_id="a1",
+        )
+        assert publish_remote_result(
+            conn, context=context, task_id=task_id, success=True, message="done",
+            client_factory=lambda: client,
+        )
+        assert not publish_remote_result(
+            conn, context=context, task_id=task_id, success=True, message="again",
+            client_factory=lambda: client,
+        )
     assert client.claimed == ("awi-1", "lw-1")
     assert client.heartbeat == ("awi-1", "lease-1")
     assert client.completed == ("awi-1", "lease-1", "done")

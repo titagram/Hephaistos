@@ -124,6 +124,13 @@ def test_publish_uses_execution_lease_only_after_gate(tmp_path):
         created = create_org_run(conn, plan, validate_execution_portfolio(plan))
         remote = created.remote_tasks["HD-1"]
         client = Client()
+        kb.upsert_remote_link(
+            conn,
+            task_id=remote.execution_id,
+            project_id="p",
+            workspace_binding_id="binding-1",
+            remote_work_item_id="awi-1",
+        )
         assert claim_org_run_remote_task(
             conn, client=client, topology=created, remote_task_id="HD-1", local_workspace_id="lw-1"
         )[0]
