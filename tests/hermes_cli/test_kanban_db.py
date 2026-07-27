@@ -7,6 +7,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 import types
 import unittest.mock
@@ -115,6 +116,60 @@ def test_remote_link_rejects_cross_task_remote_identity(kanban_home):
                 workspace_binding_id="b",
                 remote_work_item_id="w",
             )
+
+
+def test_remote_link_rejects_concurrent_rebind_after_initial_lookup(
+    kanban_home, monkeypatch
+):
+    """A second writer cannot rebind an identity seen as unlinked before its write."""
+    db_path = kb.kanban_db_path()
+    with kb.connect_closing(db_path) as conn:
+        task_id = kb.create_task(conn, title="concurrent remote")
+
+    original_get_remote_link = kb.get_remote_link
+    pre_transaction_reads = 0
+    pre_transaction_reads_lock = threading.Lock()
+    pre_transaction_reads_barrier = threading.Barrier(2)
+
+    def synchronize_initial_reads(conn, requested_task_id):
+        nonlocal pre_transaction_reads
+        existing = original_get_remote_link(conn, requested_task_id)
+        if not conn.in_transaction and existing is None:
+            with pre_transaction_reads_lock:
+                pre_transaction_reads += 1
+                is_pre_transaction_read = pre_transaction_reads <= 2
+            if is_pre_transaction_read:
+                pre_transaction_reads_barrier.wait(timeout=5)
+        return existing
+
+    monkeypatch.setattr(kb, "get_remote_link", synchronize_initial_reads)
+
+    def link(remote_work_item_id):
+        try:
+            with kb.connect_closing(db_path) as conn:
+                return (
+                    "linked",
+                    kb.upsert_remote_link(
+                        conn,
+                        task_id=task_id,
+                        project_id="project",
+                        workspace_binding_id="binding",
+                        remote_work_item_id=remote_work_item_id,
+                    ),
+                )
+        except ValueError as exc:
+            return "rejected", exc
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = list(executor.map(link, ("work-a", "work-b")))
+
+    linked = [outcome for kind, outcome in outcomes if kind == "linked"]
+    rejected = [outcome for kind, outcome in outcomes if kind == "rejected"]
+    assert len(linked) == 1
+    assert len(rejected) == 1
+    assert str(rejected[0]) == "remote task identity cannot be rebound"
+    with kb.connect_closing(db_path) as conn:
+        assert kb.get_remote_link(conn, task_id) == linked[0]
 
 
 def test_remote_link_lease_requires_a_link_and_valid_status(kanban_home):

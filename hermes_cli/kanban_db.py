@@ -2429,14 +2429,14 @@ def upsert_remote_link(
     last_error: Optional[str] = None,
 ) -> RemoteLink:
     now = int(time.time())
-    existing = get_remote_link(conn, task_id)
-    if existing is not None and (
-        existing.project_id,
-        existing.workspace_binding_id,
-        existing.remote_work_item_id,
-    ) != (project_id, workspace_binding_id, remote_work_item_id):
-        raise ValueError("remote task identity cannot be rebound")
     with write_txn(conn):
+        existing = get_remote_link(conn, task_id)
+        if existing is not None and (
+            existing.project_id,
+            existing.workspace_binding_id,
+            existing.remote_work_item_id,
+        ) != (project_id, workspace_binding_id, remote_work_item_id):
+            raise ValueError("remote task identity cannot be rebound")
         conn.execute(
             "INSERT INTO kanban_remote_links "
             "(task_id, project_id, workspace_binding_id, remote_work_item_id, "
