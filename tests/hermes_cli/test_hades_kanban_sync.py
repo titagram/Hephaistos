@@ -370,7 +370,9 @@ def test_maybe_sync_marks_inflight_before_running_network_sync(_hermetic_environ
     assert started.wait(timeout=1)
 
     def _second():
-        outcomes.append(backend.maybe_run_kanban_sync(now=3_000))
+        # The first network call can legitimately outlive the configured
+        # interval; its in-flight marker must still own this binding.
+        outcomes.append(backend.maybe_run_kanban_sync(now=3_031))
         second_done.set()
 
     second_thread = threading.Thread(target=_second)

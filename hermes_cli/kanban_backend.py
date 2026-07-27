@@ -227,10 +227,10 @@ def maybe_run_kanban_sync(
     )
     with _SYNC_GUARD:
         previous = _LAST_SYNC_ATTEMPTS.get(sync_key)
+        if previous is not None and previous[1].state == "sync_inflight":
+            return previous[1]
         if previous is not None and current - previous[0] < interval:
             previous_report = previous[1]
-            if previous_report.state == "sync_inflight":
-                return previous_report
             if previous_report.state in {"backend_offline", "sync_error"}:
                 return previous_report
             return KanbanSyncReport(
