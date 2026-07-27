@@ -3333,7 +3333,7 @@ def add_comment(
 
 def list_comments(conn: sqlite3.Connection, task_id: str) -> list[Comment]:
     rows = conn.execute(
-        "SELECT * FROM task_comments WHERE task_id = ? ORDER BY created_at ASC",
+        "SELECT * FROM task_comments WHERE task_id = ? ORDER BY created_at ASC, id ASC",
         (task_id,),
     ).fetchall()
     return [

@@ -1891,6 +1891,19 @@ def test_comments_recorded_in_order(kanban_home):
     assert [c.author for c in comments] == ["user", "researcher"]
 
 
+def test_comments_use_id_to_break_created_at_ties(kanban_home, monkeypatch):
+    """A same-second comment sequence remains deterministic for lease consumers."""
+    with kb.connect() as conn:
+        task_id = kb.create_task(conn, title="x")
+        monkeypatch.setattr(kb.time, "time", lambda: 1_700_000_000)
+        first_id = kb.add_comment(conn, task_id, "user", "first")
+        second_id = kb.add_comment(conn, task_id, "researcher", "second")
+        comments = kb.list_comments(conn, task_id)
+    assert [(comment.id, comment.body) for comment in comments] == [
+        (first_id, "first"), (second_id, "second"),
+    ]
+
+
 def test_empty_comment_rejected(kanban_home):
     with kb.connect() as conn:
         t = kb.create_task(conn, title="x")

@@ -105,22 +105,37 @@ def sync_remote_kanban(
         return KanbanSyncResult(mode=mode)
     response = client.list_agent_work_items(
         project_id=context.project_id,
+        workspace_binding_id=context.workspace_binding_id,
         agent_key=agent_key,
         status="queued",
         limit=max(1, int(limit)),
     )
     items = _items(response)
     for item in items:
-        item_project = str(
-            item.get("project_id") or _payload(item).get("project_id")
-            or context.project_id
-        ).strip()
-        if item_project != context.project_id:
+        payload = _payload(item)
+        item_projects = [
+            str(value).strip()
+            for value in (item.get("project_id"), payload.get("project_id"))
+            if value is not None
+        ]
+        item_bindings = [
+            str(value).strip()
+            for value in (
+                item.get("workspace_binding_id"),
+                payload.get("workspace_binding_id"),
+            )
+            if value is not None
+        ]
+        if (
+            any(project != context.project_id for project in item_projects)
+            or not item_bindings
+            or any(binding != context.workspace_binding_id for binding in item_bindings)
+        ):
             return KanbanSyncResult(
                 mode=mode,
                 status="rejected_page",
                 failed=len(items),
-                error="backend page contains a missing or cross-project item",
+                error="backend page contains a missing or cross-project/cross-binding item",
             )
 
     created = existing = skipped = 0

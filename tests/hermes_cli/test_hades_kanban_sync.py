@@ -27,9 +27,9 @@ class FakeClient:
     def list_agent_work_items(self, **kwargs):
         self.calls.append(kwargs)
         return {"items": [
-            {"id": "awi-1", "payload": {"title": "Remote task", "body": "Do it", "priority": "3"}},
-            {"id": "awi-2", "payload": {"title": "Second"}},
-            {"payload": {"title": "Missing id"}},
+            {"id": "awi-1", "workspace_binding_id": "binding-p", "payload": {"title": "Remote task", "body": "Do it", "priority": "3"}},
+            {"id": "awi-2", "workspace_binding_id": "binding-p", "payload": {"title": "Second"}},
+            {"workspace_binding_id": "binding-p", "payload": {"title": "Missing id"}},
         ]}
 
     def claim_agent_work_item(self, work_item_id, *, local_workspace_id):
@@ -82,8 +82,8 @@ def test_pull_rejects_cross_project_page_without_partial_writes(_hermetic_enviro
     class PageClient:
         def list_agent_work_items(self, **kwargs):
             return {"items": [
-                {"id": "w1", "project_id": "p1", "payload": {"title": "ok"}},
-                {"id": "w2", "project_id": "p2", "payload": {"title": "wrong"}},
+                {"id": "w1", "project_id": "p1", "workspace_binding_id": "b1", "payload": {"title": "ok"}},
+                {"id": "w2", "project_id": "p2", "workspace_binding_id": "b1", "payload": {"title": "wrong"}},
             ]}
 
     with kb.connect() as conn:
@@ -91,6 +91,36 @@ def test_pull_rejects_cross_project_page_without_partial_writes(_hermetic_enviro
         assert result.status == "rejected_page"
         assert kb.list_tasks(conn) == []
         assert kb.list_remote_links(conn) == []
+
+
+def test_pull_rejects_cross_binding_page_without_partial_writes(_hermetic_environment):
+    """A same-project card from another workspace binding is not local work."""
+    kb.init_db()
+    context = KanbanBackendContext(
+        "linked", Path.cwd(), project_id="p1", workspace_binding_id="b1",
+        local_workspace_id="lw1", agent_id="a1",
+    )
+
+    class PageClient:
+        calls = []
+
+        def list_agent_work_items(self, **kwargs):
+            self.calls.append(kwargs)
+            return {"items": [
+                {"id": "w1", "project_id": "p1", "workspace_binding_id": "b1", "payload": {"title": "ok"}},
+                {"id": "w2", "project_id": "p1", "workspace_binding_id": "b1", "payload": {"title": "wrong", "workspace_binding_id": "b2"}},
+            ]}
+
+    client = PageClient()
+    with kb.connect() as conn:
+        result = sync_remote_kanban(conn, client, context=context, mode="pull_only")
+        assert result.status == "rejected_page"
+        assert kb.list_tasks(conn) == []
+        assert kb.list_remote_links(conn) == []
+    assert client.calls == [{
+        "project_id": "p1", "workspace_binding_id": "b1", "agent_key": "local_agent",
+        "status": "queued", "limit": 100,
+    }]
 
 
 def test_legacy_remote_card_migrates_without_network(_hermetic_environment):
@@ -145,6 +175,35 @@ def test_legacy_migration_marks_conflicting_lease_history(_hermetic_environment)
         assert link is not None
         assert link.lease_token == "lease-1"
         assert link.last_error == "legacy remote lease history is ambiguous"
+
+
+def test_legacy_migration_uses_latest_lease_when_comments_share_a_second(
+    _hermetic_environment, monkeypatch,
+):
+    """Comment IDs deterministically break timestamp ties during migration."""
+    kb.init_db()
+    context = KanbanBackendContext(
+        "linked", Path.cwd(), project_id="p1", workspace_binding_id="b1",
+        local_workspace_id="lw1", agent_id="a1",
+    )
+    with kb.connect() as conn:
+        task_id = kb.create_task(
+            conn, title="legacy", idempotency_key="remote-kanban:p1:w1",
+        )
+        monkeypatch.setattr(kb.time, "time", lambda: 1_700_000_000)
+        kb.add_comment(
+            conn, task_id, "hades-backend-sync",
+            'HADES_REMOTE_LEASE {"work_item_id":"w1","lease_token":"lease-old"}',
+        )
+        kb.add_comment(
+            conn, task_id, "hades-backend-sync",
+            'HADES_REMOTE_LEASE {"work_item_id":"w1","lease_token":"lease-new"}',
+        )
+
+        assert migrate_legacy_remote_links(conn, context) == 1
+        link = kb.get_remote_link(conn, task_id)
+        assert link is not None
+        assert link.lease_token == "lease-new"
 
 
 def test_high_level_sync_reports_local_only_without_constructing_a_client(_hermetic_environment):
