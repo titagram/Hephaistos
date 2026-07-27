@@ -1296,9 +1296,19 @@ def _cmd_init(args: argparse.Namespace) -> int:
 
 def _cmd_sync(args: argparse.Namespace) -> int:
     """Synchronize a linked board without turning local-only into an error."""
-    from hermes_cli.kanban_backend import run_kanban_sync
+    from hermes_cli.kanban_backend import (
+        maybe_run_kanban_sync,
+        read_kanban_sync_status,
+    )
 
-    report = run_kanban_sync(board=getattr(args, "board", None))
+    if getattr(args, "status", False):
+        report = read_kanban_sync_status(board=getattr(args, "board", None))
+    else:
+        report = maybe_run_kanban_sync(
+            board=getattr(args, "board", None),
+            min_interval_seconds=0,
+            force=True,
+        )
     payload = {
         "state": report.state,
         "workspace_binding_id": report.workspace_binding_id,
@@ -1315,7 +1325,7 @@ def _cmd_sync(args: argparse.Namespace) -> int:
         print(json.dumps(payload, indent=2, ensure_ascii=False))
     else:
         print(f"Kanban sync: {report.state}")
-        if getattr(args, "status", False) or report.state != "local_only":
+        if report.state != "local_only":
             print(
                 f"pulled={report.pulled} created={report.created} "
                 f"delivered={report.delivered} deferred={report.deferred} "
@@ -1323,7 +1333,10 @@ def _cmd_sync(args: argparse.Namespace) -> int:
             )
         if report.error:
             print(report.error, file=sys.stderr)
-    return 0 if report.state in {"local_only", "synced", "backend_offline"} else 1
+    return 0 if report.state in {
+        "local_only", "linked", "synced", "sync_deferred",
+        "sync_inflight", "backend_offline",
+    } else 1
 
 
 def _cmd_serve(args: argparse.Namespace) -> int:

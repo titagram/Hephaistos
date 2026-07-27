@@ -73,20 +73,26 @@ hades kanban serve --board ariadne
 The server binds to `127.0.0.1` by default and reuses the existing dashboard;
 it does not start a second Kanban frontend or expose the board on the network.
 
-Every `hades kanban sync` invocation attempts synchronization for only the
-selected board; it is not a status-only probe. Inspect the outcome with:
+Run synchronization for only the selected board with:
+
+```bash
+hades kanban sync --board ariadne
+```
+
+Inspect the last durable binding-scoped outcome without making a backend
+request or changing remote state with:
 
 ```bash
 hades kanban sync --board ariadne --status
 hades kanban sync --board ariadne --status --json
 ```
 
-`--status` adds the pull/delivery/outbox counters to the human-readable
-local-only result. `--json` selects the machine-readable report format (and
-always includes the counters); it can be combined with `--status` for the
-same command shape used by operational scripts. The emitted report states are
-`local_only`, `synced`, `backend_offline`, and `sync_error`. The command exits
-zero for the first three and nonzero only for `sync_error`. Binding
+`--status` is read-only: it reads the selected binding's locally persisted
+sync state and outbox depth and never pulls cards or drains the outbox.
+`--json` selects the machine-readable report format and always includes the
+counters. Before the first attempt, a configured board may report `linked`;
+later reports use `local_only`, `synced`, `backend_offline`, or `sync_error`.
+Read-only and healthy/offline states exit zero; `sync_error` exits nonzero. Binding
 misconfiguration, missing/invalid identity, authorization, and validation
 failures are all reported as `sync_error`; a genuine transport failure or an
 unavailable backend service is `backend_offline`.

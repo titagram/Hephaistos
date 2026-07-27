@@ -520,13 +520,21 @@ def claim_org_run_remote_task(
         return False, "remote work item mapping is missing"
     from hermes_cli.hades_kanban_sync import claim_remote_work_item
 
-    return claim_remote_work_item(
+    claimed, reason = claim_remote_work_item(
         conn,
         client,
         task_id=remote.execution_id,
         work_item_id=remote.work_item_id,
         local_workspace_id=local_workspace_id,
     )
+    if claimed:
+        kb.record_remote_link_state(
+            conn,
+            remote.execution_id,
+            sync_status="org_run_gated",
+            error=None,
+        )
+    return claimed, reason
 
 
 _ORG_PROPOSAL_TYPES = frozenset(

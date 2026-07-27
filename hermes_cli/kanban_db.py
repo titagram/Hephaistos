@@ -162,6 +162,34 @@ def _fire_kanban_lifecycle_hook(event: str, task_id: str, **fields: Any) -> None
         _log.debug("kanban lifecycle hook %s failed: %s", event, exc)
 
 
+def _fire_remote_terminal_delivery_hook(
+    conn: sqlite3.Connection,
+    task_id: str,
+) -> None:
+    """Best-effort post-commit delivery for a transactionally queued result."""
+    try:
+        from hermes_cli.hades_kanban_sync import deliver_remote_terminal_for_task
+
+        deliver_remote_terminal_for_task(conn, task_id)
+    except Exception as exc:  # pragma: no cover - offline is expected.
+        _log.debug("remote kanban terminal delivery deferred for %s: %s", task_id, exc)
+
+
+def _fire_remote_heartbeat_hook(
+    conn: sqlite3.Connection,
+    task_id: str,
+) -> None:
+    """Best-effort remote lease renewal paired with durable local liveness."""
+    try:
+        from hermes_cli.hades_kanban_sync import (
+            heartbeat_remote_for_local_task_context,
+        )
+
+        heartbeat_remote_for_local_task_context(conn, task_id)
+    except Exception as exc:  # pragma: no cover - local heartbeat is authoritative.
+        _log.debug("remote kanban heartbeat deferred for %s: %s", task_id, exc)
+
+
 # A running task's claim is valid for 15 minutes by default; after that the
 # next dispatcher tick reclaims it. Workers that outlive this window should
 # call ``heartbeat_claim(task_id)`` periodically. In practice most kanban
@@ -1107,6 +1135,8 @@ class RemoteOutboxEntry:
     attempts: int
     next_attempt_at: int
     last_error: Optional[str]
+    claim_token: Optional[str]
+    claim_expires: Optional[int]
     created_at: int
     updated_at: int
 
@@ -1322,6 +1352,8 @@ CREATE TABLE IF NOT EXISTS kanban_sync_outbox (
     attempts         INTEGER NOT NULL DEFAULT 0,
     next_attempt_at  INTEGER NOT NULL,
     last_error       TEXT,
+    claim_token      TEXT,
+    claim_expires    INTEGER,
     created_at       INTEGER NOT NULL,
     updated_at       INTEGER NOT NULL
 );
@@ -1334,6 +1366,13 @@ CREATE TABLE IF NOT EXISTS kanban_sync_state (
     last_attempt_at      INTEGER,
     next_attempt_at      INTEGER,
     last_error           TEXT,
+    updated_at           INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS kanban_sync_locks (
+    workspace_binding_id TEXT PRIMARY KEY,
+    owner_token          TEXT NOT NULL,
+    expires_at           INTEGER NOT NULL,
     updated_at           INTEGER NOT NULL
 );
 
@@ -2104,6 +2143,25 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
                 conn, "kanban_notify_subs", "notifier_profile", "notifier_profile TEXT"
             )
 
+    outbox_exists = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' "
+        "AND name='kanban_sync_outbox'"
+    ).fetchone() is not None
+    if outbox_exists:
+        outbox_cols = {
+            row["name"] for row in conn.execute(
+                "PRAGMA table_info(kanban_sync_outbox)"
+            )
+        }
+        if "claim_token" not in outbox_cols:
+            _add_column_if_missing(
+                conn, "kanban_sync_outbox", "claim_token", "claim_token TEXT"
+            )
+        if "claim_expires" not in outbox_cols:
+            _add_column_if_missing(
+                conn, "kanban_sync_outbox", "claim_expires", "claim_expires INTEGER"
+            )
+
     # One-shot backfill: any task that is 'running' before runs existed
     # had its claim_lock / claim_expires / worker_pid on the task row.
     # Synthesize a matching task_runs row so subsequent end-run / heartbeat
@@ -2392,6 +2450,14 @@ def write_txn(conn: sqlite3.Connection):
     a SQLite auto-rollback (which leaves no active transaction) does not
     shadow the original exception with a spurious rollback error.
     """
+    # Several high-level invariants (notably remote task materialization and
+    # terminal outbox enqueue) compose existing write helpers.  When their
+    # caller already owns the SQLite transaction, participate in that
+    # transaction instead of attempting a nested BEGIN.  Exceptions still
+    # propagate to the outer owner, which performs the rollback.
+    if conn.in_transaction:
+        yield conn
+        return
     _execute_boundary_with_retry(conn, "BEGIN IMMEDIATE")
     try:
         yield conn
@@ -2528,13 +2594,39 @@ def set_remote_lease(
     return loaded
 
 
+def record_remote_link_state(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    sync_status: str,
+    error: Optional[str] = None,
+) -> RemoteLink:
+    """Persist one bounded, secret-safe lifecycle classification on a link."""
+    with write_txn(conn):
+        changed = conn.execute(
+            "UPDATE kanban_remote_links SET sync_status=?, last_error=?, "
+            "updated_at=? WHERE task_id=?",
+            (
+                str(sync_status),
+                str(error)[:_MAX_SYNC_ERROR_LENGTH] if error else None,
+                int(time.time()),
+                task_id,
+            ),
+        ).rowcount
+    if changed != 1:
+        raise KeyError(task_id)
+    loaded = get_remote_link(conn, task_id)
+    assert loaded is not None
+    return loaded
+
+
 # ---------------------------------------------------------------------------
 # Durable remote result outbox and binding sync state
 # ---------------------------------------------------------------------------
 
 _REMOTE_OUTBOX_COLUMNS = (
     "id, task_id, operation, payload, idempotency_key, status, attempts, "
-    "next_attempt_at, last_error, created_at, updated_at"
+    "next_attempt_at, last_error, claim_token, claim_expires, created_at, updated_at"
 )
 _MAX_SYNC_ERROR_LENGTH = 500
 
@@ -2561,6 +2653,10 @@ def _remote_outbox_from_row(row: sqlite3.Row) -> RemoteOutboxEntry:
         attempts=int(row["attempts"]),
         next_attempt_at=int(row["next_attempt_at"]),
         last_error=row["last_error"],
+        claim_token=row["claim_token"],
+        claim_expires=(
+            int(row["claim_expires"]) if row["claim_expires"] is not None else None
+        ),
         created_at=int(row["created_at"]),
         updated_at=int(row["updated_at"]),
     )
@@ -2607,31 +2703,167 @@ def enqueue_remote_result(
     return loaded
 
 
+def _enqueue_remote_terminal_result_in_txn(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    success: bool,
+    message: Optional[str],
+    now: Optional[int] = None,
+) -> Optional[RemoteOutboxEntry]:
+    """Queue a linked task's terminal consequence in the caller's transaction."""
+    link = get_remote_link(conn, task_id)
+    if (
+        link is None
+        or link.lease_status != "acquired"
+        or not link.lease_token
+        or link.sync_status == "org_run_gated"
+    ):
+        return None
+    operation = "complete" if success else "fail"
+    return enqueue_remote_result(
+        conn,
+        task_id=task_id,
+        operation=operation,
+        payload={"message": str(message or "")[:10_000]},
+        idempotency_key=(
+            f"{operation}:{link.project_id}:{link.workspace_binding_id}:"
+            f"{link.remote_work_item_id}"
+        ),
+        now=now,
+    )
+
+
 def list_due_remote_results(
     conn: sqlite3.Connection,
     *,
+    workspace_binding_id: Optional[str] = None,
     now: Optional[int] = None,
     limit: int = 20,
 ) -> list[RemoteOutboxEntry]:
     """Return pending results ready for delivery, in stable retry order."""
     current = int(time.time() if now is None else now)
-    rows = conn.execute(
-        f"SELECT {_REMOTE_OUTBOX_COLUMNS} FROM kanban_sync_outbox "
-        "WHERE status = 'pending' AND next_attempt_at <= ? "
-        "ORDER BY next_attempt_at ASC, id ASC LIMIT ?",
-        (current, max(0, int(limit))),
-    ).fetchall()
+    if workspace_binding_id is None:
+        rows = conn.execute(
+            f"SELECT {_REMOTE_OUTBOX_COLUMNS} FROM kanban_sync_outbox "
+            "WHERE status = 'pending' AND next_attempt_at <= ? "
+            "ORDER BY next_attempt_at ASC, id ASC LIMIT ?",
+            (current, max(0, int(limit))),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT "
+            + ", ".join(f"o.{column.strip()}" for column in _REMOTE_OUTBOX_COLUMNS.split(","))
+            + " FROM kanban_sync_outbox o "
+            "JOIN kanban_remote_links l ON l.task_id = o.task_id "
+            "WHERE o.status = 'pending' AND o.next_attempt_at <= ? "
+            "AND l.workspace_binding_id = ? "
+            "ORDER BY o.next_attempt_at ASC, o.id ASC LIMIT ?",
+            (current, workspace_binding_id, max(0, int(limit))),
+        ).fetchall()
     return [_remote_outbox_from_row(row) for row in rows]
 
 
-def mark_remote_result_sent(conn: sqlite3.Connection, entry_id: int) -> None:
-    """Mark a queued remote result delivered so it is never retried."""
+def claim_due_remote_results(
+    conn: sqlite3.Connection,
+    *,
+    workspace_binding_id: str,
+    owner_token: str,
+    now: Optional[int] = None,
+    limit: int = 20,
+    claim_ttl_seconds: int = 120,
+) -> list[RemoteOutboxEntry]:
+    """Atomically claim one binding's due entries for a single drainer."""
+    current = int(time.time() if now is None else now)
+    expires = current + max(1, int(claim_ttl_seconds))
+    claimed_ids: list[int] = []
     with write_txn(conn):
         conn.execute(
-            "UPDATE kanban_sync_outbox SET status = 'sent', updated_at = ? "
-            "WHERE id = ?",
-            (int(time.time()), entry_id),
+            "UPDATE kanban_sync_outbox SET status='pending', claim_token=NULL, "
+            "claim_expires=NULL, updated_at=? "
+            "WHERE status='inflight' AND claim_expires IS NOT NULL "
+            "AND claim_expires <= ?",
+            (current, current),
         )
+        rows = conn.execute(
+            "SELECT o.id FROM kanban_sync_outbox o "
+            "JOIN kanban_remote_links l ON l.task_id=o.task_id "
+            "WHERE o.status='pending' AND o.next_attempt_at <= ? "
+            "AND l.workspace_binding_id=? "
+            "ORDER BY o.next_attempt_at ASC, o.id ASC LIMIT ?",
+            (current, workspace_binding_id, max(0, int(limit))),
+        ).fetchall()
+        for row in rows:
+            entry_id = int(row["id"])
+            changed = conn.execute(
+                "UPDATE kanban_sync_outbox SET status='inflight', "
+                "claim_token=?, claim_expires=?, updated_at=? "
+                "WHERE id=? AND status='pending' AND next_attempt_at <= ?",
+                (owner_token, expires, current, entry_id, current),
+            ).rowcount
+            if changed == 1:
+                claimed_ids.append(entry_id)
+        if not claimed_ids:
+            return []
+        placeholders = ",".join("?" for _ in claimed_ids)
+        claimed = conn.execute(
+            f"SELECT {_REMOTE_OUTBOX_COLUMNS} FROM kanban_sync_outbox "
+            f"WHERE id IN ({placeholders}) ORDER BY next_attempt_at ASC, id ASC",
+            tuple(claimed_ids),
+        ).fetchall()
+    return [_remote_outbox_from_row(row) for row in claimed]
+
+
+def claim_remote_result(
+    conn: sqlite3.Connection,
+    entry_id: int,
+    *,
+    workspace_binding_id: str,
+    owner_token: str,
+    now: Optional[int] = None,
+    claim_ttl_seconds: int = 120,
+) -> Optional[RemoteOutboxEntry]:
+    """CAS-claim one newly enqueued result when it belongs to this binding."""
+    current = int(time.time() if now is None else now)
+    with write_txn(conn):
+        changed = conn.execute(
+            "UPDATE kanban_sync_outbox SET status='inflight', claim_token=?, "
+            "claim_expires=?, updated_at=? "
+            "WHERE id=? AND status='pending' AND next_attempt_at <= ? "
+            "AND EXISTS (SELECT 1 FROM kanban_remote_links l "
+            "WHERE l.task_id=kanban_sync_outbox.task_id "
+            "AND l.workspace_binding_id=?)",
+            (
+                owner_token,
+                current + max(1, int(claim_ttl_seconds)),
+                current,
+                entry_id,
+                current,
+                workspace_binding_id,
+            ),
+        ).rowcount
+    if changed != 1:
+        return None
+    row = conn.execute(
+        f"SELECT {_REMOTE_OUTBOX_COLUMNS} FROM kanban_sync_outbox WHERE id=?",
+        (entry_id,),
+    ).fetchone()
+    return _remote_outbox_from_row(row) if row is not None else None
+
+
+def mark_remote_result_sent(
+    conn: sqlite3.Connection, entry_id: int, *, claim_token: str,
+) -> None:
+    """Mark a queued remote result delivered so it is never retried."""
+    with write_txn(conn):
+        changed = conn.execute(
+            "UPDATE kanban_sync_outbox SET status='sent', claim_token=NULL, "
+            "claim_expires=NULL, updated_at=? "
+            "WHERE id=? AND status='inflight' AND claim_token=?",
+            (int(time.time()), entry_id, claim_token),
+        ).rowcount
+        if changed != 1:
+            raise ValueError("remote result claim is stale or no longer inflight")
 
 
 def mark_remote_result_retry(
@@ -2641,19 +2873,22 @@ def mark_remote_result_retry(
     error: str,
     next_attempt_at: int,
     dead_letter: bool = False,
+    claim_token: str,
 ) -> None:
     """Record a failed delivery attempt and schedule (or stop) its retry."""
     with write_txn(conn):
         changed = conn.execute(
             "UPDATE kanban_sync_outbox "
             "SET status = ?, attempts = attempts + 1, next_attempt_at = ?, "
-            "last_error = ?, updated_at = ? WHERE id = ? AND status = 'pending'",
+            "last_error = ?, claim_token=NULL, claim_expires=NULL, updated_at = ? "
+            "WHERE id = ? AND status = 'inflight' AND claim_token=?",
             (
                 "dead_letter" if dead_letter else "pending",
                 int(next_attempt_at),
                 str(error)[:_MAX_SYNC_ERROR_LENGTH],
                 int(time.time()),
                 entry_id,
+                claim_token,
             ),
         ).rowcount
         if changed != 1:
@@ -2665,6 +2900,67 @@ def mark_remote_result_retry(
             raise ValueError(
                 f"cannot retry remote result in {row['status']} status"
             )
+
+
+def count_remote_outbox(
+    conn: sqlite3.Connection,
+    *,
+    workspace_binding_id: str,
+) -> int:
+    row = conn.execute(
+        "SELECT COUNT(*) AS count FROM kanban_sync_outbox o "
+        "JOIN kanban_remote_links l ON l.task_id=o.task_id "
+        "WHERE l.workspace_binding_id=? AND o.status IN ('pending','inflight')",
+        (workspace_binding_id,),
+    ).fetchone()
+    return int(row["count"])
+
+
+def try_acquire_kanban_sync_lock(
+    conn: sqlite3.Connection,
+    *,
+    workspace_binding_id: str,
+    owner_token: str,
+    now: int,
+    ttl_seconds: int = 300,
+) -> bool:
+    """Acquire or steal an expired binding lock through one SQLite CAS."""
+    expires = int(now) + max(1, int(ttl_seconds))
+    with write_txn(conn):
+        conn.execute(
+            "INSERT INTO kanban_sync_locks "
+            "(workspace_binding_id, owner_token, expires_at, updated_at) "
+            "VALUES (?, ?, ?, ?) ON CONFLICT(workspace_binding_id) DO NOTHING",
+            (workspace_binding_id, owner_token, expires, int(now)),
+        )
+        changed = conn.execute(
+            "UPDATE kanban_sync_locks SET owner_token=?, expires_at=?, updated_at=? "
+            "WHERE workspace_binding_id=? "
+            "AND (owner_token=? OR expires_at <= ?)",
+            (
+                owner_token,
+                expires,
+                int(now),
+                workspace_binding_id,
+                owner_token,
+                int(now),
+            ),
+        ).rowcount
+    return changed == 1
+
+
+def release_kanban_sync_lock(
+    conn: sqlite3.Connection,
+    *,
+    workspace_binding_id: str,
+    owner_token: str,
+) -> None:
+    with write_txn(conn):
+        conn.execute(
+            "DELETE FROM kanban_sync_locks "
+            "WHERE workspace_binding_id=? AND owner_token=?",
+            (workspace_binding_id, owner_token),
+        )
 
 
 def record_kanban_sync_state(
@@ -4560,6 +4856,13 @@ def complete_task(
             completed_payload,
             run_id=run_id,
         )
+        _enqueue_remote_terminal_result_in_txn(
+            conn,
+            task_id=task_id,
+            success=True,
+            message=summary if summary is not None else result,
+            now=now,
+        )
     # Prose-scan the summary + result for t_<hex> references that do
     # not resolve. Advisory — does not block the completion. Runs in
     # its own txn so the completion itself is already durable by the
@@ -4599,6 +4902,7 @@ def complete_task(
         run_id=run_id,
         summary=(summary if summary is not None else result),
     )
+    _fire_remote_terminal_delivery_hook(conn, task_id)
     return True
 
 
@@ -5233,6 +5537,12 @@ def block_task(
                 {"reason": reason, "kind": kind, "recurrences": recurrences},
                 run_id=run_id,
             )
+        _enqueue_remote_terminal_result_in_txn(
+            conn,
+            task_id=task_id,
+            success=False,
+            message=reason,
+        )
         _blocked_task = get_task(conn, task_id)
     _fire_kanban_lifecycle_hook(
         "kanban_task_blocked",
@@ -5242,6 +5552,7 @@ def block_task(
         run_id=run_id,
         reason=reason,
     )
+    _fire_remote_terminal_delivery_hook(conn, task_id)
     return True
 
 
@@ -6587,6 +6898,7 @@ def heartbeat_worker(
             {"note": note} if note else None,
             run_id=run_id,
         )
+    _fire_remote_heartbeat_hook(conn, task_id)
     return True
 
 
@@ -7165,6 +7477,12 @@ def _record_task_failure(
             _append_event(
                 conn, task_id, "gave_up", payload, run_id=run_id,
             )
+            _enqueue_remote_terminal_result_in_txn(
+                conn,
+                task_id=task_id,
+                success=False,
+                message=error,
+            )
             blocked = True
         else:
             # Below threshold.
@@ -7199,6 +7517,8 @@ def _record_task_failure(
                     run_id=run_id,
                 )
             # Timeout/crash path's caller already emitted its own event.
+    if blocked:
+        _fire_remote_terminal_delivery_hook(conn, task_id)
     return blocked
 
 

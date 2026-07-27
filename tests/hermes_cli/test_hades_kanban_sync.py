@@ -222,6 +222,35 @@ def test_legacy_migration_uses_latest_lease_when_comments_share_a_second(
         assert link.lease_token == "lease-new"
 
 
+def test_malformed_legacy_remote_marker_records_one_local_diagnostic(
+    _hermetic_environment,
+):
+    """Malformed legacy identity remains local but is never silently skipped."""
+    kb.init_db()
+    context = KanbanBackendContext(
+        "linked",
+        Path.cwd(),
+        project_id="p1",
+        workspace_binding_id="b1",
+        local_workspace_id="lw1",
+        agent_id="a1",
+    )
+    with kb.connect() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="malformed legacy",
+            idempotency_key="remote-kanban:p1:",
+        )
+        assert migrate_legacy_remote_links(conn, context) == 0
+        assert migrate_legacy_remote_links(conn, context) == 0
+        diagnostics = [
+            event for event in kb.list_events(conn, task_id)
+            if event.kind == "remote_link_migration_diagnostic"
+        ]
+    assert len(diagnostics) == 1
+    assert diagnostics[0].payload == {"reason": "malformed remote identity marker"}
+
+
 def test_high_level_sync_reports_local_only_without_constructing_a_client(_hermetic_environment):
     """An unlinked board stays fully local and therefore never reaches a backend factory."""
     constructed = False
@@ -259,7 +288,9 @@ def test_high_level_sync_drains_pending_terminal_results(_hermetic_environment, 
     monkeypatch.setattr(
         remote_sync,
         "drain_remote_outbox",
-        lambda conn, *, context, client_factory, **_: drained.append((context, client_factory())) or (1, 0),
+        lambda conn, *, context, borrowed_client, **_: (
+            drained.append((context, borrowed_client)) or (1, 0)
+        ),
     )
 
     report = backend.run_kanban_sync(cwd=Path.cwd())
@@ -318,7 +349,7 @@ def test_maybe_sync_preserves_offline_state_during_backoff(_hermetic_environment
 def test_dispatch_context_only_resolves_after_synced_or_healthy_deferred_report(
     _hermetic_environment, monkeypatch,
 ):
-    """Offline and validation reports never reopen the backend client path."""
+    """Offline reports preserve exact identity while disabling new network work."""
     from hermes_cli import kanban_backend as backend
 
     context = _linked_context()
@@ -336,9 +367,14 @@ def test_dispatch_context_only_resolves_after_synced_or_healthy_deferred_report(
         KanbanSyncReport(state="sync_deferred"), board="ariadne",
     )
 
-    assert offline.mode == "local_only"
+    assert offline.mode == "linked"
+    assert offline.backend_available is False
+    assert offline.workspace_binding_id == context.workspace_binding_id
     assert deferred == context
-    assert resolutions == [{"board": "ariadne", "cwd": None}]
+    assert resolutions == [
+        {"board": None, "cwd": None},
+        {"board": "ariadne", "cwd": None},
+    ]
 
 
 def test_maybe_sync_marks_inflight_before_running_network_sync(_hermetic_environment, monkeypatch):
@@ -418,7 +454,7 @@ def test_maybe_sync_replaces_failed_inflight_marker_and_keeps_bindings_independe
     other_binding = backend.maybe_run_kanban_sync(cwd="b", now=4_000)
     retried = backend.maybe_run_kanban_sync(cwd="a", now=4_031)
 
-    assert failed.state == "backend_offline"
+    assert failed.state == "sync_error"
     assert other_binding.state == "synced"
     assert retried.state == "synced"
     assert calls == ["a", "b", "a"]

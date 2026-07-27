@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import inspect
 from pathlib import Path
+import secrets
 import sqlite3
-import threading
 import time
 from typing import Callable, Literal
 
@@ -19,10 +20,6 @@ try:
     import httpx
 except ImportError:  # pragma: no cover - the backend client requires httpx.
     httpx = None  # type: ignore[assignment]
-
-
-_SYNC_GUARD = threading.Lock()
-_LAST_SYNC_ATTEMPTS: dict[tuple[str, str], tuple[int, "KanbanSyncReport"]] = {}
 
 
 def _sync_error_text(exc: BaseException) -> str:
@@ -93,6 +90,7 @@ class KanbanBackendContext:
     local_workspace_id: str | None = None
     agent_id: str | None = None
     error: str | None = None
+    backend_available: bool = True
 
 
 @dataclass(frozen=True)
@@ -155,14 +153,70 @@ def make_kanban_client(
         raise RuntimeError("selected backend agent is missing or does not match the workspace")
 
     factory = client_factory or hades_backend_runtime.client_for_agent
+    if client_factory is not None:
+        try:
+            parameters = inspect.signature(factory).parameters.values()
+            accepts_agent = any(
+                parameter.kind
+                in {
+                    inspect.Parameter.POSITIONAL_ONLY,
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    inspect.Parameter.VAR_POSITIONAL,
+                }
+                for parameter in parameters
+            )
+        except (TypeError, ValueError):
+            accepts_agent = True
+        if not accepts_agent:
+            return factory()
     return factory(agent)
 
 
-def _pending_outbox_count(conn) -> int:
-    row = conn.execute(
-        "SELECT COUNT(*) AS count FROM kanban_sync_outbox WHERE status = 'pending'"
-    ).fetchone()
-    return int(row["count"])
+def resolve_kanban_backend_context_for_link(
+    link: kb.RemoteLink,
+    *,
+    workspace_root: str | Path | None = None,
+) -> KanbanBackendContext:
+    """Resolve the exact stored binding without reclassifying it as local work."""
+    root = Path(workspace_root or Path.cwd()).resolve()
+    if not hdb.hades_backend_db_path().exists():
+        return KanbanBackendContext(
+            "linked",
+            root,
+            project_id=link.project_id,
+            workspace_binding_id=link.workspace_binding_id,
+            error="backend configuration is unavailable",
+            backend_available=False,
+        )
+    with hdb.connect_closing() as conn:
+        binding = hdb.get_binding_for_backend_id(conn, link.workspace_binding_id)
+    if (
+        binding is None
+        or binding.project_id != link.project_id
+        or binding.status != "linked"
+    ):
+        return KanbanBackendContext(
+            "misconfigured",
+            root,
+            project_id=link.project_id,
+            workspace_binding_id=link.workspace_binding_id,
+            error="stored remote binding is missing or does not match",
+            backend_available=False,
+        )
+    return KanbanBackendContext(
+        "linked",
+        root,
+        project_id=binding.project_id,
+        workspace_binding_id=binding.backend_workspace_binding_id,
+        local_workspace_id=binding.local_project_id,
+        agent_id=binding.agent_id,
+    )
+
+
+def _pending_outbox_count(conn, workspace_binding_id: str) -> int:
+    return kb.count_remote_outbox(
+        conn, workspace_binding_id=workspace_binding_id,
+    )
 
 
 def _record_sync_report(
@@ -173,6 +227,12 @@ def _record_sync_report(
 ) -> None:
     if report.workspace_binding_id is None:
         return
+    current = int(time.time() if now is None else now)
+    previous = kb.get_kanban_sync_state(conn, report.workspace_binding_id)
+    next_attempt_at = None
+    if report.state in {"backend_offline", "sync_error"}:
+        previous_failures = int((previous or {}).get("failure_count") or 0)
+        next_attempt_at = current + min(3_600, 30 * (2 ** min(previous_failures, 7)))
     kb.record_kanban_sync_state(
         conn,
         workspace_binding_id=report.workspace_binding_id,
@@ -187,8 +247,39 @@ def _record_sync_report(
             "outbox_pending": report.outbox_pending,
         },
         last_error=report.error,
-        now=now,
+        next_attempt_at=next_attempt_at,
+        now=current,
     )
+
+
+def read_kanban_sync_status(
+    *,
+    board: str | None = None,
+    cwd: str | Path | None = None,
+) -> KanbanSyncReport:
+    """Read only local binding-scoped state and outbox depth."""
+    context = resolve_kanban_backend_context(board=board, cwd=cwd)
+    if context.mode == "local_only":
+        return KanbanSyncReport(state="local_only")
+    if context.mode != "linked" or not context.workspace_binding_id:
+        return KanbanSyncReport(state="sync_error", error=context.error)
+    with kb.connect(board=board) as conn:
+        stored = kb.get_kanban_sync_state(conn, context.workspace_binding_id)
+        summary = (stored or {}).get("summary") or {}
+        return KanbanSyncReport(
+            state=str((stored or {}).get("state") or "linked"),
+            workspace_binding_id=context.workspace_binding_id,
+            pulled=int(summary.get("pulled") or 0),
+            created=int(summary.get("created") or 0),
+            existing=int(summary.get("existing") or 0),
+            delivered=int(summary.get("delivered") or 0),
+            deferred=int(summary.get("deferred") or 0),
+            failed=int(summary.get("failed") or 0),
+            outbox_pending=_pending_outbox_count(
+                conn, context.workspace_binding_id,
+            ),
+            error=(stored or {}).get("last_error"),
+        )
 
 
 def run_kanban_sync(
@@ -224,7 +315,7 @@ def run_kanban_sync(
                 delivered, deferred = drain_remote_outbox(
                     conn,
                     context=context,
-                    client_factory=lambda: client,
+                    borrowed_client=client,
                     now=now,
                 )
             finally:
@@ -235,14 +326,18 @@ def run_kanban_sync(
             report = KanbanSyncReport(
                 state="sync_error",
                 workspace_binding_id=context.workspace_binding_id,
-                outbox_pending=_pending_outbox_count(conn),
+                outbox_pending=_pending_outbox_count(
+                    conn, context.workspace_binding_id,
+                ),
                 error=_sync_error_text(exc),
             )
         except Exception as exc:
             report = KanbanSyncReport(
                 state=_sync_failure_state(exc),
                 workspace_binding_id=context.workspace_binding_id,
-                outbox_pending=_pending_outbox_count(conn),
+                outbox_pending=_pending_outbox_count(
+                    conn, context.workspace_binding_id,
+                ),
                 error=_sync_error_text(exc),
             )
         else:
@@ -255,7 +350,9 @@ def run_kanban_sync(
                 delivered=delivered,
                 deferred=deferred,
                 failed=result.failed,
-                outbox_pending=_pending_outbox_count(conn),
+                outbox_pending=_pending_outbox_count(
+                    conn, context.workspace_binding_id,
+                ),
                 error=result.error,
             )
         _record_sync_report(conn, report, now=now)
@@ -268,6 +365,7 @@ def maybe_run_kanban_sync(
     cwd: str | Path | None = None,
     min_interval_seconds: int = 30,
     now: int | None = None,
+    force: bool = False,
 ) -> KanbanSyncReport:
     """Run at most one best-effort sync per binding during the configured interval.
 
@@ -284,44 +382,75 @@ def maybe_run_kanban_sync(
 
     current = int(time.time() if now is None else now)
     interval = max(0, int(min_interval_seconds))
-    sync_key = (
-        context.workspace_binding_id,
-        str(kb.kanban_db_path(board=board).resolve()),
-    )
-    with _SYNC_GUARD:
-        previous = _LAST_SYNC_ATTEMPTS.get(sync_key)
-        if previous is not None and previous[1].state == "sync_inflight":
-            return previous[1]
-        if previous is not None and current - previous[0] < interval:
-            previous_report = previous[1]
-            if previous_report.state in {"backend_offline", "sync_error"}:
-                return previous_report
+    owner = secrets.token_urlsafe(18)
+    with kb.connect(board=board) as lock_conn:
+        previous = kb.get_kanban_sync_state(
+            lock_conn, context.workspace_binding_id,
+        )
+        if previous is not None and not force:
+            next_attempt_at = previous.get("next_attempt_at")
+            last_attempt_at = previous.get("last_attempt_at")
+            if next_attempt_at is not None and current < int(next_attempt_at):
+                summary = previous.get("summary") or {}
+                return KanbanSyncReport(
+                    state=str(previous.get("state") or "backend_offline"),
+                    workspace_binding_id=context.workspace_binding_id,
+                    pulled=int(summary.get("pulled") or 0),
+                    created=int(summary.get("created") or 0),
+                    existing=int(summary.get("existing") or 0),
+                    delivered=int(summary.get("delivered") or 0),
+                    deferred=int(summary.get("deferred") or 0),
+                    failed=int(summary.get("failed") or 0),
+                    outbox_pending=_pending_outbox_count(
+                        lock_conn, context.workspace_binding_id,
+                    ),
+                    error=previous.get("last_error"),
+                )
+            if (
+                last_attempt_at is not None
+                and current - int(last_attempt_at) < interval
+            ):
+                return KanbanSyncReport(
+                    state="sync_deferred",
+                    workspace_binding_id=context.workspace_binding_id,
+                    outbox_pending=_pending_outbox_count(
+                        lock_conn, context.workspace_binding_id,
+                    ),
+                )
+        if not kb.try_acquire_kanban_sync_lock(
+            lock_conn,
+            workspace_binding_id=context.workspace_binding_id,
+            owner_token=owner,
+            now=current,
+        ):
             return KanbanSyncReport(
-                state="sync_deferred",
-                workspace_binding_id=context.workspace_binding_id,
-            )
-        # Publish a binding-scoped in-flight marker before releasing the
-        # guard. A concurrent dispatcher must never start a second network
-        # pull while this caller is still resolving the first one.
-        _LAST_SYNC_ATTEMPTS[sync_key] = (
-            current,
-            KanbanSyncReport(
                 state="sync_inflight",
                 workspace_binding_id=context.workspace_binding_id,
-            ),
-        )
+                outbox_pending=_pending_outbox_count(
+                    lock_conn, context.workspace_binding_id,
+                ),
+            )
     try:
         report = run_kanban_sync(board=board, cwd=cwd, now=current)
     except Exception as exc:
-        # Replace the marker even when an unexpected runner failure escapes,
-        # so an in-flight state cannot permanently suppress later attempts.
         report = KanbanSyncReport(
-            state="backend_offline",
+            state=_sync_failure_state(exc),
             workspace_binding_id=context.workspace_binding_id,
-            error=str(exc)[:500],
+            error=_sync_error_text(exc),
         )
-    with _SYNC_GUARD:
-        _LAST_SYNC_ATTEMPTS[sync_key] = (current, report)
+    finally:
+        with kb.connect(board=board) as lock_conn:
+            kb.release_kanban_sync_lock(
+                lock_conn,
+                workspace_binding_id=context.workspace_binding_id,
+                owner_token=owner,
+            )
+    with kb.connect(board=board) as state_conn:
+        stored = kb.get_kanban_sync_state(
+            state_conn, context.workspace_binding_id,
+        )
+        if stored is None or int(stored.get("updated_at") or -1) != current:
+            _record_sync_report(state_conn, report, now=current)
     return report
 
 
@@ -339,11 +468,32 @@ def dispatch_context_for_sync_report(
     local cards remain usable while the structured-link admission callback
     defers every remote card before constructing a client.
     """
-    if report.state in {"local_only", "backend_offline", "sync_error"}:
+    if report.state == "local_only":
         return KanbanBackendContext("local_only", Path(cwd or Path.cwd()).resolve())
-    if report.state in {"synced", "sync_deferred"}:
+    if report.workspace_binding_id or report.state in {
+        "synced", "sync_deferred", "sync_inflight", "backend_offline", "sync_error",
+    }:
         try:
-            return resolve_kanban_backend_context(board=board, cwd=cwd)
+            context = resolve_kanban_backend_context(board=board, cwd=cwd)
+            if (
+                context.mode == "linked"
+                and (
+                    report.workspace_binding_id is None
+                    or report.workspace_binding_id == context.workspace_binding_id
+                )
+            ):
+                if report.state in {"backend_offline", "sync_error", "sync_inflight"}:
+                    return KanbanBackendContext(
+                        context.mode,
+                        context.workspace_root,
+                        project_id=context.project_id,
+                        workspace_binding_id=context.workspace_binding_id,
+                        local_workspace_id=context.local_workspace_id,
+                        agent_id=context.agent_id,
+                        error=report.error,
+                        backend_available=False,
+                    )
+                return context
         except Exception:
-            return KanbanBackendContext("local_only", Path(cwd or Path.cwd()).resolve())
+            pass
     return KanbanBackendContext("local_only", Path(cwd or Path.cwd()).resolve())

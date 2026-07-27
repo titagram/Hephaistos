@@ -9,7 +9,9 @@ available.  No remote lifecycle mutation is performed by the pull path.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import inspect
 import json
+import secrets
 import sqlite3
 import time
 from typing import Any
@@ -147,49 +149,61 @@ def sync_remote_kanban(
             skipped += 1
             continue
         payload = _payload(item)
-        task_id = _find_remote_link_task_id(
-            conn, context=context, remote_work_item_id=remote_id,
-        )
-        if task_id is not None:
-            existing += 1
-            continue
         key = f"remote-kanban:{context.project_id}:{remote_id}"
-        legacy = conn.execute(
-            "SELECT id FROM tasks WHERE idempotency_key = ? "
-            "AND status != 'archived' LIMIT 1",
-            (key,),
-        ).fetchone()
-        if legacy is not None:
-            task_id = str(legacy["id"])
-            existing += 1
-        else:
-            title = str(payload.get("title") or payload.get("name") or f"Remote work item {remote_id}").strip()
-            body = str(payload.get("body") or payload.get("description") or "").strip() or None
-            priority = payload.get("priority", 0)
-            try:
-                priority = int(priority)
-            except (TypeError, ValueError):
-                priority = 0
-            task_id = kb.create_task(
-                conn,
-                title=title,
-                body=body,
-                assignee=payload.get("assignee") or "default",
-                created_by="hades-backend-sync",
-                priority=priority,
-                triage=True,
-                # Retain the legacy key for exactly one compatibility release.
-                idempotency_key=key,
-                project_id=context.project_id,
+        was_created = False
+        # The identity lookup, task creation/reuse, and link insert are one
+        # SQLite write transaction.  Competing processes serialize at BEGIN
+        # IMMEDIATE and the loser rechecks the complete remote identity, so it
+        # can never leave a duplicate unlinked task behind.
+        with kb.write_txn(conn):
+            task_id = _find_remote_link_task_id(
+                conn, context=context, remote_work_item_id=remote_id,
             )
+            if task_id is None:
+                legacy = conn.execute(
+                    "SELECT id FROM tasks WHERE idempotency_key = ? "
+                    "AND status != 'archived' LIMIT 1",
+                    (key,),
+                ).fetchone()
+                if legacy is not None:
+                    task_id = str(legacy["id"])
+                else:
+                    title = str(
+                        payload.get("title")
+                        or payload.get("name")
+                        or f"Remote work item {remote_id}"
+                    ).strip()
+                    body = str(
+                        payload.get("body") or payload.get("description") or ""
+                    ).strip() or None
+                    priority = payload.get("priority", 0)
+                    try:
+                        priority = int(priority)
+                    except (TypeError, ValueError):
+                        priority = 0
+                    task_id = kb.create_task(
+                        conn,
+                        title=title,
+                        body=body,
+                        assignee=payload.get("assignee") or "default",
+                        created_by="hades-backend-sync",
+                        priority=priority,
+                        triage=True,
+                        idempotency_key=key,
+                        project_id=context.project_id,
+                    )
+                    was_created = True
+                kb.upsert_remote_link(
+                    conn,
+                    task_id=task_id,
+                    project_id=context.project_id,
+                    workspace_binding_id=context.workspace_binding_id,
+                    remote_work_item_id=remote_id,
+                )
+        if was_created:
             created += 1
-        kb.upsert_remote_link(
-            conn,
-            task_id=task_id,
-            project_id=context.project_id,
-            workspace_binding_id=context.workspace_binding_id,
-            remote_work_item_id=remote_id,
-        )
+        else:
+            existing += 1
     return KanbanSyncResult(
         mode=mode,
         pulled=created + existing + skipped,
@@ -246,10 +260,23 @@ def migrate_legacy_remote_links(
         if not key.startswith("remote-kanban:") or kb.get_remote_link(conn, task.id):
             continue
         parts = key.split(":", 2)
-        if len(parts) != 3:
+        if len(parts) != 3 or not parts[1] or not parts[2]:
+            existing = conn.execute(
+                "SELECT 1 FROM task_events WHERE task_id=? "
+                "AND kind='remote_link_migration_diagnostic' LIMIT 1",
+                (task.id,),
+            ).fetchone()
+            if existing is None:
+                with kb.write_txn(conn):
+                    kb._append_event(
+                        conn,
+                        task.id,
+                        "remote_link_migration_diagnostic",
+                        {"reason": "malformed remote identity marker"},
+                    )
             continue
         prefix, project_id, remote_id = parts
-        if prefix != "remote-kanban" or project_id != context.project_id or not remote_id:
+        if prefix != "remote-kanban" or project_id != context.project_id:
             continue
         lease, last_error = _latest_legacy_lease(conn, task.id, remote_id)
         kb.upsert_remote_link(
@@ -419,15 +446,26 @@ def make_remote_admission(
         link = kb.get_remote_link(conn, task.id)
         if link is None:
             return kb.DispatchAdmission("allow", "local-only task")
-        if context.mode != "linked" or not context.local_workspace_id:
-            return kb.DispatchAdmission("defer", "remote_backend_unavailable")
-        if (
-            context.project_id != link.project_id
-            or context.workspace_binding_id != link.workspace_binding_id
-        ):
-            return kb.DispatchAdmission("defer", "remote_binding_mismatch")
+        if context.mode == "linked":
+            if (
+                context.project_id != link.project_id
+                or context.workspace_binding_id != link.workspace_binding_id
+            ):
+                kb.record_remote_link_state(
+                    conn,
+                    task.id,
+                    sync_status="identity_mismatch",
+                    error="active backend binding does not match stored remote identity",
+                )
+                return kb.DispatchAdmission("supersede", "remote_binding_mismatch")
         if link.lease_status == "acquired" and link.lease_token:
             return kb.DispatchAdmission("allow", "remote lease already acquired")
+        if context.mode == "local_only":
+            return kb.DispatchAdmission("defer", "remote_backend_unavailable")
+        if context.mode != "linked" or not context.local_workspace_id:
+            return kb.DispatchAdmission("supersede", "remote_binding_unavailable")
+        if not context.backend_available:
+            return kb.DispatchAdmission("defer", "remote_backend_unavailable")
         if dry_run:
             # A dry-run is observational: it must never claim a remote lease
             # merely to decide whether the card would currently be runnable.
@@ -435,19 +473,49 @@ def make_remote_admission(
         client = None
         try:
             client = _make_remote_client(context, client_factory)
-            allowed, _reason = claim_remote_work_item(
-                conn,
-                client,
-                task_id=task.id,
-                work_item_id=link.remote_work_item_id,
+            response = client.claim_agent_work_item(
+                link.remote_work_item_id,
                 local_workspace_id=context.local_workspace_id,
             )
-        except Exception:
-            allowed = False
+            lease_token = str(response.get("lease_token") or "").strip()
+            if not lease_token:
+                kb.record_remote_link_state(
+                    conn,
+                    task.id,
+                    sync_status="claim_malformed",
+                    error="remote claim returned no lease token",
+                )
+                return kb.DispatchAdmission("supersede", "remote_claim_malformed")
+            kb.set_remote_lease(
+                conn,
+                task.id,
+                lease_token=lease_token,
+                lease_status="acquired",
+            )
+            kb.record_remote_link_state(
+                conn, task.id, sync_status="leased", error=None,
+            )
+        except Exception as exc:
+            failure = _remote_failure_class(exc)
+            kb.record_remote_link_state(
+                conn,
+                task.id,
+                sync_status=failure,
+                error=redact_secret(str(exc)),
+            )
+            if failure == "transport_unavailable":
+                return kb.DispatchAdmission("defer", "remote_backend_unavailable")
+            if failure == "authorization_rejected":
+                return kb.DispatchAdmission(
+                    "supersede", "remote_authorization_rejected",
+                )
+            if failure == "validation_rejected":
+                return kb.DispatchAdmission(
+                    "supersede", "remote_validation_rejected",
+                )
+            return kb.DispatchAdmission("supersede", "remote_identity_rejected")
         finally:
             _close_client(client)
-        if not allowed:
-            return kb.DispatchAdmission("defer", "remote_backend_unavailable")
         return kb.DispatchAdmission("allow", "remote lease acquired")
 
     return admission
@@ -466,6 +534,83 @@ def heartbeat_remote_for_local_task(conn, client: object, task_id: str) -> bool:
         return False
     client.heartbeat_agent_work_item(lease.work_item_id, lease_token=lease.lease_token)
     return True
+
+
+def _remote_failure_class(exc: BaseException) -> str:
+    if isinstance(exc, (ConnectionError, TimeoutError, OSError)):
+        return "transport_unavailable"
+    if isinstance(exc, HadesBackendError):
+        status = exc.status_code
+        if status is not None and (status == 408 or status == 429 or status >= 500):
+            return "transport_unavailable"
+        if status in {401, 403}:
+            return "authorization_rejected"
+        if status in {400, 422}:
+            return "validation_rejected"
+        return "identity_rejected"
+    if isinstance(exc, (PermissionError, ValueError, TypeError, KeyError)):
+        return "validation_rejected"
+    return "identity_rejected"
+
+
+def heartbeat_remote_for_local_task_context(
+    conn,
+    task_id: str,
+    *,
+    board: str | None = None,
+) -> str:
+    """Renew one running task's exact remote lease without weakening local liveness."""
+    link = kb.get_remote_link(conn, task_id)
+    if link is None:
+        return "local_only"
+    if link.lease_status != "acquired" or not link.lease_token:
+        return "no_lease"
+    from hermes_cli import kanban_backend
+
+    context = kanban_backend.resolve_kanban_backend_context(board=board)
+    if (
+        context.mode != "linked"
+        or context.project_id != link.project_id
+        or context.workspace_binding_id != link.workspace_binding_id
+    ):
+        context = kanban_backend.resolve_kanban_backend_context_for_link(link)
+    if context.mode != "linked" or not context.backend_available:
+        kb.record_remote_link_state(
+            conn,
+            task_id,
+            sync_status="transport_unavailable",
+            error=context.error or "backend unavailable for remote heartbeat",
+        )
+        return "transport_unavailable"
+
+    client = None
+    try:
+        client = kanban_backend.make_kanban_client(context)
+        client.heartbeat_agent_work_item(
+            link.remote_work_item_id,
+            lease_token=link.lease_token,
+        )
+    except Exception as exc:
+        failure = _remote_failure_class(exc)
+        safe_error = redact_secret(str(exc))
+        if failure == "transport_unavailable":
+            kb.record_remote_link_state(
+                conn, task_id, sync_status=failure, error=safe_error,
+            )
+            return failure
+        kb.set_remote_lease(
+            conn, task_id, lease_token=None, lease_status="expired",
+        )
+        kb.record_remote_link_state(
+            conn, task_id, sync_status=failure, error=safe_error,
+        )
+        return "expired"
+    finally:
+        _close_client(client)
+    kb.record_remote_link_state(
+        conn, task_id, sync_status="leased", error=None,
+    )
+    return "renewed"
 
 
 def publish_remote_result(
@@ -487,14 +632,27 @@ def publish_remote_result(
         task_id=task_id,
         operation=operation,
         payload={"message": str(message)[:10_000]},
-        idempotency_key=f"{operation}:{link.project_id}:{link.remote_work_item_id}",
+        idempotency_key=(
+            f"{operation}:{link.project_id}:{link.workspace_binding_id}:"
+            f"{link.remote_work_item_id}"
+        ),
     )
     if entry.status != "pending":
+        return False
+    owner = secrets.token_urlsafe(18)
+    claimed = kb.claim_remote_result(
+        conn,
+        entry.id,
+        workspace_binding_id=link.workspace_binding_id,
+        owner_token=owner,
+        now=int(time.time()),
+    )
+    if claimed is None:
         return False
     return _deliver_remote_outbox_entry(
         conn,
         context=context,
-        entry=entry,
+        entry=claimed,
         client_factory=client_factory,
         now=int(time.time()),
     )
@@ -505,18 +663,30 @@ def drain_remote_outbox(
     *,
     context: KanbanBackendContext,
     client_factory=None,
+    borrowed_client=None,
     now: int | None = None,
     limit: int = 20,
 ) -> tuple[int, int]:
     """Deliver a bounded batch of locally durable terminal results."""
     current = int(time.time() if now is None else now)
     delivered = failed = 0
-    for entry in kb.list_due_remote_results(conn, now=current, limit=limit):
+    if context.mode != "linked" or not context.workspace_binding_id:
+        return (0, 0)
+    owner = secrets.token_urlsafe(18)
+    entries = kb.claim_due_remote_results(
+        conn,
+        workspace_binding_id=context.workspace_binding_id,
+        owner_token=owner,
+        now=current,
+        limit=limit,
+    )
+    for entry in entries:
         if _deliver_remote_outbox_entry(
             conn,
             context=context,
             entry=entry,
             client_factory=client_factory,
+            borrowed_client=borrowed_client,
             now=current,
         ):
             delivered += 1
@@ -527,7 +697,20 @@ def drain_remote_outbox(
 
 def _make_remote_client(context: KanbanBackendContext, client_factory):
     if client_factory is not None:
-        return client_factory()
+        try:
+            parameters = inspect.signature(client_factory).parameters.values()
+            accepts_context = any(
+                parameter.kind
+                in {
+                    inspect.Parameter.POSITIONAL_ONLY,
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    inspect.Parameter.VAR_POSITIONAL,
+                }
+                for parameter in parameters
+            )
+        except (TypeError, ValueError):
+            accepts_context = True
+        return client_factory(context) if accepts_context else client_factory()
     from hermes_cli.kanban_backend import make_kanban_client
     return make_kanban_client(context)
 
@@ -554,6 +737,7 @@ def _deliver_remote_outbox_entry(
     context: KanbanBackendContext,
     entry,
     client_factory,
+    borrowed_client=None,
     now: int,
 ) -> bool:
     """Attempt one outbox entry without allowing network failure to alter local state."""
@@ -571,11 +755,13 @@ def _deliver_remote_outbox_entry(
             entry.id,
             error="remote backend context or lease is unavailable",
             next_attempt_at=_delivery_retry_at(entry, now),
+            dead_letter=True,
+            claim_token=entry.claim_token,
         )
         return False
     client = None
     try:
-        client = _make_remote_client(context, client_factory)
+        client = borrowed_client or _make_remote_client(context, client_factory)
         message = str(entry.payload.get("message") or "")[:10_000]
         if entry.operation == "complete":
             client.complete_agent_work_item(
@@ -596,11 +782,53 @@ def _deliver_remote_outbox_entry(
             error=redact_secret(str(exc)),
             next_attempt_at=_delivery_retry_at(entry, now),
             dead_letter=_delivery_rejection_is_terminal(exc),
+            claim_token=entry.claim_token,
         )
         return False
     finally:
-        _close_client(client)
-    kb.mark_remote_result_sent(conn, entry.id)
+        if borrowed_client is None:
+            _close_client(client)
+    kb.mark_remote_result_sent(
+        conn, entry.id, claim_token=entry.claim_token,
+    )
     kb.set_remote_lease(
         conn, entry.task_id, lease_token=None, lease_status="consumed")
     return True
+
+
+def deliver_remote_terminal_for_task(conn, task_id: str) -> bool:
+    """Best-effort delivery for a result already queued by a core transition."""
+    link = kb.get_remote_link(conn, task_id)
+    if link is None:
+        return False
+    from hermes_cli import kanban_backend
+
+    context = kanban_backend.resolve_kanban_backend_context_for_link(link)
+    if context.mode != "linked" or not context.backend_available:
+        return False
+    row = conn.execute(
+        f"SELECT {kb._REMOTE_OUTBOX_COLUMNS} FROM kanban_sync_outbox "
+        "WHERE task_id=? AND status='pending' "
+        "ORDER BY id DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    if row is None:
+        return False
+    entry = kb._remote_outbox_from_row(row)
+    owner = secrets.token_urlsafe(18)
+    claimed = kb.claim_remote_result(
+        conn,
+        entry.id,
+        workspace_binding_id=link.workspace_binding_id,
+        owner_token=owner,
+        now=int(time.time()),
+    )
+    if claimed is None:
+        return False
+    return _deliver_remote_outbox_entry(
+        conn,
+        context=context,
+        entry=claimed,
+        client_factory=None,
+        now=int(time.time()),
+    )

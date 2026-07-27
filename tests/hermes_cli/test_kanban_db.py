@@ -254,14 +254,39 @@ def test_remote_result_outbox_tracks_delivery_and_retry_state(kanban_home):
             idempotency_key="complete:p:w",
             now=100,
         )
+        kb.upsert_remote_link(
+            conn,
+            task_id=task_id,
+            project_id="p",
+            workspace_binding_id="b",
+            remote_work_item_id="w",
+        )
+        retry = kb.claim_remote_result(
+            conn,
+            retry.id,
+            workspace_binding_id="b",
+            owner_token="retry-owner",
+            now=100,
+        )
+        sent = kb.claim_remote_result(
+            conn,
+            sent.id,
+            workspace_binding_id="b",
+            owner_token="sent-owner",
+            now=100,
+        )
+        assert retry is not None and sent is not None
 
         kb.mark_remote_result_retry(
             conn,
             retry.id,
             error="x" * 600,
             next_attempt_at=200,
+            claim_token="retry-owner",
         )
-        kb.mark_remote_result_sent(conn, sent.id)
+        kb.mark_remote_result_sent(
+            conn, sent.id, claim_token="sent-owner",
+        )
 
         assert kb.list_due_remote_results(conn, now=199) == []
         [due] = kb.list_due_remote_results(conn, now=200)
@@ -281,7 +306,22 @@ def test_remote_result_outbox_rejects_retry_after_delivery(kanban_home):
             idempotency_key="complete:p:w",
             now=100,
         )
-        kb.mark_remote_result_sent(conn, sent.id)
+        kb.upsert_remote_link(
+            conn,
+            task_id=task_id,
+            project_id="p",
+            workspace_binding_id="b",
+            remote_work_item_id="w",
+        )
+        sent = kb.claim_remote_result(
+            conn,
+            sent.id,
+            workspace_binding_id="b",
+            owner_token="owner",
+            now=100,
+        )
+        assert sent is not None
+        kb.mark_remote_result_sent(conn, sent.id, claim_token="owner")
 
         with pytest.raises(ValueError, match="cannot retry remote result in sent status"):
             kb.mark_remote_result_retry(
@@ -289,6 +329,7 @@ def test_remote_result_outbox_rejects_retry_after_delivery(kanban_home):
                 sent.id,
                 error="late failure",
                 next_attempt_at=200,
+                claim_token="owner",
             )
 
         assert kb.list_due_remote_results(conn, now=200) == []
@@ -460,6 +501,33 @@ def test_connect_migrates_legacy_db_before_optional_column_indexes(tmp_path):
             created_at INTEGER NOT NULL
         )
     """)
+    conn.execute("""
+        CREATE TABLE kanban_sync_outbox (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id TEXT NOT NULL,
+            operation TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL UNIQUE,
+            payload TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            attempts INTEGER NOT NULL DEFAULT 0,
+            next_attempt_at INTEGER NOT NULL,
+            last_error TEXT,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE kanban_sync_state (
+            workspace_binding_id TEXT PRIMARY KEY,
+            state TEXT NOT NULL,
+            summary TEXT NOT NULL DEFAULT '{}',
+            failure_count INTEGER NOT NULL DEFAULT 0,
+            last_attempt_at INTEGER,
+            next_attempt_at INTEGER,
+            last_error TEXT,
+            updated_at INTEGER NOT NULL
+        )
+    """)
     conn.execute(
         "INSERT INTO tasks (id, title, status, created_at) "
         "VALUES ('legacy', 'old board task', 'ready', 1)"
@@ -475,6 +543,14 @@ def test_connect_migrates_legacy_db_before_optional_column_indexes(tmp_path):
             row["name"]
             for row in migrated.execute("PRAGMA table_info(task_events)")
         }
+        outbox_columns = {
+            row["name"]
+            for row in migrated.execute("PRAGMA table_info(kanban_sync_outbox)")
+        }
+        sync_lock_exists = migrated.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='kanban_sync_locks'"
+        ).fetchone()
         indexes = {
             row["name"]
             for row in migrated.execute(
@@ -487,6 +563,8 @@ def test_connect_migrates_legacy_db_before_optional_column_indexes(tmp_path):
     assert "tenant" in task_columns
     assert "idempotency_key" in task_columns
     assert "run_id" in event_columns
+    assert {"claim_token", "claim_expires"} <= outbox_columns
+    assert sync_lock_exists is not None
     # And their indexes — the regression scope of this test:
     assert "idx_tasks_session_id" in indexes
     assert "idx_tasks_tenant" in indexes
