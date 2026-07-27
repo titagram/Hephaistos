@@ -5,12 +5,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import sqlite3
+import threading
+import time
 from typing import Callable, Literal
 
 from hermes_cli import hades_backend_db as hdb
 from hermes_cli import hades_backend_runtime
 from hermes_cli import kanban_db as kb
 from hermes_cli.hades_backend_sync import matching_workspace_binding_ids
+
+
+_SYNC_GUARD = threading.Lock()
+_LAST_SYNC_ATTEMPTS: dict[tuple[str, str], int] = {}
 
 
 @dataclass(frozen=True)
@@ -138,7 +144,11 @@ def run_kanban_sync(
 
     # Import legacy keys before constructing a network client: migration is
     # intentionally local and can safely run while the backend is unavailable.
-    from hermes_cli.hades_kanban_sync import migrate_legacy_remote_links, sync_remote_kanban
+    from hermes_cli.hades_kanban_sync import (
+        drain_remote_outbox,
+        migrate_legacy_remote_links,
+        sync_remote_kanban,
+    )
 
     with kb.connect(board=board) as conn:
         try:
@@ -147,6 +157,12 @@ def run_kanban_sync(
             try:
                 result = sync_remote_kanban(
                     conn, client, context=context, mode="pull_only",
+                )
+                delivered, deferred = drain_remote_outbox(
+                    conn,
+                    context=context,
+                    client_factory=lambda: client,
+                    now=now,
                 )
             finally:
                 close = getattr(client, "close", None)
@@ -173,9 +189,49 @@ def run_kanban_sync(
                 pulled=result.pulled,
                 created=result.created,
                 existing=result.existing,
+                delivered=delivered,
+                deferred=deferred,
                 failed=result.failed,
                 outbox_pending=_pending_outbox_count(conn),
                 error=result.error,
             )
         _record_sync_report(conn, report, now=now)
         return report
+
+
+def maybe_run_kanban_sync(
+    *,
+    board: str | None = None,
+    cwd: str | Path | None = None,
+    min_interval_seconds: int = 30,
+    now: int | None = None,
+) -> KanbanSyncReport:
+    """Run at most one best-effort sync per binding during the configured interval.
+
+    Dispatcher surfaces call this helper before a tick.  Local-only boards do
+    not open a backend client and are never throttled; remote work remains
+    subject to its admission callback independently of this opportunistic
+    pull/delivery attempt.
+    """
+    context = resolve_kanban_backend_context(board=board, cwd=cwd)
+    if context.mode == "local_only":
+        return KanbanSyncReport(state="local_only")
+    if context.mode != "linked" or not context.workspace_binding_id:
+        return KanbanSyncReport(state="sync_error", error=context.error)
+
+    current = int(time.time() if now is None else now)
+    interval = max(0, int(min_interval_seconds))
+    sync_key = (
+        context.workspace_binding_id,
+        str(kb.kanban_db_path(board=board).resolve()),
+    )
+    with _SYNC_GUARD:
+        last_attempt = _LAST_SYNC_ATTEMPTS.get(sync_key)
+        if last_attempt is not None and current - last_attempt < interval:
+            return KanbanSyncReport(
+                state="sync_deferred",
+                workspace_binding_id=context.workspace_binding_id,
+            )
+        _LAST_SYNC_ATTEMPTS[sync_key] = current
+
+    return run_kanban_sync(board=board, cwd=cwd, now=current)

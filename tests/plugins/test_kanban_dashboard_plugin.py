@@ -606,6 +606,35 @@ def test_dispatch_dry_run(client):
     assert isinstance(body, dict)
 
 
+def test_dispatch_runs_optional_sync_and_installs_remote_admission(client, monkeypatch):
+    """The dashboard quick path uses the same safe remote gate as the CLI."""
+    from hermes_cli.kanban_backend import KanbanBackendContext, KanbanSyncReport
+
+    sync_calls = []
+    admissions = []
+    monkeypatch.setattr(
+        "hermes_cli.kanban_backend.maybe_run_kanban_sync",
+        lambda **kwargs: sync_calls.append(kwargs) or KanbanSyncReport(state="local_only"),
+    )
+    monkeypatch.setattr(
+        "hermes_cli.kanban_backend.resolve_kanban_backend_context",
+        lambda **_: KanbanBackendContext("local_only", Path.cwd()),
+    )
+
+    def _admission(conn, *, context):
+        admissions.append((conn, context))
+        return lambda _task: kb.DispatchAdmission("allow", "local-only task")
+
+    monkeypatch.setattr("hermes_cli.hades_kanban_sync.make_remote_admission", _admission)
+
+    response = client.post("/api/plugins/kanban/dispatch?dry_run=true")
+
+    assert response.status_code == 200
+    assert sync_calls == [{"board": None}]
+    assert len(admissions) == 1
+    assert admissions[0][1].mode == "local_only"
+
+
 # ---------------------------------------------------------------------------
 # Triage column (new v1 status)
 # ---------------------------------------------------------------------------

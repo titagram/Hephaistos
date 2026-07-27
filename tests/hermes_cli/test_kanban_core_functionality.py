@@ -478,6 +478,31 @@ def test_daemon_keeps_going_after_tick_exception(kanban_home, monkeypatch):
     assert calls[0] >= 2
 
 
+def test_daemon_runs_optional_sync_and_connection_scoped_admission(kanban_home):
+    """Daemon ticks compose optional sync without retaining a stale DB handle."""
+    sync_calls = []
+    admission_connections = []
+    stop = threading.Event()
+
+    def _sync():
+        sync_calls.append("sync")
+        stop.set()
+
+    def _admission(conn):
+        admission_connections.append(conn)
+        return lambda _task: kb.DispatchAdmission("allow", "local-only task")
+
+    kb.run_daemon(
+        interval=0.01,
+        stop_event=stop,
+        sync_fn=_sync,
+        admission_fn=_admission,
+    )
+
+    assert sync_calls == ["sync"]
+    assert len(admission_connections) == 1
+
+
 # ---------------------------------------------------------------------------
 # Stats + age
 # ---------------------------------------------------------------------------

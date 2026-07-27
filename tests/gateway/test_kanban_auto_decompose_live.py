@@ -9,9 +9,14 @@ called every tick, reading the current config.
 
 from __future__ import annotations
 
+import asyncio
+from pathlib import Path
+
 import pytest
 
-from gateway.kanban_watchers import _resolve_auto_decompose_settings
+from gateway import kanban_watchers as watchers
+from gateway.kanban_watchers import GatewayKanbanWatchersMixin, _resolve_auto_decompose_settings
+from hermes_cli import kanban_db as kb
 
 
 def test_enabled_by_default_when_key_absent():
@@ -81,3 +86,59 @@ def test_live_toggle_takes_effect_between_calls():
     # User edits config.yaml mid-run.
     state["kanban"]["auto_decompose"] = False
     assert _resolve_auto_decompose_settings(lambda: state)[0] is False
+
+
+def test_gateway_dispatch_tick_runs_optional_sync_and_remote_admission(tmp_path, monkeypatch):
+    """The embedded dispatcher composes bounded sync and admission per board."""
+    from hermes_cli.kanban_backend import KanbanBackendContext, KanbanSyncReport
+
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.delenv("HERMES_KANBAN_DISPATCH_IN_GATEWAY", raising=False)
+    kb.init_db()
+    with kb.connect_closing() as conn:
+        kb.create_task(conn, title="local", assignee="default")
+
+    sync_calls = []
+    admissions = []
+    monkeypatch.setattr(
+        "hermes_cli.kanban_backend.maybe_run_kanban_sync",
+        lambda **kwargs: sync_calls.append(kwargs) or KanbanSyncReport(state="local_only"),
+    )
+    monkeypatch.setattr(
+        "hermes_cli.kanban_backend.resolve_kanban_backend_context",
+        lambda **_: KanbanBackendContext("local_only", Path.cwd()),
+    )
+
+    def _admission(conn, *, context):
+        admissions.append((conn, context))
+        return lambda _task: kb.DispatchAdmission("allow", "local-only task")
+
+    monkeypatch.setattr("hermes_cli.hades_kanban_sync.make_remote_admission", _admission)
+    monkeypatch.setattr("hermes_cli.config.load_config", lambda: {
+        "kanban": {"dispatch_in_gateway": True, "auto_decompose": False},
+    })
+    monkeypatch.setattr(watchers, "_acquire_singleton_lock", lambda _path: (None, "unavailable"))
+    monkeypatch.setattr("hermes_cli.profiles.profile_exists", lambda _name: True)
+    monkeypatch.setattr("hermes_cli.kanban_db._default_spawn", lambda *_args, **_kwargs: 12345)
+
+    class _Runner(GatewayKanbanWatchersMixin):
+        _running = True
+
+    runner = _Runner()
+    sleep_calls = 0
+
+    async def _sleep(_seconds):
+        nonlocal sleep_calls
+        sleep_calls += 1
+        if sleep_calls >= 2:
+            runner._running = False
+
+    monkeypatch.setattr(watchers.asyncio, "sleep", _sleep)
+    asyncio.run(runner._kanban_dispatcher_watcher())
+
+    assert sync_calls == [{"board": "default"}]
+    assert len(admissions) == 1
+    assert admissions[0][1].mode == "local_only"

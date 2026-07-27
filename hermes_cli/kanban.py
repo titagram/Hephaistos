@@ -213,7 +213,7 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     # file, then "default". See kanban_db.get_current_board().
     kanban_parser.add_argument(
         "--board",
-        default=None,
+        default=argparse.SUPPRESS,
         metavar="<slug>",
         help=(
             "Board slug to operate on. Defaults to the current board "
@@ -226,6 +226,17 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
 
     # --- init ---
     sub.add_parser("init", help="Create kanban.db if missing (idempotent)")
+
+    # --- sync ---
+    p_sync = sub.add_parser(
+        "sync",
+        help="Synchronize this local board when a backend is linked",
+    )
+    # Keep the same destination as the top-level flag while allowing the
+    # ergonomic `kanban sync --board ariadne` spelling.
+    p_sync.add_argument("--board", default=argparse.SUPPRESS)
+    p_sync.add_argument("--status", action="store_true")
+    p_sync.add_argument("--json", action="store_true")
 
     # --- boards (new in v2: multi-project support) ---
     p_boards = sub.add_parser(
@@ -937,6 +948,7 @@ def kanban_command(args: argparse.Namespace) -> int:
 
         handlers = {
             "init":     _cmd_init,
+            "sync":     _cmd_sync,
             "create":   _cmd_create,
             "swarm":    _cmd_swarm,
             "list":     _cmd_list,
@@ -1266,6 +1278,53 @@ def _cmd_init(args: argparse.Namespace) -> int:
         "running gateway, tasks stay in 'ready' forever."
     )
     return 0
+
+
+def _cmd_sync(args: argparse.Namespace) -> int:
+    """Synchronize a linked board without turning local-only into an error."""
+    from hermes_cli.kanban_backend import run_kanban_sync
+
+    report = run_kanban_sync(board=getattr(args, "board", None))
+    payload = {
+        "state": report.state,
+        "workspace_binding_id": report.workspace_binding_id,
+        "pulled": report.pulled,
+        "created": report.created,
+        "existing": report.existing,
+        "delivered": report.delivered,
+        "deferred": report.deferred,
+        "failed": report.failed,
+        "outbox_pending": report.outbox_pending,
+        "error": report.error,
+    }
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Kanban sync: {report.state}")
+        if getattr(args, "status", False) or report.state != "local_only":
+            print(
+                f"pulled={report.pulled} created={report.created} "
+                f"delivered={report.delivered} deferred={report.deferred} "
+                f"pending={report.outbox_pending}"
+            )
+        if report.error:
+            print(report.error, file=sys.stderr)
+    return 0 if report.state in {"local_only", "synced", "backend_offline"} else 1
+
+
+def _remote_dispatch_admission(conn, *, board: str | None):
+    """Build the optional remote gate without making local cards depend on it."""
+    from hermes_cli import kanban_backend
+    from hermes_cli.hades_kanban_sync import make_remote_admission
+
+    try:
+        kanban_backend.maybe_run_kanban_sync(board=board)
+        context = kanban_backend.resolve_kanban_backend_context(board=board)
+    except Exception:
+        # A failed optional probe must still allow local cards.  The callback
+        # sees remote links and keeps those cards fail-closed.
+        context = kanban_backend.KanbanBackendContext("local_only", Path.cwd())
+    return make_remote_admission(conn, context=context)
 
 
 def _cmd_heartbeat(args: argparse.Namespace) -> int:
@@ -2171,9 +2230,12 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
         max_in_progress_per_profile = None
         max_in_progress = None
         max_spawn = getattr(args, "max", None)
+    board = getattr(args, "board", None)
     with kb.connect_closing() as conn:
+        admission = _remote_dispatch_admission(conn, board=board)
         res = kb.dispatch_once(
             conn,
+            admission_fn=admission,
             dry_run=args.dry_run,
             max_spawn=max_spawn,
             max_in_progress=max_in_progress,
@@ -2364,12 +2426,23 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
         except Exception:
             return False
 
+    board = getattr(args, "board", None)
+
+    def _sync_tick():
+        from hermes_cli.kanban_backend import maybe_run_kanban_sync
+        return maybe_run_kanban_sync(board=board)
+
+    def _admission_for_connection(conn):
+        return _remote_dispatch_admission(conn, board=board)
+
     try:
         kb.run_daemon(
             interval=args.interval,
             max_spawn=args.max,
             failure_limit=getattr(args, "failure_limit", kb.DEFAULT_SPAWN_FAILURE_LIMIT),
             on_tick=_on_tick,
+            sync_fn=_sync_tick,
+            admission_fn=_admission_for_connection,
         )
     finally:
         if pidfile:

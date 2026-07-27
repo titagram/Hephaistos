@@ -73,6 +73,95 @@ def test_parse_branch_flag_rejects_empty_and_option_like():
         kc._parse_branch_flag("bad branch")
 
 
+def test_kanban_sync_without_backend_is_successful_local_only(kanban_home, capsys):
+    """An unlinked board can explicitly sync without needing backend setup."""
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers(dest="command")
+    kc.build_parser(sub)
+
+    args = parser.parse_args(["kanban", "sync", "--json"])
+
+    assert kc.kanban_command(args) == 0
+    assert json.loads(capsys.readouterr().out)["state"] == "local_only"
+
+
+def test_kanban_sync_accepts_board_after_subcommand(kanban_home, capsys):
+    """The child board flag has the same semantics as the global one."""
+    kb.create_board("ariadne")
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers(dest="command")
+    kc.build_parser(sub)
+
+    args = parser.parse_args([
+        "kanban", "sync", "--board", "ariadne", "--status", "--json",
+    ])
+
+    assert kc.kanban_command(args) == 0
+    assert json.loads(capsys.readouterr().out)["state"] == "local_only"
+
+
+def test_cli_dispatch_keeps_local_card_running_when_optional_sync_is_offline(
+    kanban_home, monkeypatch, capsys,
+):
+    """The real CLI dispatch path syncs opportunistically, never as a gate."""
+    from hermes_cli.kanban_backend import KanbanSyncReport
+
+    sync_calls = []
+    monkeypatch.setattr(
+        "hermes_cli.kanban_backend.maybe_run_kanban_sync",
+        lambda **kwargs: sync_calls.append(kwargs) or KanbanSyncReport(state="backend_offline"),
+    )
+    monkeypatch.setattr("hermes_cli.profiles.profile_exists", lambda _name: True)
+    monkeypatch.setattr("hermes_cli.kanban_db._default_spawn", lambda *_args, **_kwargs: 12345)
+    with kb.connect_closing() as conn:
+        kb.create_task(conn, title="local", assignee="default")
+
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers(dest="command")
+    kc.build_parser(sub)
+    args = parser.parse_args(["kanban", "dispatch", "--json"])
+
+    assert kc.kanban_command(args) == 0
+    assert sync_calls == [{"board": None}]
+    assert len(json.loads(capsys.readouterr().out)["spawned"]) == 1
+
+
+def test_cli_dispatch_defers_remote_card_when_backend_is_unavailable(
+    kanban_home, monkeypatch, capsys,
+):
+    """The real CLI path never turns a remote card into local work offline."""
+    from hermes_cli.kanban_backend import KanbanSyncReport
+
+    spawned = []
+    monkeypatch.setattr(
+        "hermes_cli.kanban_backend.maybe_run_kanban_sync",
+        lambda **_: KanbanSyncReport(state="backend_offline"),
+    )
+    monkeypatch.setattr("hermes_cli.profiles.profile_exists", lambda _name: True)
+    monkeypatch.setattr(
+        "hermes_cli.kanban_db._default_spawn",
+        lambda task, *_args, **_kwargs: spawned.append(task.id) or 12345,
+    )
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="remote", assignee="default")
+        kb.upsert_remote_link(
+            conn,
+            task_id=task_id,
+            project_id="project",
+            workspace_binding_id="binding",
+            remote_work_item_id="work-item",
+        )
+
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers(dest="command")
+    kc.build_parser(sub)
+    args = parser.parse_args(["kanban", "dispatch", "--json"])
+
+    assert kc.kanban_command(args) == 0
+    assert spawned == []
+    assert json.loads(capsys.readouterr().out)["spawned"] == []
+
+
 # ---------------------------------------------------------------------------
 # run_slash smoke tests (end-to-end via the same entry both CLI and gateway use)
 # ---------------------------------------------------------------------------

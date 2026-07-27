@@ -8431,6 +8431,8 @@ def run_daemon(
     failure_limit: int = DEFAULT_SPAWN_FAILURE_LIMIT,
     stop_event=None,
     on_tick=None,
+    sync_fn=None,
+    admission_fn=None,
 ) -> None:
     """Run the dispatcher in a loop until interrupted.
 
@@ -8438,6 +8440,10 @@ def run_daemon(
     on SIGINT / SIGTERM so ``hermes kanban daemon`` is systemd-friendly.
     ``stop_event`` (a :class:`threading.Event`) and ``on_tick`` (a
     callable receiving the :class:`DispatchResult`) are test hooks.
+    ``sync_fn`` is an optional best-effort pre-tick hook. ``admission_fn``
+    receives the tick's connection and returns the callback passed to
+    :func:`dispatch_once`; keeping it a factory prevents a remote admission
+    closure from retaining a closed SQLite connection across daemon ticks.
     """
     import signal
     import threading
@@ -8461,11 +8467,15 @@ def run_daemon(
 
     while not stop_event.is_set():
         try:
+            if sync_fn is not None:
+                sync_fn()
             with contextlib.closing(connect()) as conn:
+                admission = admission_fn(conn) if admission_fn is not None else None
                 res = dispatch_once(
                     conn,
                     max_spawn=max_spawn,
                     failure_limit=failure_limit,
+                    admission_fn=admission,
                 )
             if on_tick is not None:
                 try:

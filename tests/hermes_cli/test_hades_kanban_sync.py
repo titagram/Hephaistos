@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 from hermes_cli import kanban_db as kb
 from hermes_cli.hades_kanban_sync import (
@@ -11,7 +12,7 @@ from hermes_cli.hades_kanban_sync import (
     run_kanban_sync,
     sync_remote_kanban,
 )
-from hermes_cli.kanban_backend import KanbanBackendContext
+from hermes_cli.kanban_backend import KanbanBackendContext, KanbanSyncReport
 
 
 def _linked_context(project_id="p"):
@@ -234,6 +235,60 @@ def test_high_level_sync_reports_local_only_without_constructing_a_client(_herme
     assert report.state == "local_only"
     assert report.workspace_binding_id is None
     assert not constructed
+
+
+def test_high_level_sync_drains_pending_terminal_results(_hermetic_environment, monkeypatch):
+    """A successful sync trigger also retries the durable completion outbox."""
+    from hermes_cli import hades_kanban_sync as remote_sync
+    from hermes_cli import kanban_backend as backend
+
+    context = _linked_context()
+    client = object()
+    drained = []
+    monkeypatch.setattr(backend, "resolve_kanban_backend_context", lambda **_: context)
+    monkeypatch.setattr(backend, "make_kanban_client", lambda *_, **__: client)
+    monkeypatch.setattr(remote_sync, "migrate_legacy_remote_links", lambda *_: None)
+    monkeypatch.setattr(
+        remote_sync,
+        "sync_remote_kanban",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            status="ok", pulled=2, created=1, existing=1, failed=0, error=None,
+        ),
+    )
+    monkeypatch.setattr(
+        remote_sync,
+        "drain_remote_outbox",
+        lambda conn, *, context, client_factory, **_: drained.append((context, client_factory())) or (1, 0),
+    )
+
+    report = backend.run_kanban_sync(cwd=Path.cwd())
+
+    assert report.state == "synced"
+    assert report.delivered == 1
+    assert drained == [(context, client)]
+
+
+def test_maybe_sync_is_bounded_per_workspace_binding(_hermetic_environment, monkeypatch):
+    """Dispatcher ticks do not repeatedly hammer the same linked backend."""
+    from hermes_cli import kanban_backend as backend
+
+    context = _linked_context()
+    reports = []
+    monkeypatch.setattr(backend, "resolve_kanban_backend_context", lambda **_: context)
+    monkeypatch.setattr(
+        backend,
+        "run_kanban_sync",
+        lambda **kwargs: reports.append(kwargs) or KanbanSyncReport(
+            state="synced", workspace_binding_id=context.workspace_binding_id,
+        ),
+    )
+
+    first = backend.maybe_run_kanban_sync(now=1_000, min_interval_seconds=30)
+    second = backend.maybe_run_kanban_sync(now=1_001, min_interval_seconds=30)
+
+    assert first.state == "synced"
+    assert second.state == "sync_deferred"
+    assert reports == [{"board": None, "cwd": None, "now": 1_000}]
 
 
 def test_local_card_admission_never_constructs_backend_client(_hermetic_environment):

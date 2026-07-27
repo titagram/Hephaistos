@@ -1957,11 +1957,29 @@ def dispatch(
     max_n: int = Query(8, alias="max"),
     board: Optional[str] = Query(None),
 ):
+    from hermes_cli import kanban_backend
+    from hermes_cli.hades_kanban_sync import make_remote_admission
+
     board = _resolve_board(board)
     conn = _conn(board=board)
     try:
+        try:
+            kanban_backend.maybe_run_kanban_sync(board=board)
+            backend_context = kanban_backend.resolve_kanban_backend_context(board=board)
+        except Exception:
+            # Dashboard dispatch remains an offline-capable local operation.
+            # The local-only admission still rejects remote-origin cards
+            # without a valid lease.
+            backend_context = kanban_backend.KanbanBackendContext(
+                "local_only", Path.cwd(),
+            )
+        admission = make_remote_admission(conn, context=backend_context)
         result = kanban_db.dispatch_once(
-            conn, dry_run=dry_run, max_spawn=max_n, board=board,
+            conn,
+            dry_run=dry_run,
+            max_spawn=max_n,
+            board=board,
+            admission_fn=admission,
         )
         # DispatchResult is a dataclass.
         try:
