@@ -291,6 +291,55 @@ def test_maybe_sync_is_bounded_per_workspace_binding(_hermetic_environment, monk
     assert reports == [{"board": None, "cwd": None, "now": 1_000}]
 
 
+def test_maybe_sync_preserves_offline_state_during_backoff(_hermetic_environment, monkeypatch):
+    """A deferred retry after outage must not look healthy to dispatch admission."""
+    from hermes_cli import kanban_backend as backend
+
+    context = _linked_context()
+    reports = []
+    monkeypatch.setattr(backend, "resolve_kanban_backend_context", lambda **_: context)
+    monkeypatch.setattr(
+        backend,
+        "run_kanban_sync",
+        lambda **kwargs: reports.append(kwargs) or KanbanSyncReport(
+            state="backend_offline", workspace_binding_id=context.workspace_binding_id,
+        ),
+    )
+
+    first = backend.maybe_run_kanban_sync(now=2_000, min_interval_seconds=30)
+    second = backend.maybe_run_kanban_sync(now=2_001, min_interval_seconds=30)
+
+    assert first.state == "backend_offline"
+    assert second.state == "backend_offline"
+    assert len(reports) == 1
+
+
+def test_dispatch_context_only_resolves_after_synced_or_healthy_deferred_report(
+    _hermetic_environment, monkeypatch,
+):
+    """Offline and validation reports never reopen the backend client path."""
+    from hermes_cli import kanban_backend as backend
+
+    context = _linked_context()
+    resolutions = []
+    monkeypatch.setattr(
+        backend,
+        "resolve_kanban_backend_context",
+        lambda **kwargs: resolutions.append(kwargs) or context,
+    )
+
+    offline = backend.dispatch_context_for_sync_report(
+        KanbanSyncReport(state="backend_offline"),
+    )
+    deferred = backend.dispatch_context_for_sync_report(
+        KanbanSyncReport(state="sync_deferred"), board="ariadne",
+    )
+
+    assert offline.mode == "local_only"
+    assert deferred == context
+    assert resolutions == [{"board": "ariadne", "cwd": None}]
+
+
 def test_local_card_admission_never_constructs_backend_client(_hermetic_environment):
     """Removing the local-card branch must not make local dispatch depend on Hades."""
     calls = []

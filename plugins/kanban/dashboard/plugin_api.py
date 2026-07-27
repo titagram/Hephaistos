@@ -1964,8 +1964,10 @@ def dispatch(
     conn = _conn(board=board)
     try:
         try:
-            kanban_backend.maybe_run_kanban_sync(board=board)
-            backend_context = kanban_backend.resolve_kanban_backend_context(board=board)
+            sync_report = kanban_backend.maybe_run_kanban_sync(board=board)
+            backend_context = kanban_backend.dispatch_context_for_sync_report(
+                sync_report, board=board,
+            )
         except Exception:
             # Dashboard dispatch remains an offline-capable local operation.
             # The local-only admission still rejects remote-origin cards

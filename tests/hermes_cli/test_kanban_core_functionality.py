@@ -503,6 +503,81 @@ def test_daemon_runs_optional_sync_and_connection_scoped_admission(kanban_home):
     assert len(admission_connections) == 1
 
 
+def test_review_dispatch_defers_remote_card_without_backend_lease(kanban_home, monkeypatch):
+    """Review is a dispatch lane too: remote cards must stay fail-closed."""
+    from hermes_cli.hades_kanban_sync import make_remote_admission
+    from hermes_cli.kanban_backend import KanbanBackendContext
+
+    monkeypatch.setattr("hermes_cli.profiles.profile_exists", lambda _name: True)
+    spawned = []
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="remote review", assignee="reviewer")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status = 'review' WHERE id = ?", (task_id,))
+        kb.upsert_remote_link(
+            conn,
+            task_id=task_id,
+            project_id="project",
+            workspace_binding_id="binding",
+            remote_work_item_id="review-work",
+        )
+        admission = make_remote_admission(
+            conn,
+            context=KanbanBackendContext("local_only", Path.cwd()),
+        )
+
+        result = kb.dispatch_once(
+            conn,
+            admission_fn=admission,
+            spawn_fn=lambda task, _workspace: spawned.append(task.id),
+        )
+        task = kb.get_task(conn, task_id)
+
+    assert spawned == []
+    assert (task_id, "remote_backend_unavailable") in result.admission_deferred
+    assert task is not None
+    assert task.status == "review"
+    assert task.claim_lock is None
+
+
+def test_dry_run_admission_defers_unleased_remote_ready_and_review_cards(kanban_home, monkeypatch):
+    """Dry runs expose the same remote gate without taking leases or locks."""
+    from hermes_cli.hades_kanban_sync import make_remote_admission
+    from hermes_cli.kanban_backend import KanbanBackendContext
+
+    monkeypatch.setattr("hermes_cli.profiles.profile_exists", lambda _name: True)
+    with kb.connect_closing() as conn:
+        ready_id = kb.create_task(conn, title="remote ready", assignee="worker")
+        review_id = kb.create_task(conn, title="remote review", assignee="reviewer")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status = 'review' WHERE id = ?", (review_id,))
+        for task_id, work_item_id in ((ready_id, "ready-work"), (review_id, "review-work")):
+            kb.upsert_remote_link(
+                conn,
+                task_id=task_id,
+                project_id="project",
+                workspace_binding_id="binding",
+                remote_work_item_id=work_item_id,
+            )
+        admission = make_remote_admission(
+            conn,
+            context=KanbanBackendContext("local_only", Path.cwd()),
+        )
+
+        result = kb.dispatch_once(conn, dry_run=True, admission_fn=admission)
+        ready = kb.get_task(conn, ready_id)
+        review = kb.get_task(conn, review_id)
+        ready_link = kb.get_remote_link(conn, ready_id)
+        review_link = kb.get_remote_link(conn, review_id)
+
+    assert result.spawned == []
+    assert {task_id for task_id, _reason in result.admission_deferred} == {ready_id, review_id}
+    assert ready is not None and ready.status == "ready" and ready.claim_lock is None
+    assert review is not None and review.status == "review" and review.claim_lock is None
+    assert ready_link is not None and ready_link.lease_status == "none"
+    assert review_link is not None and review_link.lease_status == "none"
+
+
 # ---------------------------------------------------------------------------
 # Stats + age
 # ---------------------------------------------------------------------------

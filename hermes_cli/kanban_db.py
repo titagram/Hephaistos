@@ -3889,8 +3889,8 @@ def release_active_claim(
     reason: str,
 ) -> bool:
     """Release a claimed task without charging the worker failure budget."""
-    if target_status not in {"ready", "blocked"}:
-        raise ValueError("target_status must be ready or blocked")
+    if target_status not in {"ready", "review", "blocked"}:
+        raise ValueError("target_status must be ready, review, or blocked")
     if not reason or not reason.strip():
         raise ValueError("reason is required")
     with write_txn(conn):
@@ -7437,6 +7437,43 @@ def has_spawnable_review(conn: sqlite3.Connection) -> bool:
     return False
 
 
+def _dispatch_admission_decision(
+    admission_fn,
+    task: Task,
+    *,
+    dry_run: bool,
+) -> DispatchAdmission:
+    """Evaluate a caller-supplied admission callback without backend coupling.
+
+    The optional ``dry_run`` keyword lets the remote edge report an unleased
+    card as deferred without acquiring a lease.  Older callbacks that only
+    accept a task keep their historical signature.
+    """
+    if admission_fn is None:
+        return DispatchAdmission("allow", "no admission callback")
+    try:
+        import inspect
+
+        kwargs = {}
+        if dry_run:
+            try:
+                params = inspect.signature(admission_fn).parameters.values()
+                if any(
+                    param.name == "dry_run"
+                    or param.kind is inspect.Parameter.VAR_KEYWORD
+                    for param in params
+                ):
+                    kwargs["dry_run"] = True
+            except (TypeError, ValueError):
+                pass
+        decision = admission_fn(task, **kwargs)
+        if not isinstance(decision, DispatchAdmission):
+            raise TypeError("admission_fn must return DispatchAdmission")
+        return decision
+    except Exception as exc:
+        return DispatchAdmission("defer", f"admission callback error: {exc}")
+
+
 def dispatch_once(
     conn: sqlite3.Connection,
     *,
@@ -7753,7 +7790,20 @@ def _dispatch_once_locked(
                         {"reason": guard_reason},
                     )
             continue
+        candidate = get_task(conn, row["id"])
+        if candidate is None:
+            continue
+        decision = _dispatch_admission_decision(
+            admission_fn, candidate, dry_run=dry_run,
+        )
+        reason = decision.reason.strip() or "dispatch admission denied"
         if dry_run:
+            if decision.action == "defer":
+                result.admission_deferred.append((candidate.id, reason))
+                continue
+            if decision.action == "supersede":
+                result.admission_superseded.append((candidate.id, reason))
+                continue
             result.spawned.append((row["id"], row_assignee, ""))
             # Increment per-profile counter even in dry_run so the cap
             # check sees the would-be spawn on subsequent iterations.
@@ -7767,40 +7817,28 @@ def _dispatch_once_locked(
         claimed = claim_task(conn, row["id"], ttl_seconds=ttl_seconds)
         if claimed is None:
             continue
-        if admission_fn is not None:
-            try:
-                decision = admission_fn(claimed)
-                if not isinstance(decision, DispatchAdmission):
-                    raise TypeError("admission_fn must return DispatchAdmission")
-            except Exception as exc:
-                reason = f"admission callback error: {exc}"
-                release_active_claim(
-                    conn,
-                    claimed.id,
-                    target_status="ready",
-                    reason=reason,
-                )
-                result.admission_deferred.append((claimed.id, reason))
-                continue
-            reason = decision.reason.strip() or "dispatch admission denied"
-            if decision.action == "defer":
-                release_active_claim(
-                    conn,
-                    claimed.id,
-                    target_status="ready",
-                    reason=reason,
-                )
-                result.admission_deferred.append((claimed.id, reason))
-                continue
-            if decision.action == "supersede":
-                release_active_claim(
-                    conn,
-                    claimed.id,
-                    target_status="blocked",
-                    reason=reason,
-                )
-                result.admission_superseded.append((claimed.id, reason))
-                continue
+        decision = _dispatch_admission_decision(
+            admission_fn, claimed, dry_run=False,
+        )
+        reason = decision.reason.strip() or "dispatch admission denied"
+        if decision.action == "defer":
+            release_active_claim(
+                conn,
+                claimed.id,
+                target_status="ready",
+                reason=reason,
+            )
+            result.admission_deferred.append((claimed.id, reason))
+            continue
+        if decision.action == "supersede":
+            release_active_claim(
+                conn,
+                claimed.id,
+                target_status="blocked",
+                reason=reason,
+            )
+            result.admission_superseded.append((claimed.id, reason))
+            continue
         try:
             resolved_branch_name = None
             if claimed.workspace_kind == "worktree":
@@ -7887,11 +7925,46 @@ def _dispatch_once_locked(
         if profile_exists is not None and not profile_exists(row["assignee"]):
             result.skipped_nonspawnable.append(row["id"])
             continue
+        candidate = get_task(conn, row["id"])
+        if candidate is None:
+            continue
+        decision = _dispatch_admission_decision(
+            admission_fn, candidate, dry_run=dry_run,
+        )
+        reason = decision.reason.strip() or "dispatch admission denied"
         if dry_run:
+            if decision.action == "defer":
+                result.admission_deferred.append((candidate.id, reason))
+                continue
+            if decision.action == "supersede":
+                result.admission_superseded.append((candidate.id, reason))
+                continue
             result.spawned.append((row["id"], row["assignee"], ""))
             continue
         claimed = claim_review_task(conn, row["id"], ttl_seconds=ttl_seconds)
         if claimed is None:
+            continue
+        decision = _dispatch_admission_decision(
+            admission_fn, claimed, dry_run=False,
+        )
+        reason = decision.reason.strip() or "dispatch admission denied"
+        if decision.action == "defer":
+            release_active_claim(
+                conn,
+                claimed.id,
+                target_status="review",
+                reason=reason,
+            )
+            result.admission_deferred.append((claimed.id, reason))
+            continue
+        if decision.action == "supersede":
+            release_active_claim(
+                conn,
+                claimed.id,
+                target_status="blocked",
+                reason=reason,
+            )
+            result.admission_superseded.append((claimed.id, reason))
             continue
         try:
             resolved_branch_name = None

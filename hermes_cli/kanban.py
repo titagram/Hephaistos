@@ -1318,8 +1318,10 @@ def _remote_dispatch_admission(conn, *, board: str | None):
     from hermes_cli.hades_kanban_sync import make_remote_admission
 
     try:
-        kanban_backend.maybe_run_kanban_sync(board=board)
-        context = kanban_backend.resolve_kanban_backend_context(board=board)
+        report = kanban_backend.maybe_run_kanban_sync(board=board)
+        context = kanban_backend.dispatch_context_for_sync_report(
+            report, board=board,
+        )
     except Exception:
         # A failed optional probe must still allow local cards.  The callback
         # sees remote links and keeps those cards fail-closed.

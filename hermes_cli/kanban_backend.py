@@ -16,7 +16,7 @@ from hermes_cli.hades_backend_sync import matching_workspace_binding_ids
 
 
 _SYNC_GUARD = threading.Lock()
-_LAST_SYNC_ATTEMPTS: dict[tuple[str, str], int] = {}
+_LAST_SYNC_ATTEMPTS: dict[tuple[str, str], tuple[int, "KanbanSyncReport"]] = {}
 
 
 @dataclass(frozen=True)
@@ -226,12 +226,40 @@ def maybe_run_kanban_sync(
         str(kb.kanban_db_path(board=board).resolve()),
     )
     with _SYNC_GUARD:
-        last_attempt = _LAST_SYNC_ATTEMPTS.get(sync_key)
-        if last_attempt is not None and current - last_attempt < interval:
+        previous = _LAST_SYNC_ATTEMPTS.get(sync_key)
+        if previous is not None and current - previous[0] < interval:
+            previous_report = previous[1]
+            if previous_report.state in {"backend_offline", "sync_error"}:
+                return previous_report
             return KanbanSyncReport(
                 state="sync_deferred",
                 workspace_binding_id=context.workspace_binding_id,
             )
-        _LAST_SYNC_ATTEMPTS[sync_key] = current
+    report = run_kanban_sync(board=board, cwd=cwd, now=current)
+    with _SYNC_GUARD:
+        _LAST_SYNC_ATTEMPTS[sync_key] = (current, report)
+    return report
 
-    return run_kanban_sync(board=board, cwd=cwd, now=current)
+
+def dispatch_context_for_sync_report(
+    report: KanbanSyncReport,
+    *,
+    board: str | None = None,
+    cwd: str | Path | None = None,
+) -> KanbanBackendContext:
+    """Select an admission context without retrying a known failed sync.
+
+    ``sync_deferred`` only follows a recently healthy bounded attempt, so it
+    may resolve the linked context for lease admission.  A reported offline,
+    validation, or unknown state is deliberately represented as local-only:
+    local cards remain usable while the structured-link admission callback
+    defers every remote card before constructing a client.
+    """
+    if report.state in {"local_only", "backend_offline", "sync_error"}:
+        return KanbanBackendContext("local_only", Path(cwd or Path.cwd()).resolve())
+    if report.state in {"synced", "sync_deferred"}:
+        try:
+            return resolve_kanban_backend_context(board=board, cwd=cwd)
+        except Exception:
+            return KanbanBackendContext("local_only", Path(cwd or Path.cwd()).resolve())
+    return KanbanBackendContext("local_only", Path(cwd or Path.cwd()).resolve())

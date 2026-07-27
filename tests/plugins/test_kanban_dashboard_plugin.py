@@ -635,6 +635,46 @@ def test_dispatch_runs_optional_sync_and_installs_remote_admission(client, monke
     assert admissions[0][1].mode == "local_only"
 
 
+def test_dispatch_offline_sync_report_does_not_retry_remote_client_per_card(client, monkeypatch):
+    """Dashboard dispatch keeps a reported backend outage fully local."""
+    from hermes_cli.kanban_backend import KanbanBackendContext, KanbanSyncReport
+
+    remote = client.post(
+        "/api/plugins/kanban/tasks",
+        json={"title": "remote", "assignee": "default"},
+    ).json()["task"]
+    with kb.connect_closing() as conn:
+        kb.upsert_remote_link(
+            conn,
+            task_id=remote["id"],
+            project_id="project",
+            workspace_binding_id="binding",
+            remote_work_item_id="work-item",
+        )
+
+    client_attempts = []
+    monkeypatch.setattr(
+        "hermes_cli.kanban_backend.maybe_run_kanban_sync",
+        lambda **_: KanbanSyncReport(state="backend_offline"),
+    )
+    monkeypatch.setattr(
+        "hermes_cli.kanban_backend.resolve_kanban_backend_context",
+        lambda **_: KanbanBackendContext(
+            "linked", Path.cwd(), project_id="project", workspace_binding_id="binding",
+            local_workspace_id="local", agent_id="agent",
+        ),
+    )
+    monkeypatch.setattr(
+        "hermes_cli.hades_kanban_sync._make_remote_client",
+        lambda *_args, **_kwargs: client_attempts.append("attempt") or object(),
+    )
+
+    response = client.post("/api/plugins/kanban/dispatch")
+
+    assert response.status_code == 200
+    assert client_attempts == []
+
+
 # ---------------------------------------------------------------------------
 # Triage column (new v1 status)
 # ---------------------------------------------------------------------------

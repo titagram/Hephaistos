@@ -413,7 +413,7 @@ def make_remote_admission(
     client_factory=None,
 ):
     """Build a dispatcher admission callback for ``dispatch_once``."""
-    def admission(task):
+    def admission(task, *, dry_run: bool = False):
         # This lookup intentionally comes before any context or client work:
         # local cards must remain dispatchable while the backend is absent.
         link = kb.get_remote_link(conn, task.id)
@@ -428,6 +428,10 @@ def make_remote_admission(
             return kb.DispatchAdmission("defer", "remote_binding_mismatch")
         if link.lease_status == "acquired" and link.lease_token:
             return kb.DispatchAdmission("allow", "remote lease already acquired")
+        if dry_run:
+            # A dry-run is observational: it must never claim a remote lease
+            # merely to decide whether the card would currently be runnable.
+            return kb.DispatchAdmission("defer", "remote_backend_unavailable")
         client = None
         try:
             client = _make_remote_client(context, client_factory)

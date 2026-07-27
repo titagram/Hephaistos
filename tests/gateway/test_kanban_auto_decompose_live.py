@@ -142,3 +142,63 @@ def test_gateway_dispatch_tick_runs_optional_sync_and_remote_admission(tmp_path,
     assert sync_calls == [{"board": "default"}]
     assert len(admissions) == 1
     assert admissions[0][1].mode == "local_only"
+
+
+def test_gateway_offline_sync_report_does_not_retry_remote_client_per_card(tmp_path, monkeypatch):
+    """Gateway dispatch treats a reported offline sync as an offline admission context."""
+    from hermes_cli.kanban_backend import KanbanBackendContext, KanbanSyncReport
+
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.delenv("HERMES_KANBAN_DISPATCH_IN_GATEWAY", raising=False)
+    kb.init_db()
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="remote", assignee="default")
+        kb.upsert_remote_link(
+            conn,
+            task_id=task_id,
+            project_id="project",
+            workspace_binding_id="binding",
+            remote_work_item_id="work-item",
+        )
+
+    client_attempts = []
+    monkeypatch.setattr(
+        "hermes_cli.kanban_backend.maybe_run_kanban_sync",
+        lambda **_: KanbanSyncReport(state="backend_offline"),
+    )
+    monkeypatch.setattr(
+        "hermes_cli.kanban_backend.resolve_kanban_backend_context",
+        lambda **_: KanbanBackendContext(
+            "linked", Path.cwd(), project_id="project", workspace_binding_id="binding",
+            local_workspace_id="local", agent_id="agent",
+        ),
+    )
+    monkeypatch.setattr(
+        "hermes_cli.hades_kanban_sync._make_remote_client",
+        lambda *_args, **_kwargs: client_attempts.append("attempt") or object(),
+    )
+    monkeypatch.setattr("hermes_cli.config.load_config", lambda: {
+        "kanban": {"dispatch_in_gateway": True, "auto_decompose": False},
+    })
+    monkeypatch.setattr(watchers, "_acquire_singleton_lock", lambda _path: (None, "unavailable"))
+    monkeypatch.setattr("hermes_cli.profiles.profile_exists", lambda _name: True)
+
+    class _Runner(GatewayKanbanWatchersMixin):
+        _running = True
+
+    runner = _Runner()
+    sleeps = 0
+
+    async def _sleep(_seconds):
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps >= 2:
+            runner._running = False
+
+    monkeypatch.setattr(watchers.asyncio, "sleep", _sleep)
+    asyncio.run(runner._kanban_dispatcher_watcher())
+
+    assert client_attempts == []

@@ -915,9 +915,9 @@ class GatewayKanbanWatchersMixin:
                 # the first. See the matching comment in
                 # `_kanban_notifier_watcher` and issue #21378.
                 try:
-                    _kanban_backend.maybe_run_kanban_sync(board=slug)
-                    _backend_context = _kanban_backend.resolve_kanban_backend_context(
-                        board=slug,
+                    _sync_report = _kanban_backend.maybe_run_kanban_sync(board=slug)
+                    _backend_context = _kanban_backend.dispatch_context_for_sync_report(
+                        _sync_report, board=slug,
                     )
                 except Exception:
                     # Backend probing is optional for local work; the

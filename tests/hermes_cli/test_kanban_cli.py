@@ -162,6 +162,49 @@ def test_cli_dispatch_defers_remote_card_when_backend_is_unavailable(
     assert json.loads(capsys.readouterr().out)["spawned"] == []
 
 
+def test_cli_offline_sync_report_does_not_retry_remote_client_per_card(
+    kanban_home, monkeypatch, capsys,
+):
+    """A non-exception offline report must be a hard no-network admission path."""
+    from hermes_cli.kanban_backend import KanbanBackendContext, KanbanSyncReport
+
+    client_attempts = []
+    monkeypatch.setattr(
+        "hermes_cli.kanban_backend.maybe_run_kanban_sync",
+        lambda **_: KanbanSyncReport(state="backend_offline"),
+    )
+    monkeypatch.setattr(
+        "hermes_cli.kanban_backend.resolve_kanban_backend_context",
+        lambda **_: KanbanBackendContext(
+            "linked", Path.cwd(), project_id="project", workspace_binding_id="binding",
+            local_workspace_id="local", agent_id="agent",
+        ),
+    )
+    monkeypatch.setattr(
+        "hermes_cli.hades_kanban_sync._make_remote_client",
+        lambda *_args, **_kwargs: client_attempts.append("attempt") or object(),
+    )
+    monkeypatch.setattr("hermes_cli.profiles.profile_exists", lambda _name: True)
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="remote", assignee="default")
+        kb.upsert_remote_link(
+            conn,
+            task_id=task_id,
+            project_id="project",
+            workspace_binding_id="binding",
+            remote_work_item_id="work-item",
+        )
+
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers(dest="command")
+    kc.build_parser(sub)
+    args = parser.parse_args(["kanban", "dispatch", "--json"])
+
+    assert kc.kanban_command(args) == 0
+    assert client_attempts == []
+    assert json.loads(capsys.readouterr().out)["spawned"] == []
+
+
 # ---------------------------------------------------------------------------
 # run_slash smoke tests (end-to-end via the same entry both CLI and gateway use)
 # ---------------------------------------------------------------------------
