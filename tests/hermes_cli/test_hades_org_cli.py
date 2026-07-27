@@ -6,6 +6,7 @@ from hermes_cli.hades_org_cmd import (
     sync_kanban,
     validate_portfolio_file,
 )
+from hermes_cli.kanban_backend import KanbanSyncReport
 
 
 def payload():
@@ -66,3 +67,24 @@ def test_sync_defaults_to_safe_off_mode():
     result, code = sync_kanban(board=None, mode="off")
     assert code == 0
     assert result == {"status": "ok", "mode": "off", "pulled": 0}
+
+
+def test_sync_reports_binding_scoped_local_only_state(monkeypatch):
+    """The org CLI consumes the local-first runner instead of profile defaults."""
+    monkeypatch.setattr(
+        "hermes_cli.hades_org_cmd.run_kanban_sync",
+        lambda *, board: KanbanSyncReport(state="local_only"),
+    )
+
+    result, code = sync_kanban(board="named-board", mode="pull_only")
+
+    assert code == 0
+    assert result == {
+        "status": "local_only",
+        "mode": "pull_only",
+        "pulled": 0,
+        "created": 0,
+        "existing": 0,
+        "failed": 0,
+        "outbox_pending": 0,
+    }

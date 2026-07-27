@@ -13,7 +13,8 @@ from hermes_cli.hierarchical_execution import (
     validate_execution_portfolio,
 )
 from hermes_cli.kanban_portfolio import OrgRunCreated, RemoteTaskTopology, create_org_run
-from hermes_cli.hades_kanban_sync import SYNC_MODES, sync_remote_kanban
+from hermes_cli.hades_kanban_sync import SYNC_MODES
+from hermes_cli.kanban_backend import run_kanban_sync
 from hermes_cli.kanban_swarm import latest_blackboard
 from hermes_cli.hades_coordination import snapshot_org_run
 
@@ -133,37 +134,20 @@ def sync_kanban(*, board: str | None, mode: str, project_id: str | None = None) 
         return _error("invalid_sync_mode", ValueError(mode)), 2
     if mode == "off":
         return {"status": "ok", "mode": mode, "pulled": 0}, 0
-    try:
-        from hermes_cli import hades_backend_runtime as runtime
-
-        agent = runtime.current_agent()
-        if agent is None:
-            return _error("not_configured", ValueError("Hades backend is not configured")), 1
-        selected_project = str(project_id or agent.project_id).strip()
-        client = runtime.plugin_work_items_client_from_config()
-        try:
-            with kb.connect(board=board) as conn:
-                result = sync_remote_kanban(
-                    conn,
-                    client,
-                    project_id=selected_project,
-                    mode=mode,
-                )
-        finally:
-            close = getattr(client, "close", None)
-            if callable(close):
-                close()
-    except Exception as exc:  # pragma: no cover - CLI boundary
-        return _error("kanban_sync_failed", exc), 1
+    if project_id is not None:
+        # The selected workspace binding is authoritative; accepting a
+        # profile/default override here could pull another project's cards.
+        return _error("invalid_sync_project", ValueError("project id is selected by the workspace binding")), 2
+    report = run_kanban_sync(board=board)
     return {
-        "status": "ok",
-        "mode": result.mode,
-        "project_id": selected_project,
-        "pulled": result.pulled,
-        "created": result.created,
-        "existing": result.existing,
-        "skipped": result.skipped,
-    }, 0
+        "status": report.state,
+        "mode": mode,
+        "pulled": report.pulled,
+        "created": report.created,
+        "existing": report.existing,
+        "failed": report.failed,
+        "outbox_pending": report.outbox_pending,
+    }, (0 if report.state in {"synced", "local_only"} else 1)
 
 
 def build_parser(subparsers, *, cmd_org: Callable[[argparse.Namespace], int]) -> None:

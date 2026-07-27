@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import sqlite3
 from typing import Callable, Literal
 
 from hermes_cli import hades_backend_db as hdb
@@ -22,6 +23,22 @@ class KanbanBackendContext:
     workspace_binding_id: str | None = None
     local_workspace_id: str | None = None
     agent_id: str | None = None
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class KanbanSyncReport:
+    """Binding-scoped outcome for one safe local Kanban sync attempt."""
+
+    state: str
+    workspace_binding_id: str | None = None
+    pulled: int = 0
+    created: int = 0
+    existing: int = 0
+    delivered: int = 0
+    deferred: int = 0
+    failed: int = 0
+    outbox_pending: int = 0
     error: str | None = None
 
 
@@ -70,3 +87,95 @@ def make_kanban_client(
 
     factory = client_factory or hades_backend_runtime.client_for_agent
     return factory(agent)
+
+
+def _pending_outbox_count(conn) -> int:
+    row = conn.execute(
+        "SELECT COUNT(*) AS count FROM kanban_sync_outbox WHERE status = 'pending'"
+    ).fetchone()
+    return int(row["count"])
+
+
+def _record_sync_report(
+    conn,
+    report: KanbanSyncReport,
+    *,
+    now: int | None,
+) -> None:
+    if report.workspace_binding_id is None:
+        return
+    kb.record_kanban_sync_state(
+        conn,
+        workspace_binding_id=report.workspace_binding_id,
+        state=report.state,
+        summary={
+            "pulled": report.pulled,
+            "created": report.created,
+            "existing": report.existing,
+            "delivered": report.delivered,
+            "deferred": report.deferred,
+            "failed": report.failed,
+            "outbox_pending": report.outbox_pending,
+        },
+        last_error=report.error,
+        now=now,
+    )
+
+
+def run_kanban_sync(
+    *,
+    board: str | None = None,
+    cwd: str | Path | None = None,
+    client_factory: Callable[[hdb.BackendAgent], object] | None = None,
+    now: int | None = None,
+) -> KanbanSyncReport:
+    """Pull one bound workspace without turning local boards into backend clients."""
+    context = resolve_kanban_backend_context(board=board, cwd=cwd)
+    if context.mode == "local_only":
+        return KanbanSyncReport(state="local_only")
+    if context.mode != "linked":
+        return KanbanSyncReport(state="sync_error", error=context.error)
+
+    # Import legacy keys before constructing a network client: migration is
+    # intentionally local and can safely run while the backend is unavailable.
+    from hermes_cli.hades_kanban_sync import migrate_legacy_remote_links, sync_remote_kanban
+
+    with kb.connect(board=board) as conn:
+        try:
+            migrate_legacy_remote_links(conn, context)
+            client = make_kanban_client(context, client_factory=client_factory)
+            try:
+                result = sync_remote_kanban(
+                    conn, client, context=context, mode="pull_only",
+                )
+            finally:
+                close = getattr(client, "close", None)
+                if callable(close):
+                    close()
+        except (ValueError, KeyError, sqlite3.IntegrityError) as exc:
+            report = KanbanSyncReport(
+                state="sync_error",
+                workspace_binding_id=context.workspace_binding_id,
+                outbox_pending=_pending_outbox_count(conn),
+                error=str(exc)[:500],
+            )
+        except Exception as exc:
+            report = KanbanSyncReport(
+                state="backend_offline",
+                workspace_binding_id=context.workspace_binding_id,
+                outbox_pending=_pending_outbox_count(conn),
+                error=str(exc)[:500],
+            )
+        else:
+            report = KanbanSyncReport(
+                state="synced" if result.status == "ok" else "sync_error",
+                workspace_binding_id=context.workspace_binding_id,
+                pulled=result.pulled,
+                created=result.created,
+                existing=result.existing,
+                failed=result.failed,
+                outbox_pending=_pending_outbox_count(conn),
+                error=result.error,
+            )
+        _record_sync_report(conn, report, now=now)
+        return report

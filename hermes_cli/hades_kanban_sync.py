@@ -10,9 +10,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import sqlite3
 from typing import Any
 
 from hermes_cli import kanban_db as kb
+from hermes_cli.kanban_backend import KanbanBackendContext
 
 SYNC_MODES = {"off", "pull_only", "mirror"}
 
@@ -20,10 +22,13 @@ SYNC_MODES = {"off", "pull_only", "mirror"}
 @dataclass(frozen=True)
 class KanbanSyncResult:
     mode: str
+    status: str = "ok"
     pulled: int = 0
     created: int = 0
     existing: int = 0
     skipped: int = 0
+    failed: int = 0
+    error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -62,11 +67,25 @@ def _payload(item: dict[str, Any]) -> dict[str, Any]:
     return value if isinstance(value, dict) else item
 
 
+def _find_remote_link_task_id(
+    conn: sqlite3.Connection,
+    *,
+    context: KanbanBackendContext,
+    remote_work_item_id: str,
+) -> str | None:
+    row = conn.execute(
+        "SELECT task_id FROM kanban_remote_links WHERE project_id = ? "
+        "AND workspace_binding_id = ? AND remote_work_item_id = ?",
+        (context.project_id, context.workspace_binding_id, remote_work_item_id),
+    ).fetchone()
+    return str(row["task_id"]) if row is not None else None
+
+
 def sync_remote_kanban(
     conn,
     client: object,
     *,
-    project_id: str,
+    context: KanbanBackendContext,
     agent_key: str = "local_agent",
     mode: str = "off",
     limit: int = 100,
@@ -80,48 +99,80 @@ def sync_remote_kanban(
     """
     if mode not in SYNC_MODES:
         raise ValueError(f"mode must be one of {sorted(SYNC_MODES)}")
+    if context.mode != "linked" or not context.project_id or not context.workspace_binding_id:
+        raise ValueError("remote Kanban sync requires a linked workspace context")
     if mode == "off":
         return KanbanSyncResult(mode=mode)
     response = client.list_agent_work_items(
-        project_id=project_id,
+        project_id=context.project_id,
         agent_key=agent_key,
         status="queued",
         limit=max(1, int(limit)),
     )
+    items = _items(response)
+    for item in items:
+        item_project = str(
+            item.get("project_id") or _payload(item).get("project_id")
+            or context.project_id
+        ).strip()
+        if item_project != context.project_id:
+            return KanbanSyncResult(
+                mode=mode,
+                status="rejected_page",
+                failed=len(items),
+                error="backend page contains a missing or cross-project item",
+            )
+
     created = existing = skipped = 0
-    for item in _items(response):
+    for item in items:
         remote_id = _remote_id(item)
         if not remote_id:
             skipped += 1
             continue
         payload = _payload(item)
-        key = f"remote-kanban:{project_id}:{remote_id}"
-        row = conn.execute(
-            "SELECT id FROM tasks WHERE idempotency_key = ? AND status != 'archived' LIMIT 1",
-            (key,),
-        ).fetchone()
-        if row is not None:
+        task_id = _find_remote_link_task_id(
+            conn, context=context, remote_work_item_id=remote_id,
+        )
+        if task_id is not None:
             existing += 1
             continue
-        title = str(payload.get("title") or payload.get("name") or f"Remote work item {remote_id}").strip()
-        body = str(payload.get("body") or payload.get("description") or "").strip() or None
-        priority = payload.get("priority", 0)
-        try:
-            priority = int(priority)
-        except (TypeError, ValueError):
-            priority = 0
-        kb.create_task(
+        key = f"remote-kanban:{context.project_id}:{remote_id}"
+        legacy = conn.execute(
+            "SELECT id FROM tasks WHERE idempotency_key = ? "
+            "AND status != 'archived' LIMIT 1",
+            (key,),
+        ).fetchone()
+        if legacy is not None:
+            task_id = str(legacy["id"])
+            existing += 1
+        else:
+            title = str(payload.get("title") or payload.get("name") or f"Remote work item {remote_id}").strip()
+            body = str(payload.get("body") or payload.get("description") or "").strip() or None
+            priority = payload.get("priority", 0)
+            try:
+                priority = int(priority)
+            except (TypeError, ValueError):
+                priority = 0
+            task_id = kb.create_task(
+                conn,
+                title=title,
+                body=body,
+                assignee=payload.get("assignee") or "default",
+                created_by="hades-backend-sync",
+                priority=priority,
+                triage=True,
+                # Retain the legacy key for exactly one compatibility release.
+                idempotency_key=key,
+                project_id=context.project_id,
+            )
+            created += 1
+        kb.upsert_remote_link(
             conn,
-            title=title,
-            body=body,
-            assignee=payload.get("assignee") or "default",
-            created_by="hades-backend-sync",
-            priority=priority,
-            triage=True,
-            idempotency_key=key,
-            project_id=project_id,
+            task_id=task_id,
+            project_id=context.project_id,
+            workspace_binding_id=context.workspace_binding_id,
+            remote_work_item_id=remote_id,
         )
-        created += 1
     return KanbanSyncResult(
         mode=mode,
         pulled=created + existing + skipped,
@@ -129,6 +180,81 @@ def sync_remote_kanban(
         existing=existing,
         skipped=skipped,
     )
+
+
+def _latest_legacy_lease(
+    conn: sqlite3.Connection,
+    task_id: str,
+    remote_work_item_id: str,
+) -> tuple[RemoteLease | None, str | None]:
+    """Return the newest usable legacy lease, flagging conflicting history."""
+    conflict = False
+    newest: RemoteLease | None = None
+    saw_matching_lease = False
+    for row in reversed(kb.list_comments(conn, task_id)):
+        if row.author != LEASE_AUTHOR or not row.body.startswith(LEASE_PREFIX):
+            continue
+        try:
+            raw = json.loads(row.body[len(LEASE_PREFIX):])
+            work_item_id = str(raw["work_item_id"]).strip()
+            lease_token = str(raw["lease_token"]).strip()
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if not work_item_id or not lease_token:
+            continue
+        if work_item_id != remote_work_item_id:
+            conflict = True
+            continue
+        if not saw_matching_lease:
+            saw_matching_lease = True
+            if lease_token != "consumed":
+                newest = RemoteLease(work_item_id, lease_token)
+    return newest, "legacy remote lease history is ambiguous" if conflict else None
+
+
+def migrate_legacy_remote_links(
+    conn: sqlite3.Connection,
+    context: KanbanBackendContext,
+) -> int:
+    """Import legacy key/comment state into binding-scoped remote links.
+
+    This migration is deliberately local-only: it takes a database connection,
+    never receives a client, and makes no backend calls.
+    """
+    if context.mode != "linked" or not context.project_id or not context.workspace_binding_id:
+        return 0
+    migrated = 0
+    for task in kb.list_tasks(conn, include_archived=True):
+        key = str(task.idempotency_key or "")
+        if not key.startswith("remote-kanban:") or kb.get_remote_link(conn, task.id):
+            continue
+        parts = key.split(":", 2)
+        if len(parts) != 3:
+            continue
+        prefix, project_id, remote_id = parts
+        if prefix != "remote-kanban" or project_id != context.project_id or not remote_id:
+            continue
+        lease, last_error = _latest_legacy_lease(conn, task.id, remote_id)
+        kb.upsert_remote_link(
+            conn,
+            task_id=task.id,
+            project_id=project_id,
+            workspace_binding_id=context.workspace_binding_id,
+            remote_work_item_id=remote_id,
+            last_error=(last_error[:500] if last_error else None),
+        )
+        if lease is not None:
+            kb.set_remote_lease(
+                conn, task.id, lease_token=lease.lease_token, lease_status="acquired",
+            )
+        migrated += 1
+    return migrated
+
+
+def run_kanban_sync(**kwargs):
+    """Compatibility façade for the binding-aware sync runner."""
+    from hermes_cli.kanban_backend import run_kanban_sync as _run_kanban_sync
+    return _run_kanban_sync(**kwargs)
 
 
 def sync_remote_mandates(
