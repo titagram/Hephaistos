@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 
 def test_hades_coordination_profiles_are_curated_and_local_only():
     from hermes_cli.hades_coordination import hades_coordination_profiles
@@ -96,7 +97,7 @@ def test_publish_requires_completed_integration_and_org_review(tmp_path):
         created = create_org_run(conn, plan, validate_execution_portfolio(plan))
         published, reason = publish_org_run_completion(
             conn,
-            client_factory=lambda: object(),
+            board="target",
             org_run_id=plan.org_run_id,
             topology=created,
             remote_task_id="HD-1",
@@ -108,11 +109,11 @@ def test_publish_requires_completed_integration_and_org_review(tmp_path):
         conn.close()
 
 
-def _ready_org_run_for_publish(conn, client):
+def _ready_org_run_for_publish(conn, client, *, board: str):
     from tools.delegation_evidence import build_evidence_packet
     from hermes_cli.kanban_portfolio import import_remote_mandate, persist_org_run_contract, register_org_run_evidence
     plan = _org_plan()
-    created = create_org_run(conn, plan, validate_execution_portfolio(plan))
+    created = create_org_run(conn, plan, validate_execution_portfolio(plan), board=board)
     remote = created.remote_tasks["HD-1"]
     kb.upsert_remote_link(
         conn,
@@ -158,25 +159,41 @@ class _CompletionClient:
         return {}
 
 
-def test_publish_uses_execution_lease_only_after_gate(tmp_path, monkeypatch):
+def test_publish_uses_execution_lease_only_after_gate(monkeypatch):
     import hermes_cli.hades_coordination as coordination
 
-    conn = kb.connect(tmp_path / "kanban.db")
+    kb.create_board("target")
+    kb.create_board("active")
+    kb.set_current_board("active")
+    conn = kb.connect(board="target")
     try:
         client = _CompletionClient()
-        plan, created, _remote, evidence_ref = _ready_org_run_for_publish(conn, client)
+        plan, created, _remote, evidence_ref = _ready_org_run_for_publish(
+            conn, client, board="target",
+        )
+        resolver_calls = []
         monkeypatch.setattr(
             coordination,
             "resolve_kanban_backend_context",
-            lambda **_kwargs: KanbanBackendContext(
-                "linked", Path.cwd(), project_id="p", workspace_binding_id="binding-1",
-                local_workspace_id="lw-1", agent_id="agent-1",
+            lambda **kwargs: (
+                resolver_calls.append(kwargs)
+                or KanbanBackendContext(
+                    "linked", Path.cwd(), project_id="p", workspace_binding_id="binding-1",
+                    local_workspace_id="lw-1", agent_id="agent-1",
+                )
             ),
+            raising=False,
+        )
+        selected_agents = []
+        monkeypatch.setattr(
+            coordination,
+            "make_kanban_client",
+            lambda context: selected_agents.append(context.agent_id) or client,
             raising=False,
         )
         assert publish_org_run_completion(
             conn,
-            client_factory=lambda: client,
+            board="target",
             org_run_id=plan.org_run_id,
             topology=created,
             remote_task_id="HD-1",
@@ -184,18 +201,23 @@ def test_publish_uses_execution_lease_only_after_gate(tmp_path, monkeypatch):
             evidence_refs=[evidence_ref],
         ) == (True, "published")
         assert client.completed == ("awi-1", "lease-1", "bounded result")
+        assert resolver_calls == [{"board": "target"}]
+        assert selected_agents == ["agent-1"]
     finally:
         conn.close()
 
 
-def test_publish_rejects_live_workspace_binding_mismatch(tmp_path, monkeypatch):
+def test_publish_rejects_live_workspace_binding_mismatch(monkeypatch):
     """Removing the live-binding check would publish through a different workspace agent."""
     import hermes_cli.hades_coordination as coordination
 
-    conn = kb.connect(tmp_path / "kanban.db")
+    kb.create_board("target")
+    conn = kb.connect(board="target")
     try:
         client = _CompletionClient()
-        plan, created, _remote, evidence_ref = _ready_org_run_for_publish(conn, client)
+        plan, created, _remote, evidence_ref = _ready_org_run_for_publish(
+            conn, client, board="target",
+        )
         monkeypatch.setattr(
             coordination,
             "resolve_kanban_backend_context",
@@ -207,13 +229,48 @@ def test_publish_rejects_live_workspace_binding_mismatch(tmp_path, monkeypatch):
         )
         assert publish_org_run_completion(
             conn,
-            client_factory=lambda: client,
+            board="target",
             org_run_id=plan.org_run_id,
             topology=created,
             remote_task_id="HD-1",
             message="bounded result",
             evidence_refs=[evidence_ref],
         ) == (False, "remote binding does not match this workspace")
+        assert not hasattr(client, "completed")
+    finally:
+        conn.close()
+
+
+def test_publish_rejects_precreated_client_factory_bypass(monkeypatch):
+    """A caller cannot substitute a client that was created for another agent."""
+    import hermes_cli.hades_coordination as coordination
+
+    kb.create_board("target")
+    conn = kb.connect(board="target")
+    try:
+        client = _CompletionClient()
+        plan, created, _remote, evidence_ref = _ready_org_run_for_publish(
+            conn, client, board="target",
+        )
+        monkeypatch.setattr(
+            coordination,
+            "resolve_kanban_backend_context",
+            lambda **_kwargs: KanbanBackendContext(
+                "linked", Path.cwd(), project_id="p", workspace_binding_id="binding-1",
+                local_workspace_id="lw-1", agent_id="agent-1",
+            ),
+            raising=False,
+        )
+        with pytest.raises(TypeError):
+            publish_org_run_completion(
+                conn,
+                client_factory=lambda: client,
+                org_run_id=plan.org_run_id,
+                topology=created,
+                remote_task_id="HD-1",
+                message="bounded result",
+                evidence_refs=[evidence_ref],
+            )
         assert not hasattr(client, "completed")
     finally:
         conn.close()

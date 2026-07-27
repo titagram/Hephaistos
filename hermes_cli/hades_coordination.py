@@ -7,13 +7,12 @@ import threading
 import time
 import uuid
 from copy import deepcopy
-from pathlib import Path
 from typing import Any, Callable, TypeVar
 
 from hermes_cli.hades_backend_client import HadesBackendClient, HadesBackendError
 from hermes_cli.hades_agent_coordination import DelegationAuthority, LeafManifest
 from hermes_cli import kanban_db as kb
-from hermes_cli.kanban_backend import resolve_kanban_backend_context
+from hermes_cli.kanban_backend import make_kanban_client, resolve_kanban_backend_context
 
 logger = logging.getLogger(__name__)
 
@@ -433,7 +432,7 @@ def post_coordination_event(conn, *, anchor_id: str, event_type: str, summary: s
 def publish_org_run_completion(
     conn,
     *,
-    client_factory=None,
+    board: str,
     org_run_id: str,
     topology: _OrgRunCreated,
     remote_task_id: str,
@@ -478,7 +477,7 @@ def publish_org_run_completion(
         or link.remote_work_item_id != remote.work_item_id
     ):
         return False, "remote work item mapping is missing"
-    context = resolve_kanban_backend_context(cwd=Path.cwd())
+    context = resolve_kanban_backend_context(board=board)
     if context.mode != "linked" or not context.agent_id:
         return False, "remote backend is unavailable"
     if (
@@ -492,7 +491,7 @@ def publish_org_run_completion(
         task_id=remote.execution_id,
         success=True,
         message=message,
-        client_factory=client_factory,
+        client_factory=lambda: make_kanban_client(context),
     )
     if not published:
         return False, "remote terminal delivery is queued"
