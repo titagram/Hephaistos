@@ -159,3 +159,36 @@ No failure was reported in these dashboard chunks. Tests 78–83 were not
 repeated individually after their shared chunk crossed the same external
 harness boundary; this remains bounded incomplete evidence rather than a
 claim of a full-file pass.
+
+## Fix Round 2
+
+Corrected the runtime/documentation mismatch in Kanban sync classification.
+`HadesBackendError` is intentionally broad: the HTTP client uses it both for
+HTTP responses (with `status_code`/`code`) and for a wrapped `httpx.HTTPError`
+transport failure (as its exception cause). Treating every such error as
+offline had incorrectly returned exit zero for authorization and malformed
+backend-contract failures.
+
+The narrow classifier now emits `backend_offline` only for a direct or wrapped
+transport failure, HTTP 408, or HTTP 5xx. It emits `sync_error` for HTTP 4xx,
+backend errors without a transport cause, and local runtime/configuration
+errors. Stored and emitted messages use the existing secret redactor and are
+bounded to 500 characters.
+
+Regression evidence, through the actual CLI command handler:
+
+```text
+RED: HTTP 403 HadesBackendError -> backend_offline / exit 0 (incorrect)
+RED: invalid HadesBackendError  -> backend_offline / exit 0 (incorrect)
+GREEN focused classifications (raw transport, wrapped httpx transport,
+      403, invalid contract, misconfigured binding, redaction): 6 passed
+test_kanban_cli.py:                                      60 passed
+test_hades_kanban_sync.py + test_kanban_backend.py:      21 passed
+compileall + git diff --check:                             clean
+```
+
+The documentation now lists only emitted report states: `local_only`,
+`synced`, `backend_offline`, and `sync_error`. Configuration, identity,
+authorization, and validation examples are explicitly described as
+`sync_error`, not as their own report state. No deployment or live-session
+operation was performed.

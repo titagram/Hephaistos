@@ -8,10 +8,12 @@ import os
 import threading
 from pathlib import Path
 
+import httpx
 import pytest
 
 from hermes_cli import kanban as kc
 from hermes_cli import kanban_db as kb
+from hermes_cli.hades_backend_client import HadesBackendError
 
 
 @pytest.fixture
@@ -98,6 +100,131 @@ def test_kanban_sync_accepts_board_after_subcommand(kanban_home, capsys):
 
     assert kc.kanban_command(args) == 0
     assert json.loads(capsys.readouterr().out)["state"] == "local_only"
+
+
+@pytest.mark.parametrize(
+    ("failure_factory", "expected_state", "expected_exit"),
+    [
+        (
+            lambda: ConnectionError("network unreachable"),
+            "backend_offline",
+            0,
+        ),
+        (
+            lambda: _wrapped_transport_failure(),
+            "backend_offline",
+            0,
+        ),
+        (
+            lambda: HadesBackendError("403: forbidden", status_code=403, code="forbidden"),
+            "sync_error",
+            1,
+        ),
+        (
+            lambda: HadesBackendError("backend response has an invalid contract"),
+            "sync_error",
+            1,
+        ),
+    ],
+)
+def test_cli_sync_classifies_transport_and_backend_identity_failures(
+    kanban_home, monkeypatch, capsys, failure_factory, expected_state, expected_exit,
+):
+    """CLI status is fail-open only for genuine backend unavailability."""
+    from hermes_cli import hades_kanban_sync as remote_sync
+    from hermes_cli import kanban_backend as backend
+    from hermes_cli.kanban_backend import KanbanBackendContext
+
+    context = KanbanBackendContext(
+        "linked", Path.cwd(), project_id="project", workspace_binding_id="binding",
+        local_workspace_id="local", agent_id="agent",
+    )
+    failure = failure_factory()
+    monkeypatch.setattr(backend, "resolve_kanban_backend_context", lambda **_: context)
+    monkeypatch.setattr(backend, "make_kanban_client", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(remote_sync, "migrate_legacy_remote_links", lambda *_args: None)
+    monkeypatch.setattr(
+        remote_sync,
+        "sync_remote_kanban",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(failure),
+    )
+
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers(dest="command")
+    kc.build_parser(sub)
+    args = parser.parse_args(["kanban", "sync", "--json"])
+
+    assert kc.kanban_command(args) == expected_exit
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["state"] == expected_state
+
+
+def _wrapped_transport_failure() -> HadesBackendError:
+    """Match the exception chain emitted by HadesBackendClient on connect failure."""
+    error = HadesBackendError("connect failed")
+    error.__cause__ = httpx.ConnectError("connection refused")
+    return error
+
+
+def test_cli_sync_redacts_bounded_backend_error_text(kanban_home, monkeypatch, capsys):
+    """Persistent sync state and CLI JSON never leak a backend token."""
+    from hermes_cli import hades_kanban_sync as remote_sync
+    from hermes_cli import kanban_backend as backend
+    from hermes_cli.kanban_backend import KanbanBackendContext
+
+    context = KanbanBackendContext(
+        "linked", Path.cwd(), project_id="project", workspace_binding_id="binding",
+        local_workspace_id="local", agent_id="agent",
+    )
+    monkeypatch.setattr(backend, "resolve_kanban_backend_context", lambda **_: context)
+    monkeypatch.setattr(backend, "make_kanban_client", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(remote_sync, "migrate_legacy_remote_links", lambda *_args: None)
+    monkeypatch.setattr(
+        remote_sync,
+        "sync_remote_kanban",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            HadesBackendError(
+                "403: token=Bearer local-secret-token-value",
+                status_code=403,
+                code="forbidden",
+            )
+        ),
+    )
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers(dest="command")
+    kc.build_parser(sub)
+    args = parser.parse_args(["kanban", "sync", "--json"])
+
+    assert kc.kanban_command(args) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["state"] == "sync_error"
+    assert "local-secret-token-value" not in payload["error"]
+    assert len(payload["error"]) <= 500
+
+
+def test_cli_sync_reports_misconfigured_binding_as_nonzero_sync_error(
+    kanban_home, monkeypatch, capsys,
+):
+    """A binding identity mismatch is a configuration error, never offline."""
+    from hermes_cli import kanban_backend as backend
+    from hermes_cli.kanban_backend import KanbanBackendContext
+
+    monkeypatch.setattr(
+        backend,
+        "resolve_kanban_backend_context",
+        lambda **_: KanbanBackendContext(
+            "misconfigured", Path.cwd(), error="workspace binding identity mismatch",
+        ),
+    )
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers(dest="command")
+    kc.build_parser(sub)
+    args = parser.parse_args(["kanban", "sync", "--json"])
+
+    assert kc.kanban_command(args) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["state"] == "sync_error"
+    assert "identity mismatch" in payload["error"]
 
 
 @pytest.mark.parametrize(

@@ -84,10 +84,12 @@ hades kanban sync --board ariadne --status --json
 `--status` adds the pull/delivery/outbox counters to the human-readable
 local-only result. `--json` selects the machine-readable report format (and
 always includes the counters); it can be combined with `--status` for the
-same command shape used by operational scripts. The command exits zero for
-`local_only`, `synced`, and `backend_offline`; it exits nonzero for
-`sync_error`, `misconfigured`, and identity/authorization errors surfaced as
-those sync failures.
+same command shape used by operational scripts. The emitted report states are
+`local_only`, `synced`, `backend_offline`, and `sync_error`. The command exits
+zero for the first three and nonzero only for `sync_error`. Binding
+misconfiguration, missing/invalid identity, authorization, and validation
+failures are all reported as `sync_error`; a genuine transport failure or an
+unavailable backend service is `backend_offline`.
 
 When the workspace is linked and the backend is reachable, sync imports
 eligible remote cards and delivers queued terminal results. If that backend is

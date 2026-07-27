@@ -12,11 +12,54 @@ from typing import Callable, Literal
 from hermes_cli import hades_backend_db as hdb
 from hermes_cli import hades_backend_runtime
 from hermes_cli import kanban_db as kb
+from hermes_cli.hades_backend_client import HadesBackendError, redact_secret
 from hermes_cli.hades_backend_sync import matching_workspace_binding_ids
+
+try:
+    import httpx
+except ImportError:  # pragma: no cover - the backend client requires httpx.
+    httpx = None  # type: ignore[assignment]
 
 
 _SYNC_GUARD = threading.Lock()
 _LAST_SYNC_ATTEMPTS: dict[tuple[str, str], tuple[int, "KanbanSyncReport"]] = {}
+
+
+def _sync_error_text(exc: BaseException) -> str:
+    """Return one bounded, secret-safe sync error for local state and CLI output."""
+    return redact_secret(str(exc))[:500]
+
+
+def _is_transport_failure(exc: BaseException) -> bool:
+    """Recognize the network failures wrapped by the backend HTTP client."""
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, (ConnectionError, TimeoutError, OSError)):
+            return True
+        if httpx is not None and isinstance(current, httpx.HTTPError):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def _sync_failure_state(exc: BaseException) -> str:
+    """Classify backend errors without hiding identity/configuration failures.
+
+    The HTTP client wraps both transport errors and HTTP responses in
+    ``HadesBackendError``. Only an unreachable transport or an unavailable
+    service is an offline condition. Auth, identity, validation, and malformed
+    backend responses must remain a nonzero ``sync_error`` for operators.
+    """
+    if isinstance(exc, HadesBackendError):
+        status = exc.status_code
+        if status is None:
+            return "backend_offline" if _is_transport_failure(exc) else "sync_error"
+        if status == 408 or status >= 500:
+            return "backend_offline"
+        return "sync_error"
+    return "backend_offline" if _is_transport_failure(exc) else "sync_error"
 
 
 @dataclass(frozen=True)
@@ -173,14 +216,14 @@ def run_kanban_sync(
                 state="sync_error",
                 workspace_binding_id=context.workspace_binding_id,
                 outbox_pending=_pending_outbox_count(conn),
-                error=str(exc)[:500],
+                error=_sync_error_text(exc),
             )
         except Exception as exc:
             report = KanbanSyncReport(
-                state="backend_offline",
+                state=_sync_failure_state(exc),
                 workspace_binding_id=context.workspace_binding_id,
                 outbox_pending=_pending_outbox_count(conn),
-                error=str(exc)[:500],
+                error=_sync_error_text(exc),
             )
         else:
             report = KanbanSyncReport(
