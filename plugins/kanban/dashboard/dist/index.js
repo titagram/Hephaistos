@@ -1047,8 +1047,9 @@
           boardData,
           onOpen: setSelectedTaskId,
         }),
-        h(BoardToolbar, {
-          board: boardData,
+          h(BoardToolbar, {
+            board: boardData,
+          sync: boardData.sync,
           tenantFilter, setTenantFilter,
           assigneeFilter, setAssigneeFilter,
           includeArchived, setIncludeArchived,
@@ -2011,6 +2012,15 @@
     const { t } = useI18n();
     const tenants = (props.board && props.board.tenants) || [];
     const assignees = (props.board && props.board.assignees) || [];
+    const sync = props.sync;
+    const syncLabel = !sync ? null
+      : sync.state === "local_only" ? "Local only"
+      : sync.state === "backend_offline" ? "Backend offline"
+      : sync.state === "sync_error" ? "Sync error"
+      : "Backend synced";
+    const syncTitle = sync && sync.last_error
+      ? `${syncLabel}: ${sync.last_error}`
+      : syncLabel;
     return h("div", { className: "flex flex-wrap items-end gap-3" },
       h("div", { className: "flex flex-col gap-1",
                  title: "Fuzzy-match tasks by id, title, or description. Matches across all columns." },
@@ -2065,6 +2075,10 @@
         tx(t, "lanesByProfile", "Lanes by profile"),
       ),
       h("div", { className: "flex-1" }),
+      syncLabel ? h("span", {
+        className: "hermes-kanban-sync-status hermes-kanban-sync-status--" + sync.state,
+        title: syncTitle,
+      }, syncLabel) : null,
       h(Button, {
         onClick: props.onNudgeDispatch,
         size: "sm",
@@ -2586,6 +2600,15 @@
             t.priority > 0
               ? h(Badge, { className: "hermes-kanban-priority",
                            title: `Priority ${t.priority}. Higher-priority tasks are claimed first by the dispatcher.` }, `P${t.priority}`)
+              : null,
+            t.origin === "remote"
+              ? h(Badge, {
+                  variant: "outline",
+                  className: "hermes-kanban-remote-badge",
+                  title: t.remote_sync_status === "deferred"
+                    ? "Remote card deferred while its backend lease is unavailable."
+                    : "Remote-origin card; dispatch requires a backend lease.",
+                }, "Remote")
               : null,
             t.tenant
               ? h(Badge, { variant: "outline", className: "hermes-kanban-tag",

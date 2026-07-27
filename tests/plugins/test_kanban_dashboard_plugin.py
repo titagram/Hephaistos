@@ -8,6 +8,7 @@ REST surface without spinning up the whole dashboard.
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import sys
 import time
@@ -77,6 +78,109 @@ def test_board_empty(client):
     assert data["tenants"] == []
     assert data["assignees"] == []
     assert data["latest_event_id"] == 0
+
+
+def test_board_payload_marks_local_only_and_local_cards(client):
+    created = client.post("/api/plugins/kanban/tasks", json={"title": "local"}).json()["task"]
+
+    board = client.get("/api/plugins/kanban/board").json()
+    cards = [task for column in board["columns"] for task in column["tasks"]]
+
+    assert board["sync"] == {
+        "state": "local_only",
+        "workspace_binding_id": None,
+        "outbox_pending": 0,
+        "last_error": None,
+    }
+    card = next(task for task in cards if task["id"] == created["id"])
+    assert card["origin"] == "local"
+    assert card["remote_sync_status"] is None
+
+
+def test_board_payload_marks_remote_card_without_exposing_lease(client):
+    created = client.post("/api/plugins/kanban/tasks", json={"title": "remote"}).json()["task"]
+    with kb.connect_closing() as conn:
+        kb.upsert_remote_link(
+            conn,
+            task_id=created["id"],
+            project_id="project",
+            workspace_binding_id="binding",
+            remote_work_item_id="remote-task",
+        )
+        kb.set_remote_lease(
+            conn, created["id"], lease_token="super-secret-lease", lease_status="acquired",
+        )
+
+    payload = client.get("/api/plugins/kanban/board").json()
+    card = next(task for column in payload["columns"] for task in column["tasks"] if task["id"] == created["id"])
+
+    assert card["origin"] == "remote"
+    assert card["remote_sync_status"] == "linked"
+    assert "super-secret-lease" not in json.dumps(payload)
+    assert "lease_token" not in json.dumps(payload)
+
+
+def test_board_payload_reads_only_the_selected_binding_sync_state(client, monkeypatch):
+    from hermes_cli.kanban_backend import KanbanBackendContext
+
+    monkeypatch.setattr(
+        "hermes_cli.kanban_backend.resolve_kanban_backend_context",
+        lambda **_: KanbanBackendContext(
+            "linked", Path.cwd(), project_id="project", workspace_binding_id="selected",
+        ),
+    )
+    monkeypatch.setattr(
+        "hermes_cli.kanban_backend.maybe_run_kanban_sync", lambda **_: None,
+    )
+    with kb.connect_closing() as conn:
+        selected_task = kb.create_task(conn, title="selected remote")
+        other_task = kb.create_task(conn, title="other remote")
+        kb.upsert_remote_link(
+            conn, task_id=selected_task, project_id="project",
+            workspace_binding_id="selected", remote_work_item_id="selected-work",
+        )
+        kb.upsert_remote_link(
+            conn, task_id=other_task, project_id="project",
+            workspace_binding_id="other", remote_work_item_id="other-work",
+        )
+        kb.enqueue_remote_result(
+            conn, task_id=selected_task, operation="complete", payload={},
+            idempotency_key="selected-result",
+        )
+        kb.enqueue_remote_result(
+            conn, task_id=other_task, operation="complete", payload={},
+            idempotency_key="other-result",
+        )
+        kb.record_kanban_sync_state(
+            conn, workspace_binding_id="selected", state="backend_offline",
+            summary={}, last_error="selected backend unavailable",
+        )
+        kb.record_kanban_sync_state(
+            conn, workspace_binding_id="other", state="sync_error",
+            summary={}, last_error="other binding must not leak",
+        )
+
+    sync = client.get("/api/plugins/kanban/board").json()["sync"]
+
+    assert sync == {
+        "state": "backend_offline",
+        "workspace_binding_id": "selected",
+        "outbox_pending": 1,
+        "last_error": "selected backend unavailable",
+    }
+
+
+def test_dashboard_bundle_renders_sync_and_remote_badges():
+    bundle = (
+        Path(__file__).resolve().parents[2]
+        / "plugins" / "kanban" / "dashboard" / "dist" / "index.js"
+    ).read_text()
+
+    assert 'sync.state === "local_only"' in bundle
+    assert '"Backend offline"' in bundle
+    assert 't.origin === "remote"' in bundle
+    assert '"Remote"' in bundle
+    assert "backend lease is unavailable" in bundle
 
 
 # ---------------------------------------------------------------------------

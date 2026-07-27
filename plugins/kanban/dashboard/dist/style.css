@@ -152,6 +152,34 @@
   border-radius: var(--radius-sm, 0.25rem);
 }
 
+/* ---- Local-first backend visibility ---------------------------------- */
+.hermes-kanban-sync-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2rem;
+  padding: 0 0.55rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm, 0.25rem);
+  color: var(--color-muted-foreground);
+  background: color-mix(in srgb, var(--color-card) 88%, transparent);
+  font-size: 0.72rem;
+  white-space: nowrap;
+}
+.hermes-kanban-sync-status--local_only,
+.hermes-kanban-sync-status--synced,
+.hermes-kanban-sync-status--sync_deferred {
+  color: var(--color-muted-foreground);
+}
+.hermes-kanban-sync-status--backend_offline,
+.hermes-kanban-sync-status--sync_error {
+  color: var(--color-destructive, #d14a4a);
+  border-color: color-mix(in srgb, var(--color-destructive, #d14a4a) 45%, var(--color-border));
+}
+.hermes-kanban-remote-badge {
+  border-color: color-mix(in srgb, var(--color-ring) 45%, var(--color-border));
+  color: var(--color-ring);
+}
+
 /* ---- Status dots ----------------------------------------------------- */
 
 .hermes-kanban-dot {

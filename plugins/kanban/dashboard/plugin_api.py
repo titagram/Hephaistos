@@ -39,6 +39,7 @@ import asyncio
 import json
 import logging
 import sqlite3
+import threading
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -153,6 +154,79 @@ BOARD_COLUMNS: list[str] = [
 
 
 _CARD_SUMMARY_PREVIEW_CHARS = 200
+
+
+def _board_sync_payload(conn: sqlite3.Connection, *, board: str | None) -> dict[str, Any]:
+    """Return safe, binding-scoped sync metadata for the selected board.
+
+    The dashboard must remain a local read surface: resolving no binding is a
+    healthy ``local_only`` result and this helper never constructs a backend
+    client.  The follow-up sync is deliberately scheduled separately.
+    """
+    from hermes_cli import kanban_backend
+
+    try:
+        context = kanban_backend.resolve_kanban_backend_context(board=board)
+    except Exception as exc:
+        log.warning("kanban dashboard backend context resolution failed: %s", exc)
+        return {
+            "state": "sync_error",
+            "workspace_binding_id": None,
+            "outbox_pending": 0,
+            "last_error": str(exc)[:500],
+        }
+
+    if context.mode == "local_only":
+        return {
+            "state": "local_only",
+            "workspace_binding_id": None,
+            "outbox_pending": 0,
+            "last_error": None,
+        }
+    if context.mode != "linked" or not context.workspace_binding_id:
+        return {
+            "state": "sync_error",
+            "workspace_binding_id": context.workspace_binding_id,
+            "outbox_pending": 0,
+            "last_error": context.error,
+        }
+
+    binding_id = context.workspace_binding_id
+    state_row = kanban_db.get_kanban_sync_state(conn, binding_id)
+    outbox_pending = conn.execute(
+        "SELECT COUNT(*) AS count FROM kanban_sync_outbox AS outbox "
+        "JOIN kanban_remote_links AS link ON link.task_id = outbox.task_id "
+        "WHERE link.workspace_binding_id = ? "
+        "AND outbox.status IN ('pending', 'retry')",
+        (binding_id,),
+    ).fetchone()["count"]
+    return {
+        "state": (state_row or {}).get("state", "synced"),
+        "workspace_binding_id": binding_id,
+        "outbox_pending": int(outbox_pending),
+        "last_error": (state_row or {}).get("last_error"),
+    }
+
+
+def _start_dashboard_sync(*, board: str | None) -> None:
+    """Schedule one bounded best-effort sync without holding the GET open."""
+    from hermes_cli import kanban_backend
+
+    def _run() -> None:
+        try:
+            kanban_backend.maybe_run_kanban_sync(
+                board=board, min_interval_seconds=30,
+            )
+        except Exception:
+            # The status read above remains useful; sync errors are recorded by
+            # the adapter on a later bounded attempt and must not break HTTP.
+            log.debug("background kanban dashboard sync failed", exc_info=True)
+
+    threading.Thread(
+        target=_run,
+        name="kanban-dashboard-sync",
+        daemon=True,
+    ).start()
 
 
 def _task_dict(
@@ -399,6 +473,7 @@ def get_board(
     board = _resolve_board(board)
     conn = _conn(board=board)
     try:
+        sync = _board_sync_payload(conn, board=board)
         tasks = kanban_db.list_tasks(
             conn,
             tenant=tenant,
@@ -458,6 +533,9 @@ def get_board(
         # for boards with hundreds of tasks). Truncated to a card-size
         # preview here — the full text is available via /tasks/:id.
         summary_map = kanban_db.latest_summaries(conn, [t.id for t in tasks])
+        remote_by_task = {
+            link.task_id: link for link in kanban_db.list_remote_links(conn)
+        }
 
         for t in tasks:
             full = summary_map.get(t.id)
@@ -465,6 +543,11 @@ def get_board(
                 full[:_CARD_SUMMARY_PREVIEW_CHARS] if full else None
             )
             d = _task_dict(t, latest_summary=preview)
+            remote_link = remote_by_task.get(t.id)
+            d["origin"] = "remote" if remote_link is not None else "local"
+            d["remote_sync_status"] = (
+                remote_link.sync_status if remote_link is not None else None
+            )
             d["link_counts"] = link_counts.get(t.id, {"parents": 0, "children": 0})
             d["comment_count"] = comment_counts.get(t.id, 0)
             d["progress"] = progress.get(t.id)  # None when the task has no children
@@ -497,7 +580,7 @@ def get_board(
             )
         ]
 
-        return {
+        payload = {
             "columns": [
                 {"name": name, "tasks": columns[name]} for name in columns.keys()
             ],
@@ -505,7 +588,14 @@ def get_board(
             "assignees": assignees,
             "latest_event_id": int(latest_event_id),
             "now": int(time.time()),
+            "sync": sync,
         }
+        # A response always comes from SQLite.  For linked boards only, let a
+        # daemon attempt update the next read; local-only boards never create
+        # a backend client and do not need a no-op background thread.
+        if sync["state"] != "local_only" and sync["workspace_binding_id"]:
+            _start_dashboard_sync(board=board)
+        return payload
     finally:
         conn.close()
 
