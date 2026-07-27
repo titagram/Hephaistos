@@ -270,6 +270,30 @@ def test_remote_result_outbox_tracks_delivery_and_retry_state(kanban_home):
         assert due.last_error == "x" * 500
 
 
+def test_remote_result_outbox_rejects_retry_after_delivery(kanban_home):
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="remote")
+        sent = kb.enqueue_remote_result(
+            conn,
+            task_id=task_id,
+            operation="complete",
+            payload={},
+            idempotency_key="complete:p:w",
+            now=100,
+        )
+        kb.mark_remote_result_sent(conn, sent.id)
+
+        with pytest.raises(ValueError, match="cannot retry remote result in sent status"):
+            kb.mark_remote_result_retry(
+                conn,
+                sent.id,
+                error="late failure",
+                next_attempt_at=200,
+            )
+
+        assert kb.list_due_remote_results(conn, now=200) == []
+
+
 def test_kanban_sync_state_is_scoped_by_binding(kanban_home):
     kb.init_db()
     with kb.connect_closing() as conn:

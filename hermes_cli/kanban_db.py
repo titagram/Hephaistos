@@ -2644,10 +2644,10 @@ def mark_remote_result_retry(
 ) -> None:
     """Record a failed delivery attempt and schedule (or stop) its retry."""
     with write_txn(conn):
-        conn.execute(
+        changed = conn.execute(
             "UPDATE kanban_sync_outbox "
             "SET status = ?, attempts = attempts + 1, next_attempt_at = ?, "
-            "last_error = ?, updated_at = ? WHERE id = ?",
+            "last_error = ?, updated_at = ? WHERE id = ? AND status = 'pending'",
             (
                 "dead_letter" if dead_letter else "pending",
                 int(next_attempt_at),
@@ -2655,7 +2655,16 @@ def mark_remote_result_retry(
                 int(time.time()),
                 entry_id,
             ),
-        )
+        ).rowcount
+        if changed != 1:
+            row = conn.execute(
+                "SELECT status FROM kanban_sync_outbox WHERE id = ?", (entry_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(entry_id)
+            raise ValueError(
+                f"cannot retry remote result in {row['status']} status"
+            )
 
 
 def record_kanban_sync_state(
