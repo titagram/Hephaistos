@@ -65,6 +65,14 @@ def _add_server_runtime_args(parser) -> None:
         default="",
         help=argparse.SUPPRESS,
     )
+    # Internal browser route used by focused launchers such as
+    # `hades kanban serve`. Kept out of the public dashboard interface.
+    parser.add_argument(
+        "--open-path",
+        dest="open_path",
+        default="",
+        help=argparse.SUPPRESS,
+    )
     # Lifecycle flags — mutually exclusive with each other and with the
     # start-a-server flags above (if both are passed, --stop / --status win
     # because they exit before the server is started).  The server has no

@@ -20,7 +20,7 @@ def _args(**kw):
     defaults = dict(
         status=False, stop=False, host="127.0.0.1", port=9119,
         no_open=True, insecure=False, skip_build=False,
-        isolated=False, open_profile="",
+        isolated=False, open_profile="", open_path="",
     )
     defaults.update(kw)
     return types.SimpleNamespace(**defaults)
@@ -55,6 +55,23 @@ class TestUnifiedDashboardRouting:
             main_mod.cmd_dashboard(_args(no_open=False))
         assert exc.value.code == 0
         assert opened == ["http://127.0.0.1:9119/?profile=worker_x"]
+
+    def test_profile_launch_attach_preserves_explicit_initial_path(self, main_mod, monkeypatch):
+        """A focused launcher keeps its board route when attaching to a server."""
+        monkeypatch.setattr(
+            "hermes_cli.profiles.get_active_profile_name", lambda: "worker_x"
+        )
+        monkeypatch.setattr(main_mod, "_dashboard_listening", lambda host, port: True)
+        opened = []
+        import webbrowser
+        monkeypatch.setattr(webbrowser, "open", opened.append)
+
+        with pytest.raises(SystemExit) as exc:
+            main_mod.cmd_dashboard(
+                _args(no_open=False, open_path="/kanban?board=ariadne")
+            )
+        assert exc.value.code == 0
+        assert opened == ["http://127.0.0.1:9119/kanban?board=ariadne"]
 
     def test_profile_launch_reexecs_machine_dashboard(self, main_mod, monkeypatch):
         monkeypatch.delenv("HERMES_HOME", raising=False)

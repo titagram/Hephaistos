@@ -23,6 +23,7 @@ import sys
 import time
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import quote
 
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_swarm as ks
@@ -237,6 +238,18 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_sync.add_argument("--board", default=argparse.SUPPRESS)
     p_sync.add_argument("--status", action="store_true")
     p_sync.add_argument("--json", action="store_true")
+
+    # --- serve ---
+    p_serve = sub.add_parser(
+        "serve",
+        help="Open this local board in the existing dashboard",
+    )
+    # Match `sync`: `kanban serve --board ariadne` is as valid as the
+    # top-level `kanban --board ariadne serve` form.
+    p_serve.add_argument("--board", default=argparse.SUPPRESS)
+    p_serve.add_argument("--host", default="127.0.0.1")
+    p_serve.add_argument("--port", type=int, default=9119)
+    p_serve.add_argument("--no-open", action="store_true")
 
     # --- boards (new in v2: multi-project support) ---
     p_boards = sub.add_parser(
@@ -949,6 +962,7 @@ def kanban_command(args: argparse.Namespace) -> int:
         handlers = {
             "init":     _cmd_init,
             "sync":     _cmd_sync,
+            "serve":    _cmd_serve,
             "create":   _cmd_create,
             "swarm":    _cmd_swarm,
             "list":     _cmd_list,
@@ -1310,6 +1324,29 @@ def _cmd_sync(args: argparse.Namespace) -> int:
         if report.error:
             print(report.error, file=sys.stderr)
     return 0 if report.state in {"local_only", "synced", "backend_offline"} else 1
+
+
+def _cmd_serve(args: argparse.Namespace) -> int:
+    """Launch the existing dashboard directly at the selected local board."""
+    board = kb.get_current_board()
+    # Keep this import lazy: importing main during normal kanban operations
+    # would create a CLI dependency cycle and load dashboard-only machinery.
+    from hermes_cli.main import cmd_dashboard
+
+    dashboard_args = argparse.Namespace(
+        status=False,
+        stop=False,
+        host=args.host,
+        port=args.port,
+        no_open=args.no_open,
+        insecure=False,
+        skip_build=False,
+        isolated=False,
+        open_profile="",
+        open_path=f"/kanban?board={quote(board, safe='')}",
+    )
+    result = cmd_dashboard(dashboard_args)
+    return int(result or 0)
 
 
 def _remote_dispatch_admission(conn, *, board: str | None):

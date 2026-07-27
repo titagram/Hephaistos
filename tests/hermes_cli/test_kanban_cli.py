@@ -100,6 +100,36 @@ def test_kanban_sync_accepts_board_after_subcommand(kanban_home, capsys):
     assert json.loads(capsys.readouterr().out)["state"] == "local_only"
 
 
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["kanban", "serve", "--board", "ariadne", "--host", "127.0.0.1", "--port", "0", "--no-open"],
+        ["kanban", "--board", "ariadne", "serve", "--host", "127.0.0.1", "--port", "0", "--no-open"],
+    ],
+)
+def test_kanban_serve_delegates_to_dashboard_with_direct_route(
+    kanban_home, monkeypatch, argv,
+):
+    """The local board launcher reuses the dashboard server at its board route."""
+    captured = {}
+    monkeypatch.setattr(
+        "hermes_cli.main.cmd_dashboard",
+        lambda args: captured.update(vars(args)),
+    )
+    kb.create_board("ariadne")
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers(dest="command")
+    kc.build_parser(sub)
+
+    args = parser.parse_args(argv)
+
+    assert kc.kanban_command(args) == 0
+    assert captured["open_path"] == "/kanban?board=ariadne"
+    assert captured["host"] == "127.0.0.1"
+    assert captured["port"] == 0
+    assert captured["no_open"] is True
+
+
 def test_cli_dispatch_keeps_local_card_running_when_optional_sync_is_offline(
     kanban_home, monkeypatch, capsys,
 ):

@@ -14143,8 +14143,22 @@ def _write_dashboard_ready_file(actual_port: int) -> None:
         _log.warning("Failed to write dashboard ready file %r: %s", target, exc)
 
 
+def _safe_initial_path(value: str) -> str:
+    """Return a same-origin browser path, falling back to the dashboard root."""
+    path = str(value or "/")
+    if not path.startswith("/") or path.startswith("//"):
+        return "/"
+    if any(ord(char) < 32 or ord(char) == 127 for char in path):
+        return "/"
+    return path
+
+
 def _maybe_open_browser(
-    host: str, actual_port: int, open_browser: bool, initial_profile: str
+    host: str,
+    actual_port: int,
+    open_browser: bool,
+    initial_profile: str,
+    initial_path: str = "",
 ) -> None:
     """Open the dashboard URL in the user's browser if appropriate.
 
@@ -14172,7 +14186,9 @@ def _maybe_open_browser(
 
     _display_host = host if host not in ("0.0.0.0", "::") else "127.0.0.1"
     _open_url = f"http://{_display_host}:{actual_port}"
-    if initial_profile:
+    if initial_path:
+        _open_url += _safe_initial_path(initial_path)
+    elif initial_profile:
         from urllib.parse import quote
         _open_url += f"/?profile={quote(initial_profile)}"
 
@@ -14192,13 +14208,13 @@ def start_server(
     open_browser: bool = True,
     allow_public: bool = False,
     initial_profile: str = "",
+    initial_path: str = "",
 ):
     """Start the web UI server.
 
     ``initial_profile`` (when set) is appended to the auto-opened browser
-    URL as ``?profile=<name>`` so the SPA's profile switcher preselects it
-    — used when a profile alias (``<profile> dashboard``) routes to the
-    machine dashboard.
+    URL as ``?profile=<name>`` so the SPA's profile switcher preselects it.
+    A non-empty ``initial_path`` takes precedence after same-origin validation.
     """
     import uvicorn
 
@@ -14337,7 +14353,9 @@ def start_server(
             _write_dashboard_ready_file(actual_port)
             print(f"HERMES_DASHBOARD_READY port={actual_port}", flush=True)
             print(f"  Hades Web UI → http://{host}:{actual_port}")
-            _maybe_open_browser(host, actual_port, open_browser, initial_profile)
+            _maybe_open_browser(
+                host, actual_port, open_browser, initial_profile, initial_path,
+            )
 
             # Collapse the peer-hangup teardown flood (#50005). When the Desktop
             # forcibly closes its WebSocket mid-write, asyncio logs a full

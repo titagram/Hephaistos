@@ -11725,6 +11725,18 @@ def _maybe_setup_dashboard_auth_interactively(args) -> None:
     print()
 
 
+def _safe_dashboard_initial_path(value) -> str:
+    """Keep attach/re-exec dashboard URLs same-origin as the local server."""
+    path = str(value or "")
+    if not path:
+        return ""
+    if not path.startswith("/") or path.startswith("//"):
+        return "/"
+    if any(ord(char) < 32 or ord(char) == 127 for char in path):
+        return "/"
+    return path
+
+
 def cmd_dashboard(args):
     """Start the web UI server, or (with --stop/--status) manage running ones."""
     # --status: report running dashboards and exit, no deps needed.
@@ -11771,7 +11783,14 @@ def cmd_dashboard(args):
         # Desktop pool backends are intentionally per-profile.
         and os.environ.get("HERMES_DESKTOP") != "1"
     ):
-        url = f"http://{args.host or '127.0.0.1'}:{args.port}/?profile={_launch_profile}"
+        initial_path = _safe_dashboard_initial_path(
+            getattr(args, "open_path", "")
+        )
+        url = f"http://{args.host or '127.0.0.1'}:{args.port}"
+        if initial_path:
+            url += initial_path
+        else:
+            url += f"/?profile={_launch_profile}"
         if _dashboard_listening(args.host, args.port):
             print(f"Machine dashboard already running on port {args.port}.")
             print(f"  Managing profile '{_launch_profile}': {url}")
@@ -11795,6 +11814,8 @@ def cmd_dashboard(args):
             "--host", args.host,
             "--open-profile", _launch_profile,
         ]
+        if initial_path:
+            reexec_argv.extend(["--open-path", initial_path])
         if args.no_open:
             reexec_argv.append("--no-open")
         if getattr(args, "insecure", False):
@@ -11935,6 +11956,7 @@ def cmd_dashboard(args):
         open_browser=not args.no_open,
         allow_public=getattr(args, "insecure", False),
         initial_profile=getattr(args, "open_profile", "") or "",
+        initial_path=getattr(args, "open_path", "") or "",
     )
 
 

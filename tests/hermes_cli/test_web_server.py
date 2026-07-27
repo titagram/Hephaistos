@@ -6498,3 +6498,47 @@ class TestDesktopCronTicker:
 
         with self._client():
             assert not called.wait(0.5), "ticker must not run outside the desktop app"
+
+
+def test_dashboard_browser_opens_validated_initial_path(monkeypatch):
+    import hermes_cli.web_server as ws
+
+    opened = []
+    monkeypatch.setattr("webbrowser.open", opened.append)
+    monkeypatch.setattr(ws.time, "sleep", lambda _: None)
+
+    class ImmediateThread:
+        def __init__(self, *, target, daemon):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    monkeypatch.setattr(ws.threading, "Thread", ImmediateThread)
+    ws._maybe_open_browser(
+        "127.0.0.1", 9119, True, "", "/kanban?board=ariadne",
+    )
+    assert opened == ["http://127.0.0.1:9119/kanban?board=ariadne"]
+
+
+@pytest.mark.parametrize(
+    "unsafe_path",
+    ["//evil.example/path", "https://evil.example/path", "kanban", "/kanban\nX-Test: bad"],
+)
+def test_dashboard_browser_rejects_unsafe_initial_paths(monkeypatch, unsafe_path):
+    import hermes_cli.web_server as ws
+
+    opened = []
+    monkeypatch.setattr("webbrowser.open", opened.append)
+    monkeypatch.setattr(ws.time, "sleep", lambda _: None)
+
+    class ImmediateThread:
+        def __init__(self, *, target, daemon):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    monkeypatch.setattr(ws.threading, "Thread", ImmediateThread)
+    ws._maybe_open_browser("127.0.0.1", 9119, True, "", unsafe_path)
+    assert opened == ["http://127.0.0.1:9119/"]
