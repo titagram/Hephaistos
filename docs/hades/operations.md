@@ -73,12 +73,21 @@ hades kanban serve --board ariadne
 The server binds to `127.0.0.1` by default and reuses the existing dashboard;
 it does not start a second Kanban frontend or expose the board on the network.
 
-Inspect or explicitly run only the selected board's optional synchronization:
+Every `hades kanban sync` invocation attempts synchronization for only the
+selected board; it is not a status-only probe. Inspect the outcome with:
 
 ```bash
 hades kanban sync --board ariadne --status
 hades kanban sync --board ariadne --status --json
 ```
+
+`--status` adds the pull/delivery/outbox counters to the human-readable
+local-only result. `--json` selects the machine-readable report format (and
+always includes the counters); it can be combined with `--status` for the
+same command shape used by operational scripts. The command exits zero for
+`local_only`, `synced`, and `backend_offline`; it exits nonzero for
+`sync_error`, `misconfigured`, and identity/authorization errors surfaced as
+those sync failures.
 
 When the workspace is linked and the backend is reachable, sync imports
 eligible remote cards and delivers queued terminal results. If that backend is

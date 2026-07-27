@@ -30,24 +30,56 @@ from hermes_cli.kanban import run_slash
 # ---------------------------------------------------------------------------
 
 def test_local_only_board_completes_without_backend_configuration(kanban_home, monkeypatch):
-    """A board with no backend database, token, or binding stays operational."""
+    """The production CLI dispatch composition keeps an unlinked board local."""
+    from hermes_cli import hades_kanban_sync
+    from hermes_cli import kanban_backend
+
     monkeypatch.setattr("hermes_cli.profiles.profile_exists", lambda _name: True)
-    kb.init_db(board="offline")
+    client_attempts = []
+    sync_calls = []
+    admission_contexts = []
+    real_sync = kanban_backend.maybe_run_kanban_sync
+    real_admission = hades_kanban_sync.make_remote_admission
+
+    def _forbid_backend_client(*_args, **_kwargs):
+        client_attempts.append("attempted")
+        raise AssertionError("local-only dispatch must not construct a backend client")
+
+    def _tracked_sync(**kwargs):
+        sync_calls.append(kwargs)
+        return real_sync(**kwargs)
+
+    def _tracked_admission(conn, *, context):
+        admission_contexts.append(context)
+        return real_admission(conn, context=context)
+
+    monkeypatch.setattr(kanban_backend, "make_kanban_client", _forbid_backend_client)
+    monkeypatch.setattr(hades_kanban_sync, "_make_remote_client", _forbid_backend_client)
+    monkeypatch.setattr(kanban_backend, "maybe_run_kanban_sync", _tracked_sync)
+    monkeypatch.setattr(hades_kanban_sync, "make_remote_admission", _tracked_admission)
     spawned = []
+    monkeypatch.setattr(
+        kb,
+        "_default_spawn",
+        lambda task, *_args, **_kwargs: spawned.append(task.id) or 12345,
+    )
+    kb.init_db(board="offline")
 
     with kb.scoped_current_board("offline"), kb.connect_closing() as conn:
         task_id = kb.create_task(conn, title="offline work", assignee="leaf")
-        result = kb.dispatch_once(
-            conn,
-            spawn_fn=lambda task, _workspace: spawned.append(task.id) or 12345,
-        )
 
-        assert [spawned_task_id for spawned_task_id, *_ in result.spawned] == [task_id]
+        payload = json.loads(run_slash("dispatch --json"))
+        assert [entry["task_id"] for entry in payload["spawned"]] == [task_id]
         assert spawned == [task_id]
-        assert kb.complete_task(conn, task_id, result="offline complete")
+        assert sync_calls == [{"board": None}]
+        assert [context.mode for context in admission_contexts] == ["local_only"]
+        assert client_attempts == []
+
+        assert f"Completed {task_id}" in run_slash(
+            f"complete {task_id} --result 'offline complete'"
+        )
         task = kb.get_task(conn, task_id)
-        assert task is not None
-        assert task.status == "done"
+        assert task is not None and task.status == "done"
 
 
 # ---------------------------------------------------------------------------

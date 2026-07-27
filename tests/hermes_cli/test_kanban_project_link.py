@@ -3,10 +3,14 @@ worktree path + branch instead of the random ``wt/<task-id>`` fallback."""
 
 from __future__ import annotations
 
+import json
 import os
 
 import pytest
 
+from hermes_cli import hades_kanban_sync
+from hermes_cli import kanban as kc
+from hermes_cli import kanban_backend
 from hermes_cli import kanban_db as kb
 from hermes_cli import projects_db as pdb
 
@@ -73,8 +77,36 @@ def test_unlinked_task_unchanged(kanban_conn):
 def test_project_linked_task_is_still_local_without_remote_link(
     kanban_conn, monkeypatch, tmp_path,
 ):
-    """A local project association never implies a backend lease requirement."""
+    """The CLI admission path does not treat project_id as a remote link."""
     monkeypatch.setattr("hermes_cli.profiles.profile_exists", lambda _name: True)
+    client_attempts = []
+    sync_calls = []
+    admission_contexts = []
+    real_sync = kanban_backend.maybe_run_kanban_sync
+    real_admission = hades_kanban_sync.make_remote_admission
+
+    def _forbid_backend_client(*_args, **_kwargs):
+        client_attempts.append("attempted")
+        raise AssertionError("a project-linked local card must not construct a backend client")
+
+    def _tracked_sync(**kwargs):
+        sync_calls.append(kwargs)
+        return real_sync(**kwargs)
+
+    def _tracked_admission(conn, *, context):
+        admission_contexts.append(context)
+        return real_admission(conn, context=context)
+
+    monkeypatch.setattr(kanban_backend, "make_kanban_client", _forbid_backend_client)
+    monkeypatch.setattr(hades_kanban_sync, "_make_remote_client", _forbid_backend_client)
+    monkeypatch.setattr(kanban_backend, "maybe_run_kanban_sync", _tracked_sync)
+    monkeypatch.setattr(hades_kanban_sync, "make_remote_admission", _tracked_admission)
+    spawned = []
+    monkeypatch.setattr(
+        kb,
+        "_default_spawn",
+        lambda task, *_args, **_kwargs: spawned.append(task.id) or 12345,
+    )
     project = _make_project()
     local_workspace = tmp_path / "local-project-workspace"
     local_workspace.mkdir()
@@ -86,16 +118,19 @@ def test_project_linked_task_is_still_local_without_remote_link(
         workspace_kind="dir",
         workspace_path=str(local_workspace),
     )
-    spawned = []
+    payload = json.loads(kc.run_slash("dispatch --json"))
 
-    result = kb.dispatch_once(
-        kanban_conn,
-        spawn_fn=lambda task, _workspace: spawned.append(task.id) or 12345,
-    )
-
-    assert [spawned_task_id for spawned_task_id, *_ in result.spawned] == [task_id]
+    assert [entry["task_id"] for entry in payload["spawned"]] == [task_id]
     assert spawned == [task_id]
+    assert sync_calls == [{"board": None}]
+    assert [context.mode for context in admission_contexts] == ["local_only"]
+    assert client_attempts == []
     assert kb.get_remote_link(kanban_conn, task_id) is None
+    assert f"Completed {task_id}" in kc.run_slash(
+        f"complete {task_id} --result 'local project complete'"
+    )
+    task = kb.get_task(kanban_conn, task_id)
+    assert task is not None and task.status == "done"
 
 
 def test_unknown_project_id_falls_back_gracefully(kanban_conn):

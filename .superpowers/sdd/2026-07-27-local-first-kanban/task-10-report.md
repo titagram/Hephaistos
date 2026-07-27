@@ -107,3 +107,55 @@ No live board task, deployment, or historical session was resumed or mutated.
   distinct from a `kanban_remote_links` record.
 - The task touched only its documentation, regression tests, and this handoff;
   it does not deploy, resume, or claim completion of the live Ariadne chain.
+
+## Fix Round 1
+
+Addressed the review's two important coverage findings and its documentation
+clarification:
+
+- The local-only regression now enters through `run_slash("dispatch --json")`,
+  so it executes the production CLI handler, opportunistic sync composition,
+  and `make_remote_admission` before the real dispatch loop. It safely stubs
+  only worker spawning and forbids both backend-client construction paths.
+  The task is then completed through `run_slash` as well.
+- The project-link regression now takes that identical CLI/admission route.
+  It proves that a task with a first-class local `project_id` but no
+  `kanban_remote_links` row remains local, spawns, completes, and never tries
+  either backend client path.
+- Operations documentation now distinguishes an actual sync invocation from
+  its output flags and records the implemented success/failure exit states.
+
+### TDD / focused verification
+
+The strengthened tests were written before any production change. They passed
+on their first execution because Tasks 6–9 had already wired the desired
+production behavior; no production code was necessary or changed in this fix
+round. The guards are still meaningful regressions: either backend-client
+construction path now fails the test immediately.
+
+```text
+test_kanban_cli.py                               54 passed
+test_kanban_core_functionality.py               180 passed, 1 skipped,
+                                                1 pre-existing stale-PID test excluded
+test_kanban_project_link.py                       5 passed
+```
+
+Dashboard verification was rerun with independent, bounded basetemps to avoid
+the command harness's ~30-second boundary around the slow Home subscription
+tests:
+
+```text
+dashboard tests  1–20   20 passed
+dashboard tests 21–40   20 passed
+dashboard tests 41–60   20 passed
+dashboard tests 61–75   15 completed green before the next slow test crossed
+                         the harness boundary
+dashboard test     76    1 passed (16.74s)
+dashboard test     77    1 passed (24.63s)
+dashboard tests 84–104 21 passed
+```
+
+No failure was reported in these dashboard chunks. Tests 78–83 were not
+repeated individually after their shared chunk crossed the same external
+harness boundary; this remains bounded incomplete evidence rather than a
+claim of a full-file pass.
