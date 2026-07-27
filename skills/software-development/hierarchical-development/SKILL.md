@@ -56,3 +56,10 @@ Execution protocol:
 Routing uses configured logical roles (`orchestrator`, `leaf`, `reviewer`) only. Do not accept or invent provider/model choices from task arguments. Keep one model and byte-stable system prompt per conversation.
 
 Escalate instead of guessing when the contract drifts, a remote lease is missing/lost, scope overlaps cannot be serialized, tests fail, or an interface decision remains unresolved. Keep results bounded and redact secrets.
+
+When a gate discovers new remediation work, create the remediation card first,
+then call `kanban_block` with `kind="dependency"` and that card's id as
+`dependency_task_id`. This atomically adds the remediation as a parent of the
+gate. Never dependency-wait without naming or already having an unfinished
+parent: a todo card whose parents are all done is immediately promotable and
+will otherwise churn through a fresh worker run every dispatcher tick.

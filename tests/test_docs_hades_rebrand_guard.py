@@ -1,6 +1,10 @@
 import re
 from pathlib import Path
 
+import yaml
+
+from hermes_cli.hades_exclusions import is_allowed_bundled_skill_rel_path
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -125,6 +129,31 @@ def test_localized_docs_are_removed() -> None:
         rel for rel in REMOVED_LOCALIZED_DOC_PATHS if (REPO_ROOT / rel).exists()
     ]
     assert remaining == []
+
+
+def test_hades_visible_skills_do_not_recommend_excluded_hermes_agent() -> None:
+    offenders: list[str] = []
+    skills_root = REPO_ROOT / "skills"
+
+    for skill_path in skills_root.glob("*/*/SKILL.md"):
+        rel_dir = skill_path.parent.relative_to(skills_root).as_posix()
+        if not is_allowed_bundled_skill_rel_path(rel_dir):
+            continue
+        text = skill_path.read_text(encoding="utf-8")
+        if not text.startswith("---\n"):
+            continue
+        _, frontmatter, _ = text.split("---", 2)
+        metadata = yaml.safe_load(frontmatter) or {}
+        related = (
+            ((metadata.get("metadata") or {}).get("hermes") or {}).get(
+                "related_skills"
+            )
+            or []
+        )
+        if "hermes-agent" in related:
+            offenders.append(rel_dir)
+
+    assert offenders == []
 
 
 def test_docusaurus_is_english_only() -> None:

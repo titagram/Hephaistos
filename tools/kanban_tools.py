@@ -624,6 +624,12 @@ def _handle_block(args: dict, **kw) -> str:
         return tool_error("reason is required — explain what input you need")
     reason = redact_sensitive_text(str(reason), force=True)
     kind = args.get("kind")
+    dependency_task_id = args.get("dependency_task_id")
+    if kind == "dependency" and not dependency_task_id:
+        return tool_error(
+            "dependency_task_id is required when kind='dependency'; name the "
+            "unfinished task this worker must wait for"
+        )
     board = args.get("board")
     try:
         kb, conn = _connect(board=board)
@@ -637,6 +643,7 @@ def _handle_block(args: dict, **kw) -> str:
                 conn, tid,
                 reason=reason,
                 kind=kind,
+                dependency_task_id=dependency_task_id,
                 expected_run_id=_worker_run_id(tid),
             )
             if not ok:
@@ -1209,8 +1216,9 @@ KANBAN_BLOCK_SCHEMA = {
     "description": (
         "Stop work on this task and route it according to WHY you're stuck. "
         "Set ``kind`` to say which: 'dependency' (waiting on another task — "
-        "goes to todo and auto-resumes when that task finishes, no human "
-        "needed), 'needs_input' (you need a human decision/answer), "
+        "set ``dependency_task_id`` so the dependency is linked atomically, "
+        "then it goes to todo and auto-resumes when that task finishes, no "
+        "human needed), 'needs_input' (you need a human decision/answer), "
         "'capability' (a hard wall: no access, missing credentials, an action "
         "no agent can do), or 'transient' (a flaky failure that may clear). "
         "``reason`` is shown to the human on the board. If a task keeps "
@@ -1240,6 +1248,13 @@ KANBAN_BLOCK_SCHEMA = {
                     "Why you're blocked. 'dependency' waits in todo and "
                     "resumes automatically; the others surface to a human. "
                     "Omit only if none apply."
+                ),
+            },
+            "dependency_task_id": {
+                "type": "string",
+                "description": (
+                    "Required when kind='dependency'. The unfinished task to "
+                    "link as this task's parent before parking it in todo."
                 ),
             },
             "board": _board_schema_prop(),

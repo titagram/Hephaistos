@@ -52,7 +52,7 @@ _PROFILE_DEFINITIONS: tuple[dict[str, Any], ...] = (
         "id": "reviewer",
         "title": "Review and verification",
         "description": "Review diffs, validate contracts, and decide whether the MVP gate is met.",
-        "skill": "software-development/requesting-code-review",
+        "skill": "software-development/hierarchical-development",
         "model_routing": {
             "local_model_profile": "hades.reviewer",
             "selector": "strongest_allowed",

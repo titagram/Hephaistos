@@ -8,7 +8,7 @@ platforms: [linux, macos, windows]
 metadata:
   hermes:
     tags: [hades, coordination, subagents, model-routing, shared-backend]
-    related_skills: [hermes-agent, codex, plan, requesting-code-review]
+    related_skills: [codex, plan, hierarchical-development]
 ---
 
 # Hades Coordination

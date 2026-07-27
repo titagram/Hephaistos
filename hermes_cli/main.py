@@ -1367,9 +1367,9 @@ def _print_tui_exit_summary(
 
     print()
     print("Resume this session with:")
-    print(f"  hermes --tui --resume {target}")
+    print(f"  hades --tui --resume {target}")
     if title:
-        print(f'  hermes --tui -c "{title}"')
+        print(f'  hades --tui -c "{title}"')
     print()
     print(f"Session:        {target}")
     if title:
@@ -12278,6 +12278,8 @@ def _try_termux_fast_cli_launch() -> bool:
                 model=getattr(args, "model", None),
                 provider=getattr(args, "provider", None),
                 toolsets=getattr(args, "toolsets", None),
+                resume_session_id=getattr(args, "resume", None),
+                pass_session_id=getattr(args, "pass_session_id", False),
             )
         )
 
@@ -13716,6 +13718,8 @@ def main():
                 model=getattr(args, "model", None),
                 provider=getattr(args, "provider", None),
                 toolsets=getattr(args, "toolsets", None),
+                resume_session_id=getattr(args, "resume", None),
+                pass_session_id=getattr(args, "pass_session_id", False),
             )
         )
 

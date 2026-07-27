@@ -655,6 +655,40 @@ def test_block_rejects_empty_reason(worker_env):
         assert json.loads(out).get("error")
 
 
+def test_dependency_block_requires_and_links_named_task(worker_env):
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    missing = json.loads(
+        kt._handle_block({"reason": "wait", "kind": "dependency"})
+    )
+    assert "dependency_task_id" in missing["error"]
+
+    conn = kb.connect()
+    try:
+        dependency = kb.create_task(conn, title="remediation", assignee="leaf")
+    finally:
+        conn.close()
+
+    linked = json.loads(
+        kt._handle_block(
+            {
+                "reason": "wait for remediation",
+                "kind": "dependency",
+                "dependency_task_id": dependency,
+            }
+        )
+    )
+    assert linked["ok"] is True
+    assert linked["status"] == "todo"
+
+    conn = kb.connect()
+    try:
+        assert kb.parent_ids(conn, worker_env) == [dependency]
+    finally:
+        conn.close()
+
+
 def test_heartbeat_happy_path(worker_env):
     from tools import kanban_tools as kt
     out = kt._handle_heartbeat({"note": "progress"})

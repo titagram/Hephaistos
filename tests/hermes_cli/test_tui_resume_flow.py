@@ -379,6 +379,8 @@ def test_termux_fast_cli_launch_oneshot_uses_light_parser(monkeypatch, main_mod)
         "model": "gpt-test",
         "provider": "openai",
         "toolsets": None,
+        "resume_session_id": None,
+        "pass_session_id": False,
     }
 
 
@@ -576,7 +578,18 @@ def test_main_top_level_oneshot_accepts_toolsets(monkeypatch, main_mod):
     import hermes_cli.config as config_mod
 
     monkeypatch.setattr(
-        sys, "argv", ["hermes", "-z", "hello", "--toolsets", "web,terminal"]
+        sys,
+        "argv",
+        [
+            "hermes",
+            "-z",
+            "hello",
+            "--toolsets",
+            "web,terminal",
+            "--resume",
+            "session-123",
+            "--pass-session-id",
+        ],
     )
     monkeypatch.setitem(
         sys.modules,
@@ -617,6 +630,8 @@ def test_main_top_level_oneshot_accepts_toolsets(monkeypatch, main_mod):
         "model": None,
         "provider": None,
         "toolsets": "web,terminal",
+        "resume_session_id": "session-123",
+        "pass_session_id": True,
     }
 
 
@@ -660,6 +675,68 @@ def test_oneshot_prints_nonempty_final_response(monkeypatch, capsys):
     captured = capsys.readouterr()
     assert captured.out == "done\n"
     assert captured.err == ""
+
+
+def test_oneshot_forwards_resume_contract_to_agent(monkeypatch, capsys):
+    _stub_plugin_discovery(monkeypatch)
+    import hermes_cli.oneshot as oneshot_mod
+
+    captured = {}
+
+    def fake_run(prompt, **kwargs):
+        captured.update({"prompt": prompt, **kwargs})
+        return "done", {}
+
+    monkeypatch.setattr(oneshot_mod, "_run_agent", fake_run)
+
+    assert (
+        oneshot_mod.run_oneshot(
+            "continue",
+            resume_session_id="session-123",
+            pass_session_id=True,
+        )
+        == 0
+    )
+    assert captured["resume_session_id"] == "session-123"
+    assert captured["pass_session_id"] is True
+    assert capsys.readouterr().out == "done\n"
+
+
+def test_load_oneshot_resume_resolves_history_and_reopens_session():
+    from hermes_cli.oneshot import _load_oneshot_resume
+
+    class FakeDB:
+        reopened = None
+
+        def get_session(self, session_id):
+            if session_id in {"session-parent", "session-child"}:
+                return {"id": session_id}
+            return None
+
+        def resolve_resume_session_id(self, session_id):
+            assert session_id == "session-parent"
+            return "session-child"
+
+        def get_messages_as_conversation(self, session_id):
+            assert session_id == "session-child"
+            return [
+                {"role": "session_meta", "content": "internal"},
+                {"role": "user", "content": "earlier"},
+                {"role": "assistant", "content": "answer"},
+            ]
+
+        def reopen_session(self, session_id):
+            self.reopened = session_id
+
+    db = FakeDB()
+    session_id, history = _load_oneshot_resume(db, "session-parent")
+
+    assert session_id == "session-child"
+    assert history == [
+        {"role": "user", "content": "earlier"},
+        {"role": "assistant", "content": "answer"},
+    ]
+    assert db.reopened == "session-child"
 
 
 def test_oneshot_fails_closed_on_agent_exception(monkeypatch, capsys):
@@ -788,7 +865,7 @@ def test_oneshot_rejects_disabled_mcp_toolset(monkeypatch, capsys):
     valid, error = _validate_explicit_toolsets("mcp-off")
 
     assert valid is None
-    assert error == "hermes -z: --toolsets did not contain any valid toolsets.\n"
+    assert error == "hades -z: --toolsets did not contain any valid toolsets.\n"
     err = capsys.readouterr().err
     assert "ignoring disabled MCP servers" in err
     assert "mcp-off" in err
@@ -817,7 +894,7 @@ def test_oneshot_distinguishes_disabled_mcp_from_unknown(monkeypatch, capsys):
 
 
 def test_oneshot_wires_session_db_for_recall(monkeypatch):
-    """hermes -z bypasses HermesCLI, but recall still needs SessionDB."""
+    """hades -z bypasses the interactive CLI, but recall still needs SessionDB."""
     from hermes_cli.oneshot import _run_agent
 
     captured = {}
@@ -1079,8 +1156,8 @@ def test_print_tui_exit_summary_includes_resume_and_token_totals(monkeypatch, ca
     out = capsys.readouterr().out
 
     assert "Resume this session with:" in out
-    assert "hermes --tui --resume 20260409_000001_abc123" in out
-    assert 'hermes --tui -c "demo title"' in out
+    assert "hades --tui --resume 20260409_000001_abc123" in out
+    assert 'hades --tui -c "demo title"' in out
     assert "Tokens:         21 (in 10, out 6, cache 4, reasoning 1)" in out
 
 
@@ -1119,5 +1196,5 @@ def test_print_tui_exit_summary_prefers_actual_active_session_file(
     out = capsys.readouterr().out
 
     assert seen == ["actual_session"]
-    assert "hermes --tui --resume actual_session" in out
+    assert "hades --tui --resume actual_session" in out
     assert "startup_resume" not in out

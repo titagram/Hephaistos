@@ -135,14 +135,35 @@ def test_block_loop_detected_event_emitted(kanban_home: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_dependency_block_routes_to_todo(kanban_home: Path) -> None:
-    """Dependency waits never enter the human 'blocked' bucket."""
+def test_dependency_block_rejects_missing_dependency(kanban_home: Path) -> None:
+    """A dependency wait without an unfinished parent would retry forever."""
     with kb.connect_closing() as conn:
         tid = _running_task(conn)
-        assert kb.block_task(conn, tid, reason="need X first", kind="dependency")
+        with pytest.raises(ValueError, match="unfinished parent"):
+            kb.block_task(conn, tid, reason="need X first", kind="dependency")
         t = kb.get_task(conn, tid)
-        assert t.status == "todo"
-        assert t.block_kind == "dependency"
+        assert t.status == "running"
+        assert t.block_kind is None
+
+
+def test_dependency_block_links_named_dependency_atomically(
+    kanban_home: Path,
+) -> None:
+    """A worker can name newly-created remediation and park until it completes."""
+    with kb.connect_closing() as conn:
+        dependency = kb.create_task(conn, title="remediation", assignee="worker")
+        child = _running_task(conn, title="integration gate")
+
+        assert kb.block_task(
+            conn,
+            child,
+            reason="wait for remediation",
+            kind="dependency",
+            dependency_task_id=dependency,
+        )
+
+        assert kb.get_task(conn, child).status == "todo"
+        assert kb.parent_ids(conn, child) == [dependency]
 
 
 def test_dependency_then_parent_done_promotes(kanban_home: Path) -> None:

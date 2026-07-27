@@ -4586,6 +4586,7 @@ def block_task(
     *,
     reason: Optional[str] = None,
     kind: Optional[str] = None,
+    dependency_task_id: Optional[str] = None,
     expected_run_id: Optional[int] = None,
 ) -> bool:
     """Transition ``running``/``ready`` → ``blocked`` (or route elsewhere).
@@ -4597,8 +4598,11 @@ def block_task(
     * ``dependency`` — the task is only waiting on another task. It does NOT
       sit in ``blocked`` (where a cron would keep "unblocking" it); it goes to
       ``todo`` so the existing parent-gating / ``recompute_ready`` machinery
-      promotes it automatically once its parents finish. No human, no cron, no
-      retry storm. This is Dale's "Type 2 — dependency blocked".
+      promotes it automatically once its parents finish. ``dependency_task_id``
+      atomically adds a newly-discovered parent edge. Without that argument,
+      at least one existing parent must still be unfinished; otherwise the
+      request is rejected instead of creating a retry storm. No human, no cron.
+      This is Dale's "Type 2 — dependency blocked".
 
     * ``needs_input`` / ``capability`` / ``None`` — "truly blocked" (Dale's
       "Type 1"). Lands in ``blocked`` for a human. BUT: each time such a task
@@ -4641,6 +4645,57 @@ def block_task(
         # here (rather than ``blocked``) is what keeps a cron from ever seeing
         # a dependency-wait as something to "unblock".
         if kind == "dependency":
+            if dependency_task_id is not None:
+                dependency_task_id = str(dependency_task_id)
+                if dependency_task_id == task_id:
+                    raise ValueError("a task cannot depend on itself")
+                dependency_row = conn.execute(
+                    "SELECT status FROM tasks WHERE id = ?",
+                    (dependency_task_id,),
+                ).fetchone()
+                if dependency_row is None:
+                    raise ValueError(
+                        f"unknown dependency task: {dependency_task_id}"
+                    )
+                if dependency_row["status"] in ("done", "archived"):
+                    raise ValueError(
+                        f"dependency task {dependency_task_id} is already "
+                        f"{dependency_row['status']}; expected an unfinished parent"
+                    )
+                if _would_cycle(conn, dependency_task_id, task_id):
+                    raise ValueError(
+                        f"linking {dependency_task_id} -> {task_id} would "
+                        "create a cycle"
+                    )
+                conn.execute(
+                    "INSERT OR IGNORE INTO task_links (parent_id, child_id) "
+                    "VALUES (?, ?)",
+                    (dependency_task_id, task_id),
+                )
+                _append_event(
+                    conn,
+                    task_id,
+                    "linked",
+                    {"parent": dependency_task_id, "child": task_id},
+                )
+
+            unfinished_parents = conn.execute(
+                """
+                SELECT t.id
+                  FROM tasks t
+                  JOIN task_links l ON l.parent_id = t.id
+                 WHERE l.child_id = ?
+                   AND t.status NOT IN ('done', 'archived')
+                 ORDER BY t.id
+                """,
+                (task_id,),
+            ).fetchall()
+            if not unfinished_parents:
+                raise ValueError(
+                    "dependency block requires an unfinished parent; pass "
+                    "dependency_task_id when waiting on newly-created work"
+                )
+
             cur = conn.execute(
                 """
                 UPDATE tasks
@@ -4668,7 +4723,12 @@ def block_task(
                 )
             _append_event(
                 conn, task_id, "dependency_wait",
-                {"reason": reason, "kind": kind}, run_id=run_id,
+                {
+                    "reason": reason,
+                    "kind": kind,
+                    "dependencies": [row["id"] for row in unfinished_parents],
+                },
+                run_id=run_id,
             )
             routed_to = "todo"
             _blocked_task = get_task(conn, task_id)
@@ -7651,21 +7711,20 @@ def _hermes_path_argv(path: str) -> list[str]:
 
 
 def _resolve_hermes_argv() -> list[str]:
-    """Resolve the ``hermes`` invocation as argv parts for ``Popen``.
+    """Resolve the Hades invocation as argv parts for ``Popen``.
 
     Tries in order:
 
     1. ``$HERMES_BIN`` — explicit operator override. Path-like values are
        normalized to absolute paths; bare command names keep normal PATH
        semantics and never prefer a same-directory file before ``PATH``.
-    2. ``shutil.which("hermes")`` — the console-script shim, normalized to
-       an absolute path. On Windows, ``which`` can return a relative
-       ``.\\hermes.CMD`` when the current directory is on ``PATH``; directly
-       launching batch shims is also unsafe with task-derived argv. The
-       dispatcher therefore falls back to the interpreter-bound module form
-       for implicit ``.cmd`` / ``.bat`` shims.
-    3. ``sys.executable -m hermes_cli.main`` — fallback for setups where
-       Hermes is launched from a venv and the ``hermes`` shim is not on
+    2. The primary ``hades`` console-script shim.
+    3. The legacy ``hermes`` console-script shim for compatibility. On
+       Windows, PATH lookup can return a relative ``.cmd`` shim; directly
+       launching batch shims is unsafe with task-derived argv, so those fall
+       back to the interpreter-bound module form.
+    4. ``sys.executable -m hermes_cli.main`` — fallback for setups where
+       Hades is launched from a venv and neither shim is on
        the dispatcher's ``$PATH`` (cron, systemd ``User=`` services,
        launchd jobs, detached processes, etc.). Goes through the running
        interpreter so the result is independent of ``$PATH``.
@@ -7685,9 +7744,14 @@ def _resolve_hermes_argv() -> list[str]:
             return _hermes_path_argv(resolved_env_bin)
         return _module_hermes_argv()
 
-    hermes_bin = _safe_which_no_cwd("hermes") if _IS_WINDOWS else shutil.which("hermes")
-    if hermes_bin:
-        return _hermes_path_argv(hermes_bin)
+    for command in ("hades", "hermes"):
+        resolved = (
+            _safe_which_no_cwd(command)
+            if _IS_WINDOWS
+            else shutil.which(command)
+        )
+        if resolved:
+            return _hermes_path_argv(resolved)
     return _module_hermes_argv()
 
 
@@ -7955,8 +8019,8 @@ def _default_spawn(
     except FileNotFoundError:
         log_f.close()
         raise RuntimeError(
-            "`hermes` executable not found on PATH. "
-            "Install Hermes Agent or activate its venv before running the kanban dispatcher."
+            "`hades` executable not found on PATH. "
+            "Install Hades Agent or activate its venv before running the kanban dispatcher."
         )
     # NOTE: we intentionally do NOT close log_f here — we want Popen's
     # child process to keep writing after this function returns.  The

@@ -63,6 +63,61 @@ def test_create_org_run_separates_anchor_execution_review_and_completion(tmp_pat
         conn.close()
 
 
+def test_create_org_run_routes_reviews_without_live_review_engine(tmp_path):
+    """Durable Kanban reviews use the reviewer role, not the live review proxy."""
+    conn = kb.connect(tmp_path / "kanban.db")
+    try:
+        plan = parse_execution_portfolio(payload())
+        created = create_org_run(conn, plan, validate_execution_portfolio(plan))
+
+        task_review = kb.get_task(
+            conn, created.remote_tasks["HD-101"].review_id
+        )
+        org_review = kb.get_task(conn, created.review_id)
+
+        assert task_review is not None
+        assert task_review.assignee == "reviewer"
+        assert task_review.skills == ["hierarchical-development"]
+        assert org_review is not None
+        assert org_review.assignee == "reviewer"
+        assert org_review.skills == ["hierarchical-development"]
+    finally:
+        conn.close()
+
+
+def test_create_org_run_repairs_open_legacy_engine_reviews(tmp_path):
+    """Idempotent materialization repairs review cards made before the engine split."""
+    conn = kb.connect(tmp_path / "kanban.db")
+    try:
+        plan = parse_execution_portfolio(payload())
+        validation = validate_execution_portfolio(plan)
+        created = create_org_run(conn, plan, validation)
+        review_ids = [
+            created.remote_tasks["HD-101"].review_id,
+            created.review_id,
+        ]
+        placeholders = ",".join("?" for _ in review_ids)
+        conn.execute(
+            f"UPDATE tasks SET assignee='default', "
+            f"skills='[\"requesting-code-review\"]', status='blocked' "
+            f"WHERE id IN ({placeholders})",
+            review_ids,
+        )
+        conn.commit()
+
+        recovered = create_org_run(conn, plan, validation)
+
+        assert recovered == created
+        for review_id in review_ids:
+            review = kb.get_task(conn, review_id)
+            assert review is not None
+            assert review.status == "blocked"
+            assert review.assignee == "reviewer"
+            assert review.skills == ["hierarchical-development"]
+    finally:
+        conn.close()
+
+
 def test_create_org_run_is_idempotent(tmp_path):
     conn = kb.connect(tmp_path / "kanban.db")
     try:

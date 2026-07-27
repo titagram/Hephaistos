@@ -56,7 +56,7 @@ def _validate_explicit_toolsets(toolsets: object = None) -> tuple[list[str] | No
     try:
         from toolsets import validate_toolset
     except Exception as exc:
-        return None, f"hermes -z: failed to validate --toolsets: {exc}\n"
+        return None, f"hades -z: failed to validate --toolsets: {exc}\n"
 
     built_in = [name for name in normalized if validate_toolset(name)]
     unresolved = [name for name in normalized if name not in built_in]
@@ -78,7 +78,7 @@ def _validate_explicit_toolsets(toolsets: object = None) -> tuple[list[str] | No
         ignored = [name for name in normalized if name not in {"all", "*"}]
         if ignored:
             sys.stderr.write(
-                "hermes -z: --toolsets all enables every toolset; "
+                "hades -z: --toolsets all enables every toolset; "
                 f"ignoring additional entries: {', '.join(ignored)}\n"
             )
         return None, None
@@ -109,15 +109,15 @@ def _validate_explicit_toolsets(toolsets: object = None) -> tuple[list[str] | No
     valid = built_in + mcp_valid
 
     if unknown:
-        sys.stderr.write(f"hermes -z: ignoring unknown --toolsets entries: {', '.join(unknown)}\n")
+        sys.stderr.write(f"hades -z: ignoring unknown --toolsets entries: {', '.join(unknown)}\n")
     if disabled:
         sys.stderr.write(
-            "hermes -z: ignoring disabled MCP servers (set enabled: true in config.yaml to use): "
+            "hades -z: ignoring disabled MCP servers (set enabled: true in config.yaml to use): "
             f"{', '.join(disabled)}\n"
         )
 
     if not valid:
-        return None, "hermes -z: --toolsets did not contain any valid toolsets.\n"
+        return None, "hades -z: --toolsets did not contain any valid toolsets.\n"
 
     return valid, None
 
@@ -127,6 +127,8 @@ def run_oneshot(
     model: Optional[str] = None,
     provider: Optional[str] = None,
     toolsets: object = None,
+    resume_session_id: Optional[str] = None,
+    pass_session_id: bool = False,
 ) -> int:
     """Execute a single prompt and print only the final content block.
 
@@ -137,6 +139,10 @@ def run_oneshot(
         provider: Optional provider override. Falls back to config.yaml's
             model.provider, then "auto".
         toolsets: Optional comma-separated string or iterable of toolsets.
+        resume_session_id: Existing session whose transcript should precede
+            this turn. Missing sessions fail closed instead of silently
+            creating a new conversation.
+        pass_session_id: Include the effective session ID in the system prompt.
 
     Returns the exit code.  Caller should sys.exit() with the return.
     """
@@ -155,7 +161,7 @@ def run_oneshot(
     env_model_early = os.getenv("HERMES_INFERENCE_MODEL", "").strip()
     if provider and not ((model or "").strip() or env_model_early):
         sys.stderr.write(
-            "hermes -z: --provider requires --model (or HERMES_INFERENCE_MODEL). "
+            "hades -z: --provider requires --model (or HERMES_INFERENCE_MODEL). "
             "Pass both explicitly, or neither to use your configured defaults.\n"
         )
         return 2
@@ -189,6 +195,8 @@ def run_oneshot(
                     provider=provider,
                     toolsets=explicit_toolsets,
                     use_config_toolsets=use_config_toolsets,
+                    resume_session_id=resume_session_id,
+                    pass_session_id=pass_session_id,
                 )
             except BaseException as exc:  # noqa: BLE001
                 # Capture anything that escapes the agent (including OSError
@@ -210,7 +218,7 @@ def run_oneshot(
         # (Ctrl-C / explicit sys.exit() inside the agent).
         if isinstance(failure, (KeyboardInterrupt, SystemExit)):
             raise failure
-        real_stderr.write(f"hermes -z: agent failed: {failure}\n")
+        real_stderr.write(f"hades -z: agent failed: {failure}\n")
         real_stderr.flush()
         return 1
 
@@ -224,7 +232,7 @@ def run_oneshot(
         return 2
 
     if not (response or "").strip():
-        real_stderr.write("hermes -z: no final response was produced; treating the run as failed.\n")
+        real_stderr.write("hades -z: no final response was produced; treating the run as failed.\n")
         real_stderr.flush()
         return 1
 
@@ -232,7 +240,7 @@ def run_oneshot(
 
 
 def _create_session_db_for_oneshot():
-    """Best-effort SessionDB for ``hermes -z`` / oneshot mode.
+    """Best-effort SessionDB for ``hades -z`` / oneshot mode.
 
     Oneshot bypasses ``HermesCLI._init_agent()``, so it must wire the SQLite
     session store itself. Without this, the ``session_search``/recall tool is
@@ -253,6 +261,8 @@ def _run_agent(
     provider: Optional[str] = None,
     toolsets: object = None,
     use_config_toolsets: bool = True,
+    resume_session_id: Optional[str] = None,
+    pass_session_id: bool = False,
 ) -> tuple[str, dict]:
     """Build an AIAgent exactly like a normal CLI chat turn would, then
     run a single conversation.  Returns ``(final_response, run_result)``."""
@@ -333,6 +343,13 @@ def _run_agent(
         toolsets_list = sorted(_get_platform_tools(cfg, "cli"))
 
     session_db = _create_session_db_for_oneshot()
+    effective_session_id: Optional[str] = None
+    conversation_history: list[dict] | None = None
+    if resume_session_id:
+        effective_session_id, conversation_history = _load_oneshot_resume(
+            session_db,
+            resume_session_id,
+        )
     # Read the effective fallback chain from profile config so oneshot workers
     # honour the same merge semantics as interactive CLI and gateway sessions.
     _fb = get_fallback_chain(cfg)
@@ -347,6 +364,8 @@ def _run_agent(
         quiet_mode=True,
         platform="cli",
         session_db=session_db,
+        session_id=effective_session_id,
+        pass_session_id=pass_session_id,
         credential_pool=runtime.get("credential_pool"),
         fallback_model=_fb or None,
         # Interactive callbacks are intentionally NOT wired beyond this
@@ -369,8 +388,51 @@ def _run_agent(
     agent.stream_delta_callback = None
     agent.tool_gen_callback = None
 
-    result = agent.run_conversation(prompt)
+    result = agent.run_conversation(
+        prompt,
+        conversation_history=conversation_history,
+    )
     return (result.get("final_response") or "", result)
+
+
+def _load_oneshot_resume(
+    session_db,
+    requested_session_id: str,
+) -> tuple[str, list[dict]]:
+    """Resolve and load a one-shot resume target without creating a fallback.
+
+    Returning a fresh session after an explicit ``--resume`` is data-loss-like
+    behavior for automation: the command appears successful but has no prior
+    context. Keep this path strict and reuse SessionDB's compression lineage
+    resolution so interactive and one-shot resume semantics match.
+    """
+    if session_db is None:
+        raise RuntimeError("session database is unavailable; cannot resume")
+
+    requested_session_id = str(requested_session_id).strip()
+    if not requested_session_id or not session_db.get_session(requested_session_id):
+        raise ValueError(f"Session not found: {requested_session_id}")
+
+    try:
+        effective_session_id = (
+            session_db.resolve_resume_session_id(requested_session_id)
+            or requested_session_id
+        )
+    except Exception:
+        effective_session_id = requested_session_id
+
+    if not session_db.get_session(effective_session_id):
+        raise ValueError(f"Session not found: {effective_session_id}")
+
+    restored = (
+        session_db.get_messages_as_conversation(effective_session_id) or []
+    )
+    history = [
+        message for message in restored
+        if message.get("role") != "session_meta"
+    ]
+    session_db.reopen_session(effective_session_id)
+    return effective_session_id, history
 
 
 def _oneshot_clarify_callback(question: str, choices=None) -> str:

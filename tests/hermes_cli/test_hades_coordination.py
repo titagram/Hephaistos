@@ -20,6 +20,15 @@ def test_hades_coordination_profiles_are_curated_and_local_only():
         assert "model" not in routing
 
 
+def test_hades_coordination_reviewer_does_not_require_live_review_authority():
+    from hermes_cli.hades_coordination import hades_coordination_profile
+
+    reviewer = hades_coordination_profile("reviewer")
+
+    assert reviewer is not None
+    assert reviewer["skill"] == "software-development/hierarchical-development"
+
+
 def test_hades_coordination_profiles_are_copy_safe():
     from hermes_cli.hades_coordination import hades_coordination_profiles
 

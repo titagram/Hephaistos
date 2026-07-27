@@ -12,6 +12,19 @@ from hermes_cli.hierarchical_execution import ExecutionPortfolio, PortfolioValid
 from hermes_cli.kanban_swarm import latest_blackboard, post_blackboard_update
 
 
+_DURABLE_REVIEW_ASSIGNEE = "reviewer"
+_DURABLE_REVIEW_SKILLS = ["hierarchical-development"]
+_LEGACY_ENGINE_REVIEW_SKILLS = ["requesting-code-review"]
+_OPEN_REVIEW_STATUSES = {
+    "triage",
+    "todo",
+    "ready",
+    "review",
+    "blocked",
+    "scheduled",
+}
+
+
 @dataclass(frozen=True)
 class RemoteTaskTopology:
     anchor_id: str
@@ -51,6 +64,54 @@ class MandateAcceptance:
     remote_id: str
     version: str
     resumed_nodes: tuple[str, ...] = ()
+
+
+def _repair_legacy_review_tasks(
+    conn: sqlite3.Connection,
+    topology: OrgRunCreated,
+) -> None:
+    """Move open pre-engine-split review cards onto the durable reviewer route."""
+    review_ids = [
+        *(remote.review_id for remote in topology.remote_tasks.values()),
+        topology.review_id,
+    ]
+    with kb.write_txn(conn):
+        for review_id in review_ids:
+            row = conn.execute(
+                "SELECT assignee, status, skills FROM tasks WHERE id = ?",
+                (review_id,),
+            ).fetchone()
+            if row is None or row["status"] not in _OPEN_REVIEW_STATUSES:
+                continue
+            try:
+                skills = json.loads(row["skills"]) if row["skills"] else None
+            except (TypeError, ValueError):
+                skills = None
+            if (
+                row["assignee"] != "default"
+                or skills != _LEGACY_ENGINE_REVIEW_SKILLS
+            ):
+                continue
+            conn.execute(
+                "UPDATE tasks SET assignee = ?, skills = ?, "
+                "consecutive_failures = 0, last_failure_error = NULL "
+                "WHERE id = ?",
+                (
+                    _DURABLE_REVIEW_ASSIGNEE,
+                    json.dumps(_DURABLE_REVIEW_SKILLS),
+                    review_id,
+                ),
+            )
+            kb._append_event(
+                conn,
+                review_id,
+                "contract_repaired",
+                {
+                    "reason": "durable_review_must_not_require_live_review_authority",
+                    "assignee": _DURABLE_REVIEW_ASSIGNEE,
+                    "skills": _DURABLE_REVIEW_SKILLS,
+                },
+            )
 
 
 def _ensure_projection_tables(conn: sqlite3.Connection) -> None:
@@ -518,6 +579,7 @@ def create_org_run(
     )
     existing = _topology_from_blackboard(conn, anchor_id)
     if existing is not None:
+        _repair_legacy_review_tasks(conn, existing)
         return existing
     anchor = kb.get_task(conn, anchor_id)
     if anchor is not None and anchor.status != "done":
@@ -577,11 +639,11 @@ def create_org_run(
                 "Review the implementation evidence, changed files, scope and focused tests.\n"
                 + _protocol(plan.org_run_id, task.remote_task_id, task.write_scope)
             ),
-            assignee="default",
+            assignee=_DURABLE_REVIEW_ASSIGNEE,
             created_by=created_by,
             parents=[execution_ids[task.remote_task_id]],
             priority=task.priority,
-            skills=["requesting-code-review"],
+            skills=_DURABLE_REVIEW_SKILLS,
             idempotency_key=f"org-run:{plan.org_run_id}:{task.remote_task_id}:review",
             board=board,
             workspace_kind=runnable_ws_kind,
@@ -622,10 +684,10 @@ def create_org_run(
         conn,
         title=f"Review integrated OrgRun {plan.org_run_id}",
         body="Independently verify the integrated worktree, acceptance criteria and regression suite.",
-        assignee="default",
+        assignee=_DURABLE_REVIEW_ASSIGNEE,
         created_by=created_by,
         parents=[integration_id],
-        skills=["requesting-code-review"],
+        skills=_DURABLE_REVIEW_SKILLS,
         idempotency_key=f"org-run:{plan.org_run_id}:org-review",
         board=board,
         workspace_kind=runnable_ws_kind,

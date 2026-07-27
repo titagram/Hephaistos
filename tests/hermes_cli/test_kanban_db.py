@@ -3251,14 +3251,21 @@ def test_migrate_add_optional_columns_tolerates_concurrent_migration(kanban_home
 
 
 def test_resolve_hermes_argv_prefers_path_shim(monkeypatch):
-    """When `hermes` is on PATH, use the shim — preserves familiar ps output."""
+    """The Hades fork prefers its primary shim over legacy Hermes aliases."""
     import shutil
     import hermes_cli.kanban_db as kb
 
     monkeypatch.delenv("HERMES_BIN", raising=False)
-    monkeypatch.setattr(shutil, "which", lambda name: "/usr/local/bin/hermes")
+    monkeypatch.setattr(
+        shutil,
+        "which",
+        lambda name: {
+            "hades": "/usr/local/bin/hades",
+            "hermes": "/usr/local/bin/hermes",
+        }.get(name),
+    )
     argv = kb._resolve_hermes_argv()
-    assert argv == ["/usr/local/bin/hermes"]
+    assert argv == ["/usr/local/bin/hades"]
 
 
 def test_resolve_hermes_argv_absolutizes_relative_exe_shim(monkeypatch, tmp_path):
