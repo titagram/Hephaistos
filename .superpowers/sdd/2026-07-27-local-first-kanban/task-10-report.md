@@ -192,3 +192,28 @@ The documentation now lists only emitted report states: `local_only`,
 authorization, and validation examples are explicitly described as
 `sync_error`, not as their own report state. No deployment or live-session
 operation was performed.
+
+## Fix Round 3
+
+Further narrowed HTTP classification. `httpx.HTTPError` contains both
+transport failures and protocol/response failures, so the prior helper was
+still too broad: direct `HTTPStatusError(403)` and `DecodingError` could be
+reported as `backend_offline`.
+
+The classifier now recognizes only `httpx.TransportError` as transport. It
+inspects direct or chained `HTTPStatusError.response.status_code` before the
+transport check: 408/5xx are temporarily unavailable (`backend_offline`),
+while 4xx remain `sync_error`. A direct malformed/decoding response is also
+`sync_error`. Wrapped `HadesBackendError` transport-cause handling remains
+unchanged.
+
+```text
+RED: direct HTTPStatusError(403) -> backend_offline / exit 0 (incorrect)
+RED: direct DecodingError        -> backend_offline / exit 0 (incorrect)
+GREEN focused classifier tests:  7 passed
+test_kanban_cli.py:             63 passed
+test_hades_kanban_sync.py +
+test_kanban_backend.py:         21 passed
+```
+
+No deployment or live-session operation was performed.

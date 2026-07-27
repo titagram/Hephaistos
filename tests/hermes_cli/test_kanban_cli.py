@@ -116,6 +116,21 @@ def test_kanban_sync_accepts_board_after_subcommand(kanban_home, capsys):
             0,
         ),
         (
+            lambda: _http_status_failure(403),
+            "sync_error",
+            1,
+        ),
+        (
+            lambda: _http_status_failure(503),
+            "backend_offline",
+            0,
+        ),
+        (
+            lambda: httpx.DecodingError("invalid JSON response"),
+            "sync_error",
+            1,
+        ),
+        (
             lambda: HadesBackendError("403: forbidden", status_code=403, code="forbidden"),
             "sync_error",
             1,
@@ -164,6 +179,14 @@ def _wrapped_transport_failure() -> HadesBackendError:
     error = HadesBackendError("connect failed")
     error.__cause__ = httpx.ConnectError("connection refused")
     return error
+
+
+def _http_status_failure(status_code: int) -> httpx.HTTPStatusError:
+    request = httpx.Request("GET", "https://backend.invalid/sync")
+    response = httpx.Response(status_code, request=request)
+    return httpx.HTTPStatusError(
+        f"backend returned {status_code}", request=request, response=response,
+    )
 
 
 def test_cli_sync_redacts_bounded_backend_error_text(kanban_home, monkeypatch, capsys):

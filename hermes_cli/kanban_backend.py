@@ -38,10 +38,30 @@ def _is_transport_failure(exc: BaseException) -> bool:
         seen.add(id(current))
         if isinstance(current, (ConnectionError, TimeoutError, OSError)):
             return True
-        if httpx is not None and isinstance(current, httpx.HTTPError):
+        if httpx is not None and isinstance(current, httpx.TransportError):
             return True
         current = current.__cause__ or current.__context__
     return False
+
+
+def _http_status_from_chain(exc: BaseException) -> int | None:
+    """Read an explicit httpx status without confusing it for transport."""
+    if httpx is None:
+        return None
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, httpx.HTTPStatusError):
+            status = current.response.status_code
+            return status if isinstance(status, int) else None
+        current = current.__cause__ or current.__context__
+    return None
+
+
+def _state_for_http_status(status: int) -> str:
+    """Only an unavailable backend service is an offline sync condition."""
+    return "backend_offline" if status == 408 or status >= 500 else "sync_error"
 
 
 def _sync_failure_state(exc: BaseException) -> str:
@@ -54,11 +74,11 @@ def _sync_failure_state(exc: BaseException) -> str:
     """
     if isinstance(exc, HadesBackendError):
         status = exc.status_code
-        if status is None:
-            return "backend_offline" if _is_transport_failure(exc) else "sync_error"
-        if status == 408 or status >= 500:
-            return "backend_offline"
-        return "sync_error"
+        if status is not None:
+            return _state_for_http_status(status)
+    status = _http_status_from_chain(exc)
+    if status is not None:
+        return _state_for_http_status(status)
     return "backend_offline" if _is_transport_failure(exc) else "sync_error"
 
 
