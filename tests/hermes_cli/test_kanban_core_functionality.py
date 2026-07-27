@@ -2878,11 +2878,88 @@ def test_default_spawn_does_not_auto_load_any_skill(kanban_home, monkeypatch):
     assert cmd.index("--accept-hooks") < cmd.index("chat"), (
         f"--accept-hooks must come before 'chat' in argv: {cmd}"
     )
+    assert "--provider" not in cmd
+    assert "-m" not in cmd
     # Assignee + task env are still present
     assert "some-profile" in cmd
     env = captured["env"]
     assert env.get("HERMES_KANBAN_TASK") == tid
     assert env.get("HERMES_PROFILE") == "some-profile"
+
+
+@pytest.mark.parametrize(
+    ("role", "model"),
+    (
+        ("orchestrator", "deepseek-v4-pro"),
+        ("leaf", "deepseek-v4-flash"),
+        ("reviewer", "deepseek-v4-pro"),
+    ),
+)
+def test_default_spawn_routes_logical_role_from_delegation_config(
+    kanban_home,
+    monkeypatch,
+    role,
+    model,
+):
+    """Durable role workers use the routing chosen by delegation configure.
+
+    This catches the split-brain regression where ephemeral children read the
+    root ``delegation`` routes but Kanban workers silently use the named
+    profile's unrelated default model.
+    """
+    (kanban_home / "config.yaml").write_text(
+        """
+delegation:
+  profiles:
+    recommended_orchestrator:
+      provider: opencode-go
+      model: deepseek-v4-pro
+      max_iterations: 30
+      child_timeout_seconds: 300
+    recommended_leaf:
+      provider: opencode-go
+      model: deepseek-v4-flash
+      max_iterations: 15
+      child_timeout_seconds: 180
+    recommended_reviewer:
+      provider: opencode-go
+      model: deepseek-v4-pro
+      max_iterations: 15
+      child_timeout_seconds: 180
+  role_routes:
+    orchestrator: recommended_orchestrator
+    leaf: recommended_leaf
+    reviewer: recommended_reviewer
+  capacity_mode: balanced
+  max_spawn_depth: 2
+  max_concurrent_children: 3
+  max_async_children: 3
+""".lstrip(),
+        encoding="utf-8",
+    )
+    captured = {}
+
+    class FakeProc:
+        pid = 123
+
+    def fake_popen(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return FakeProc()
+
+    monkeypatch.setattr("subprocess.Popen", fake_popen)
+
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="routed worker", assignee=role)
+        task = kb.get_task(conn, tid)
+        workspace = kb.resolve_workspace(task)
+        assert kb._default_spawn(task, str(workspace)) == 123
+    finally:
+        conn.close()
+
+    cmd = captured["cmd"]
+    assert cmd[cmd.index("--provider") + 1] == "opencode-go"
+    assert cmd[cmd.index("-m") + 1] == model
 
 
 def test_default_spawn_raises_terminal_timeout_to_task_runtime(kanban_home, monkeypatch):

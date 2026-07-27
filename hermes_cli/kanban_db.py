@@ -7755,6 +7755,38 @@ def _resolve_worker_cli_toolsets(hermes_home: Optional[str]) -> Optional[list[st
         return None
 
 
+def _resolve_worker_role_route(profile: str):
+    """Resolve a logical Kanban assignee through root delegation routing.
+
+    Named profiles remain independent runtime environments.  Only the three
+    logical hierarchical-development roles share the root routing configured
+    by ``hades delegation setup/configure``.
+    """
+    from tools.delegation_routing import ALLOWED_ROLES
+
+    if profile not in ALLOWED_ROLES:
+        return None
+
+    from hermes_constants import (
+        get_default_hermes_root,
+        reset_hermes_home_override,
+        set_hermes_home_override,
+    )
+    from hermes_cli.config import load_config_readonly
+    from tools.delegation_routing import (
+        load_delegation_routing,
+        resolve_role_profile,
+    )
+
+    token = set_hermes_home_override(get_default_hermes_root())
+    try:
+        config = load_config_readonly()
+    finally:
+        reset_hermes_home_override(token)
+    routing = load_delegation_routing(config)
+    return resolve_role_profile(routing, profile)
+
+
 def _default_spawn(
     task: Task,
     workspace: str,
@@ -7882,8 +7914,14 @@ def _default_spawn(
         for sk in task.skills:
             if sk:
                 cmd.extend(["--skills", sk])
+    routed_profile = _resolve_worker_role_route(profile_arg)
     if task.model_override:
         cmd.extend(["-m", task.model_override])
+    elif routed_profile is not None:
+        cmd.extend([
+            "--provider", routed_profile.provider,
+            "-m", routed_profile.model,
+        ])
     worker_toolsets = _resolve_worker_cli_toolsets(env.get("HERMES_HOME"))
     if worker_toolsets:
         cmd.extend(["--toolsets", ",".join(worker_toolsets)])
