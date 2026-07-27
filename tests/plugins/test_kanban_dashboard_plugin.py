@@ -170,6 +170,77 @@ def test_board_payload_reads_only_the_selected_binding_sync_state(client, monkey
     }
 
 
+def test_board_sync_coalesces_repeated_linked_gets_and_releases_after_run(client, monkeypatch):
+    """A burst of reads must not create one daemon thread per HTTP request."""
+    from hermes_cli.kanban_backend import KanbanBackendContext
+
+    class HeldThread:
+        started: list["HeldThread"] = []
+
+        def __init__(self, *, target, **_kwargs):
+            self.target = target
+
+        def start(self):
+            self.started.append(self)
+
+    monkeypatch.setattr(
+        "hermes_cli.kanban_backend.resolve_kanban_backend_context",
+        lambda **_: KanbanBackendContext(
+            "linked", Path.cwd(), project_id="project", workspace_binding_id="binding",
+        ),
+    )
+    monkeypatch.setattr("threading.Thread", HeldThread)
+    monkeypatch.setattr("hermes_cli.kanban_backend.maybe_run_kanban_sync", lambda **_: None)
+
+    assert client.get("/api/plugins/kanban/board").status_code == 200
+    assert client.get("/api/plugins/kanban/board").status_code == 200
+    assert len(HeldThread.started) == 1
+
+    HeldThread.started[0].target()
+    assert client.get("/api/plugins/kanban/board").status_code == 200
+    assert len(HeldThread.started) == 2
+    HeldThread.started[1].target()
+
+
+def test_board_sync_redacts_persisted_and_resolver_secrets(client, monkeypatch):
+    from hermes_cli.kanban_backend import KanbanBackendContext
+
+    stored_secret = "Bearer stored-secret-value api_key=stored-api-key"
+    with kb.connect_closing() as conn:
+        kb.record_kanban_sync_state(
+            conn, workspace_binding_id="binding", state="backend_offline",
+            summary={}, last_error=f"backend refused {stored_secret}",
+        )
+
+    monkeypatch.setattr(
+        "hermes_cli.kanban_backend.resolve_kanban_backend_context",
+        lambda **_: KanbanBackendContext(
+            "linked", Path.cwd(), project_id="project", workspace_binding_id="binding",
+        ),
+    )
+    monkeypatch.setattr("hermes_cli.kanban_backend.maybe_run_kanban_sync", lambda **_: None)
+    persisted = client.get("/api/plugins/kanban/board").json()["sync"]["last_error"]
+
+    assert persisted is not None
+    assert "stored-secret-value" not in persisted
+    assert "stored-api-key" not in persisted
+    assert "backend refused" in persisted
+    assert len(persisted) <= 500
+
+    monkeypatch.setattr(
+        "hermes_cli.kanban_backend.resolve_kanban_backend_context",
+        lambda **_: (_ for _ in ()).throw(
+            RuntimeError("sync failed token=resolver-token Authorization: Bearer resolver-bearer"),
+        ),
+    )
+    resolver = client.get("/api/plugins/kanban/board").json()["sync"]["last_error"]
+
+    assert resolver is not None
+    assert "resolver-token" not in resolver
+    assert "resolver-bearer" not in resolver
+    assert "sync failed" in resolver
+
+
 def test_dashboard_bundle_renders_sync_and_remote_badges():
     bundle = (
         Path(__file__).resolve().parents[2]

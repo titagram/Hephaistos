@@ -38,6 +38,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import sqlite3
 import threading
 import time
@@ -154,6 +155,30 @@ BOARD_COLUMNS: list[str] = [
 
 
 _CARD_SUMMARY_PREVIEW_CHARS = 200
+_DASHBOARD_SYNC_LOCK = threading.Lock()
+_DASHBOARD_SYNC_INFLIGHT: set[tuple[str, str]] = set()
+_SYNC_SECRET_RE = re.compile(
+    r"(?ix)"
+    r"(?P<authorization>\bauthorization\s*:\s*bearer\s+)(?P<authorization_value>[^\s,;]+)"
+    r"|(?P<bearer>\bbearer\s+)(?P<bearer_value>[^\s,;]+)"
+    r"|\b(?P<key>api[_-]?key|access[_-]?token|refresh[_-]?token|token)"
+    r"(?P<separator>\s*[:=]\s*)(?P<value>[^\s,;]+)"
+)
+
+
+def _safe_sync_error(error: object | None) -> str | None:
+    """Return a compact diagnostic without credentials from persisted errors."""
+    if error is None:
+        return None
+
+    def _redact(match: re.Match[str]) -> str:
+        if match.group("authorization"):
+            return f"{match.group('authorization')}[redacted]"
+        if match.group("bearer"):
+            return f"{match.group('bearer')}[redacted]"
+        return f"{match.group('key')}{match.group('separator')}[redacted]"
+
+    return _SYNC_SECRET_RE.sub(_redact, str(error))[:500]
 
 
 def _board_sync_payload(conn: sqlite3.Connection, *, board: str | None) -> dict[str, Any]:
@@ -168,12 +193,12 @@ def _board_sync_payload(conn: sqlite3.Connection, *, board: str | None) -> dict[
     try:
         context = kanban_backend.resolve_kanban_backend_context(board=board)
     except Exception as exc:
-        log.warning("kanban dashboard backend context resolution failed: %s", exc)
+        log.warning("kanban dashboard backend context resolution failed: %s", type(exc).__name__)
         return {
             "state": "sync_error",
             "workspace_binding_id": None,
             "outbox_pending": 0,
-            "last_error": str(exc)[:500],
+            "last_error": _safe_sync_error(exc),
         }
 
     if context.mode == "local_only":
@@ -188,7 +213,7 @@ def _board_sync_payload(conn: sqlite3.Connection, *, board: str | None) -> dict[
             "state": "sync_error",
             "workspace_binding_id": context.workspace_binding_id,
             "outbox_pending": 0,
-            "last_error": context.error,
+            "last_error": _safe_sync_error(context.error),
         }
 
     binding_id = context.workspace_binding_id
@@ -204,13 +229,20 @@ def _board_sync_payload(conn: sqlite3.Connection, *, board: str | None) -> dict[
         "state": (state_row or {}).get("state", "synced"),
         "workspace_binding_id": binding_id,
         "outbox_pending": int(outbox_pending),
-        "last_error": (state_row or {}).get("last_error"),
+        "last_error": _safe_sync_error((state_row or {}).get("last_error")),
     }
 
 
-def _start_dashboard_sync(*, board: str | None) -> None:
+def _start_dashboard_sync(*, board: str | None, workspace_binding_id: str) -> None:
     """Schedule one bounded best-effort sync without holding the GET open."""
     from hermes_cli import kanban_backend
+
+    board_key = board or kanban_db.get_current_board()
+    sync_key = (board_key, workspace_binding_id)
+    with _DASHBOARD_SYNC_LOCK:
+        if sync_key in _DASHBOARD_SYNC_INFLIGHT:
+            return
+        _DASHBOARD_SYNC_INFLIGHT.add(sync_key)
 
     def _run() -> None:
         try:
@@ -221,12 +253,20 @@ def _start_dashboard_sync(*, board: str | None) -> None:
             # The status read above remains useful; sync errors are recorded by
             # the adapter on a later bounded attempt and must not break HTTP.
             log.debug("background kanban dashboard sync failed", exc_info=True)
+        finally:
+            with _DASHBOARD_SYNC_LOCK:
+                _DASHBOARD_SYNC_INFLIGHT.discard(sync_key)
 
-    threading.Thread(
-        target=_run,
-        name="kanban-dashboard-sync",
-        daemon=True,
-    ).start()
+    try:
+        threading.Thread(
+            target=_run,
+            name="kanban-dashboard-sync",
+            daemon=True,
+        ).start()
+    except Exception:
+        with _DASHBOARD_SYNC_LOCK:
+            _DASHBOARD_SYNC_INFLIGHT.discard(sync_key)
+        log.debug("could not start background kanban dashboard sync", exc_info=True)
 
 
 def _task_dict(
@@ -594,7 +634,9 @@ def get_board(
         # daemon attempt update the next read; local-only boards never create
         # a backend client and do not need a no-op background thread.
         if sync["state"] != "local_only" and sync["workspace_binding_id"]:
-            _start_dashboard_sync(board=board)
+            _start_dashboard_sync(
+                board=board, workspace_binding_id=sync["workspace_binding_id"],
+            )
         return payload
     finally:
         conn.close()
