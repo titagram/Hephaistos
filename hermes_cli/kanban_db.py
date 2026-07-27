@@ -1094,6 +1094,23 @@ class RemoteLink:
     updated_at: int
 
 
+@dataclass(frozen=True)
+class RemoteOutboxEntry:
+    """A durable remote completion/failure notification awaiting delivery."""
+
+    id: int
+    task_id: str
+    operation: str
+    payload: dict
+    idempotency_key: str
+    status: str
+    attempts: int
+    next_attempt_at: int
+    last_error: Optional[str]
+    created_at: int
+    updated_at: int
+
+
 @dataclass
 class Event:
     id: int
@@ -1294,6 +1311,34 @@ CREATE TABLE IF NOT EXISTS kanban_remote_links (
 );
 CREATE INDEX IF NOT EXISTS idx_remote_links_binding
 ON kanban_remote_links(workspace_binding_id, sync_status);
+
+CREATE TABLE IF NOT EXISTS kanban_sync_outbox (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id          TEXT NOT NULL,
+    operation        TEXT NOT NULL CHECK(operation IN ('complete', 'fail')),
+    idempotency_key  TEXT NOT NULL UNIQUE,
+    payload          TEXT NOT NULL,
+    status           TEXT NOT NULL DEFAULT 'pending',
+    attempts         INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at  INTEGER NOT NULL,
+    last_error       TEXT,
+    created_at       INTEGER NOT NULL,
+    updated_at       INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS kanban_sync_state (
+    workspace_binding_id TEXT PRIMARY KEY,
+    state                TEXT NOT NULL,
+    summary              TEXT NOT NULL DEFAULT '{}',
+    failure_count        INTEGER NOT NULL DEFAULT 0,
+    last_attempt_at      INTEGER,
+    next_attempt_at      INTEGER,
+    last_error           TEXT,
+    updated_at           INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_sync_outbox_due
+ON kanban_sync_outbox(status, next_attempt_at, id);
 
 CREATE INDEX IF NOT EXISTS idx_tasks_assignee_status ON tasks(assignee, status);
 CREATE INDEX IF NOT EXISTS idx_tasks_status          ON tasks(status);
@@ -2481,6 +2526,202 @@ def set_remote_lease(
     loaded = get_remote_link(conn, task_id)
     assert loaded is not None
     return loaded
+
+
+# ---------------------------------------------------------------------------
+# Durable remote result outbox and binding sync state
+# ---------------------------------------------------------------------------
+
+_REMOTE_OUTBOX_COLUMNS = (
+    "id, task_id, operation, payload, idempotency_key, status, attempts, "
+    "next_attempt_at, last_error, created_at, updated_at"
+)
+_MAX_SYNC_ERROR_LENGTH = 500
+
+
+def _json_dict(value: Optional[str]) -> dict:
+    """Decode persisted JSON only when it contains an object."""
+    if not value:
+        return {}
+    try:
+        decoded = json.loads(value)
+    except (TypeError, ValueError):
+        return {}
+    return decoded if isinstance(decoded, dict) else {}
+
+
+def _remote_outbox_from_row(row: sqlite3.Row) -> RemoteOutboxEntry:
+    return RemoteOutboxEntry(
+        id=int(row["id"]),
+        task_id=row["task_id"],
+        operation=row["operation"],
+        payload=_json_dict(row["payload"]),
+        idempotency_key=row["idempotency_key"],
+        status=row["status"],
+        attempts=int(row["attempts"]),
+        next_attempt_at=int(row["next_attempt_at"]),
+        last_error=row["last_error"],
+        created_at=int(row["created_at"]),
+        updated_at=int(row["updated_at"]),
+    )
+
+
+def get_remote_outbox_by_key(
+    conn: sqlite3.Connection, idempotency_key: str,
+) -> Optional[RemoteOutboxEntry]:
+    row = conn.execute(
+        f"SELECT {_REMOTE_OUTBOX_COLUMNS} FROM kanban_sync_outbox "
+        "WHERE idempotency_key = ?",
+        (idempotency_key,),
+    ).fetchone()
+    return _remote_outbox_from_row(row) if row is not None else None
+
+
+def enqueue_remote_result(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    operation: str,
+    payload: dict,
+    idempotency_key: str,
+    now: Optional[int] = None,
+) -> RemoteOutboxEntry:
+    """Persist one idempotent remote result delivery request."""
+    if operation not in {"complete", "fail"}:
+        raise ValueError(f"invalid remote operation: {operation}")
+    if not isinstance(payload, dict):
+        raise ValueError("remote result payload must be a dictionary")
+    current = int(time.time() if now is None else now)
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    with write_txn(conn):
+        conn.execute(
+            "INSERT INTO kanban_sync_outbox "
+            "(task_id, operation, idempotency_key, payload, status, attempts, "
+            " next_attempt_at, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, 'pending', 0, ?, ?, ?) "
+            "ON CONFLICT(idempotency_key) DO NOTHING",
+            (task_id, operation, idempotency_key, encoded, current, current, current),
+        )
+    loaded = get_remote_outbox_by_key(conn, idempotency_key)
+    assert loaded is not None
+    return loaded
+
+
+def list_due_remote_results(
+    conn: sqlite3.Connection,
+    *,
+    now: Optional[int] = None,
+    limit: int = 20,
+) -> list[RemoteOutboxEntry]:
+    """Return pending results ready for delivery, in stable retry order."""
+    current = int(time.time() if now is None else now)
+    rows = conn.execute(
+        f"SELECT {_REMOTE_OUTBOX_COLUMNS} FROM kanban_sync_outbox "
+        "WHERE status = 'pending' AND next_attempt_at <= ? "
+        "ORDER BY next_attempt_at ASC, id ASC LIMIT ?",
+        (current, max(0, int(limit))),
+    ).fetchall()
+    return [_remote_outbox_from_row(row) for row in rows]
+
+
+def mark_remote_result_sent(conn: sqlite3.Connection, entry_id: int) -> None:
+    """Mark a queued remote result delivered so it is never retried."""
+    with write_txn(conn):
+        conn.execute(
+            "UPDATE kanban_sync_outbox SET status = 'sent', updated_at = ? "
+            "WHERE id = ?",
+            (int(time.time()), entry_id),
+        )
+
+
+def mark_remote_result_retry(
+    conn: sqlite3.Connection,
+    entry_id: int,
+    *,
+    error: str,
+    next_attempt_at: int,
+    dead_letter: bool = False,
+) -> None:
+    """Record a failed delivery attempt and schedule (or stop) its retry."""
+    with write_txn(conn):
+        conn.execute(
+            "UPDATE kanban_sync_outbox "
+            "SET status = ?, attempts = attempts + 1, next_attempt_at = ?, "
+            "last_error = ?, updated_at = ? WHERE id = ?",
+            (
+                "dead_letter" if dead_letter else "pending",
+                int(next_attempt_at),
+                str(error)[:_MAX_SYNC_ERROR_LENGTH],
+                int(time.time()),
+                entry_id,
+            ),
+        )
+
+
+def record_kanban_sync_state(
+    conn: sqlite3.Connection,
+    *,
+    workspace_binding_id: str,
+    state: str,
+    summary: dict,
+    last_error: Optional[str] = None,
+    next_attempt_at: Optional[int] = None,
+    now: Optional[int] = None,
+) -> None:
+    """Atomically replace the last sync state for one workspace binding."""
+    if not isinstance(summary, dict):
+        raise ValueError("sync state summary must be a dictionary")
+    current = int(time.time() if now is None else now)
+    encoded = json.dumps(summary, sort_keys=True, separators=(",", ":"))
+    bounded_error = str(last_error)[:_MAX_SYNC_ERROR_LENGTH] if last_error else None
+    with write_txn(conn):
+        conn.execute(
+            "INSERT INTO kanban_sync_state "
+            "(workspace_binding_id, state, summary, failure_count, last_attempt_at, "
+            " next_attempt_at, last_error, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(workspace_binding_id) DO UPDATE SET "
+            "state = excluded.state, summary = excluded.summary, "
+            "failure_count = CASE WHEN excluded.last_error IS NULL THEN 0 "
+            "ELSE kanban_sync_state.failure_count + 1 END, "
+            "last_attempt_at = excluded.last_attempt_at, "
+            "next_attempt_at = excluded.next_attempt_at, "
+            "last_error = excluded.last_error, updated_at = excluded.updated_at",
+            (
+                workspace_binding_id,
+                state,
+                encoded,
+                1 if bounded_error is not None else 0,
+                current,
+                int(next_attempt_at) if next_attempt_at is not None else None,
+                bounded_error,
+                current,
+            ),
+        )
+
+
+def get_kanban_sync_state(
+    conn: sqlite3.Connection, workspace_binding_id: str,
+) -> Optional[dict]:
+    """Return the durable sync status for one workspace binding, if known."""
+    row = conn.execute(
+        "SELECT workspace_binding_id, state, summary, failure_count, "
+        "last_attempt_at, next_attempt_at, last_error, updated_at "
+        "FROM kanban_sync_state WHERE workspace_binding_id = ?",
+        (workspace_binding_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return {
+        "workspace_binding_id": row["workspace_binding_id"],
+        "state": row["state"],
+        "summary": _json_dict(row["summary"]),
+        "failure_count": int(row["failure_count"]),
+        "last_attempt_at": row["last_attempt_at"],
+        "next_attempt_at": row["next_attempt_at"],
+        "last_error": row["last_error"],
+        "updated_at": int(row["updated_at"]),
+    }
 
 
 # ---------------------------------------------------------------------------

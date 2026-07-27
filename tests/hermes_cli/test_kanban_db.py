@@ -210,6 +210,120 @@ def test_remote_link_lease_requires_a_link_and_valid_status(kanban_home):
             )
 
 
+def test_remote_result_outbox_is_idempotent_and_survives_reopen(kanban_home):
+    kb.init_db()
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="remote")
+        first = kb.enqueue_remote_result(
+            conn,
+            task_id=task_id,
+            operation="complete",
+            payload={"message": "done"},
+            idempotency_key="complete:p:w",
+            now=100,
+        )
+        second = kb.enqueue_remote_result(
+            conn,
+            task_id=task_id,
+            operation="complete",
+            payload={"message": "done"},
+            idempotency_key="complete:p:w",
+            now=101,
+        )
+        assert first.id == second.id
+    with kb.connect_closing() as conn:
+        assert [row.id for row in kb.list_due_remote_results(conn, now=101)] == [first.id]
+
+
+def test_remote_result_outbox_tracks_delivery_and_retry_state(kanban_home):
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="remote")
+        retry = kb.enqueue_remote_result(
+            conn,
+            task_id=task_id,
+            operation="fail",
+            payload={"reason": "timeout"},
+            idempotency_key="fail:p:w",
+            now=100,
+        )
+        sent = kb.enqueue_remote_result(
+            conn,
+            task_id=task_id,
+            operation="complete",
+            payload={},
+            idempotency_key="complete:p:w",
+            now=100,
+        )
+
+        kb.mark_remote_result_retry(
+            conn,
+            retry.id,
+            error="x" * 600,
+            next_attempt_at=200,
+        )
+        kb.mark_remote_result_sent(conn, sent.id)
+
+        assert kb.list_due_remote_results(conn, now=199) == []
+        [due] = kb.list_due_remote_results(conn, now=200)
+        assert due.id == retry.id
+        assert due.attempts == 1
+        assert due.last_error == "x" * 500
+
+
+def test_kanban_sync_state_is_scoped_by_binding(kanban_home):
+    kb.init_db()
+    with kb.connect_closing() as conn:
+        kb.record_kanban_sync_state(
+            conn,
+            workspace_binding_id="b1",
+            state="offline",
+            summary={"pulled": 0},
+            last_error="timeout",
+            now=100,
+        )
+        kb.record_kanban_sync_state(
+            conn,
+            workspace_binding_id="b2",
+            state="synced",
+            summary={"pulled": 2},
+            now=101,
+        )
+        assert kb.get_kanban_sync_state(conn, "b1")["state"] == "offline"
+        assert kb.get_kanban_sync_state(conn, "b2")["state"] == "synced"
+
+
+def test_kanban_sync_state_replaces_binding_state_and_bounds_error(kanban_home):
+    with kb.connect_closing() as conn:
+        kb.record_kanban_sync_state(
+            conn,
+            workspace_binding_id="b1",
+            state="offline",
+            summary={"pulled": 0},
+            last_error="x" * 600,
+            next_attempt_at=200,
+            now=100,
+        )
+        kb.record_kanban_sync_state(
+            conn,
+            workspace_binding_id="b1",
+            state="synced",
+            summary={"pulled": 2},
+            now=101,
+        )
+
+        state = kb.get_kanban_sync_state(conn, "b1")
+        assert state == {
+            "workspace_binding_id": "b1",
+            "state": "synced",
+            "summary": {"pulled": 2},
+            "failure_count": 0,
+            "last_attempt_at": 101,
+            "next_attempt_at": None,
+            "last_error": None,
+            "updated_at": 101,
+        }
+
+
 def test_connect_honors_kanban_busy_timeout_env(kanban_home, monkeypatch):
     """All kanban connections should use the explicit busy-timeout knob.
 
