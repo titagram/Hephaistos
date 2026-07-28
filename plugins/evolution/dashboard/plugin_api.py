@@ -386,8 +386,8 @@ def get_graph(request: Request) -> dict[str, Any]:
         expected_revision = _query_identifier(request, "expected_revision")
         search = _query_text(request, "search", maximum=128)
         kinds = request.query_params.getlist("kind")
-        allowed_kinds = frozenset({"capability", "component", "contract", "dependency", "evidence", "file", "function", "module", "runtime", "service", "source"})
-        if len(kinds) > 11 or any(kind not in allowed_kinds for kind in kinds):
+        allowed_kinds = frozenset({"capability", "component", "contract", "dependency", "evidence", "file", "function", "invariant", "module", "plugin", "provider", "runtime", "service", "skill", "source"})
+        if len(kinds) > len(allowed_kinds) or any(kind not in allowed_kinds for kind in kinds):
             raise _error("invalid_request", status.HTTP_422_UNPROCESSABLE_CONTENT)
         return _service().graph(
             root_id=root_id,

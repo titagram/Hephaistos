@@ -100,14 +100,18 @@ export function OrganismGraph({
       wheelSensitivity: 0.2,
     });
     cyRef.current = cy;
-    const handleTap = (event: cytoscape.EventObject) => onSelect(event.target.id());
+    const handleTap = (event: cytoscape.EventObject) => {
+      const id = event.target.id();
+      onSelect(id);
+      onOpenInspector(id);
+    };
     cy.on("tap", "node", handleTap);
     return () => {
       cy.off("tap", "node", handleTap);
       cy.destroy();
       if (cyRef.current === cy) cyRef.current = null;
     };
-  }, [elements, onSelect]);
+  }, [elements, onOpenInspector, onSelect]);
 
   useEffect(() => {
     if (selectedId === null) return;

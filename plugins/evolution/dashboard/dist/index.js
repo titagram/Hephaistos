@@ -79,12 +79,14 @@
 
   // ../plugins/evolution/dashboard/src/view-model.ts
   var BLOCKER_PRIORITY = {
-    corrupt: 6,
-    blocked: 5,
-    partial: 4,
-    stale: 3,
-    missing: 2,
-    not_ready: 1,
+    corrupt: 8,
+    blocked: 7,
+    degraded: 6,
+    partial: 5,
+    stale: 4,
+    missing: 3,
+    not_ready: 2,
+    paused: 1,
     ready: 0
   };
   var BLOCKER_LABELS = {
@@ -110,7 +112,7 @@
     return pipeline.state;
   }
   function initialView() {
-    return "overview";
+    return "organism";
   }
   function readinessBlockers(snapshot) {
     const sources = [
@@ -169,7 +171,7 @@
     pipeline: "pipeline"
   };
   function hasCorruption(snapshot) {
-    return snapshot.state === "corrupt" || snapshot.gnothi.state === "corrupt" || snapshot.telos.state === "corrupt" || snapshot.observer.state === "corrupt" || snapshot.generations.state === "corrupt" || snapshot.pipeline.state === "corrupt";
+    return snapshot.state === "corrupt" || snapshot.gnothi.state === "corrupt" || snapshot.telos.state === "corrupt" || snapshot.generations.state === "corrupt" || snapshot.pipeline.state === "corrupt";
   }
   function priorityBlockerLinks(snapshot) {
     return readinessBlockers(snapshot).map((blocker) => ({
@@ -179,7 +181,7 @@
   }
   function coveragePresentation(summary) {
     if (summary.state === "ready") return { icon: "\u2713", text: "Graph coverage ready" };
-    if (summary.state === "corrupt" || summary.state === "blocked" || summary.state === "missing") {
+    if (summary.state === "corrupt" || summary.state === "missing") {
       return { icon: "\xD7", text: `Graph coverage ${summary.state}` };
     }
     return { icon: "!", text: `Graph coverage ${summary.state}` };
@@ -258,13 +260,19 @@
       };
     }, [refresh]);
     useEffect(() => {
-      if (activeJob === null || !isActiveJobState(activeJob.state)) return;
+      const jobId = activeJob?.job_id ?? null;
+      const jobState = activeJob?.state ?? null;
+      if (jobId === null || jobState === null || !isActiveJobState(jobState)) return;
+      let current = true;
       const poll = async () => {
         if (!documentIsVisible()) return;
         try {
-          const next = await evolutionApi.job(activeJob.job_id);
-          setActiveJob(isActiveJobState(next.state) ? next : null);
+          const next = await evolutionApi.job(jobId);
+          if (!current) return;
+          setActiveJob(next);
+          if (next.state === "completed") await refresh();
         } catch (error3) {
+          if (!current) return;
           const nextWarning = warningForRefreshFailure(error3);
           warningRef.current = nextWarning;
           setWarning(nextWarning);
@@ -272,10 +280,13 @@
       };
       const interval = globalThis.setInterval(() => void poll(), JOB_POLL_INTERVAL_MS);
       void poll();
-      return () => globalThis.clearInterval(interval);
-    }, [activeJob]);
+      return () => {
+        current = false;
+        globalThis.clearInterval(interval);
+      };
+    }, [activeJob?.job_id, activeJob?.state, refresh]);
     const trackJob = useCallback((job) => {
-      setActiveJob(isActiveJobState(job.state) ? job : null);
+      setActiveJob(job);
     }, []);
     return { snapshot, loading, refreshing, warning, activeJob, refresh, trackJob };
   }
@@ -292,7 +303,7 @@
 
   // ../plugins/evolution/dashboard/src/components/AuditTimeline.tsx
   function AuditTimeline({ audit, loading, error: error3 }) {
-    return /* @__PURE__ */ React.createElement("section", { className: "evo-audit", "aria-labelledby": "evo-audit-heading" }, /* @__PURE__ */ React.createElement("h2", { id: "evo-audit-heading" }, "Recent audit activity"), loading ? /* @__PURE__ */ React.createElement("p", { role: "status" }, "Loading recent durable audit events\u2026") : null, error3 !== null ? /* @__PURE__ */ React.createElement("p", { role: "status" }, error3) : null, !loading && error3 === null && audit !== null && audit.events.length === 0 ? /* @__PURE__ */ React.createElement("p", null, "No durable audit events are available.") : null, audit !== null && audit.events.length > 0 ? /* @__PURE__ */ React.createElement("ol", null, audit.events.map((event3) => /* @__PURE__ */ React.createElement("li", { key: event3.event_id }, /* @__PURE__ */ React.createElement("time", { dateTime: event3.created_at }, event3.created_at), " \xB7 ", /* @__PURE__ */ React.createElement(ExpandableText, { text: event3.summary, label: "audit summary" })))) : null, audit?.truncated ? /* @__PURE__ */ React.createElement("p", null, "Only the most recent bounded audit events are shown.") : null);
+    return /* @__PURE__ */ React.createElement("section", { className: "evo-audit", "aria-labelledby": "evo-audit-heading" }, /* @__PURE__ */ React.createElement("h2", { id: "evo-audit-heading" }, "Bounded audit history"), loading ? /* @__PURE__ */ React.createElement("p", { role: "status" }, "Loading bounded durable audit history\u2026") : null, error3 !== null ? /* @__PURE__ */ React.createElement("p", { role: "status" }, error3) : null, !loading && error3 === null && audit !== null && audit.events.length === 0 ? /* @__PURE__ */ React.createElement("p", null, "No durable audit events are available.") : null, audit !== null && audit.events.length > 0 ? /* @__PURE__ */ React.createElement("ol", null, audit.events.map((event3) => /* @__PURE__ */ React.createElement("li", { key: event3.event_id }, /* @__PURE__ */ React.createElement("time", { dateTime: event3.created_at }, event3.created_at), " \xB7 ", /* @__PURE__ */ React.createElement(ExpandableText, { text: event3.summary, label: "audit summary" })))) : null, audit?.truncated ? /* @__PURE__ */ React.createElement("p", null, "This bounded audit history begins with the earliest available events.") : null);
   }
 
   // ../plugins/evolution/dashboard/src/components/ReadinessSummary.tsx
@@ -30969,14 +30980,18 @@
         wheelSensitivity: 0.2
       });
       cyRef.current = cy;
-      const handleTap = (event3) => onSelect(event3.target.id());
+      const handleTap = (event3) => {
+        const id2 = event3.target.id();
+        onSelect(id2);
+        onOpenInspector(id2);
+      };
       cy.on("tap", "node", handleTap);
       return () => {
         cy.off("tap", "node", handleTap);
         cy.destroy();
         if (cyRef.current === cy) cyRef.current = null;
       };
-    }, [elements, onSelect]);
+    }, [elements, onOpenInspector, onSelect]);
     useEffect(() => {
       if (selectedId === null) return;
       const cy = cyRef.current;
@@ -31227,7 +31242,7 @@
   var FILTER_KINDS = ["capability", "runtime", "invariant", "skill", "plugin", "provider"];
   var GRAPH_NEIGHBORHOOD_DEPTH = 2;
   var GRAPH_RESPONSE_LIMIT = 200;
-  var API_FILTER_KINDS = /* @__PURE__ */ new Set(["capability", "runtime"]);
+  var API_FILTER_KINDS = new Set(FILTER_KINDS);
   function errorMessage2(error3) {
     return error3 instanceof Error ? error3.message : "The requested local organism data is unavailable.";
   }
@@ -31253,7 +31268,7 @@
     const [initializing, setInitializing] = useState(false);
     const dialogTriggerRef = SDK.hooks.useRef(null);
     const inspectorTriggerRef = SDK.hooks.useRef(null);
-    const gnothiIsUnsafe = snapshot?.gnothi.state === "blocked" || snapshot?.gnothi.state === "corrupt";
+    const gnothiIsUnsafe = snapshot?.gnothi.state === "corrupt";
     const hasSafeGraph = snapshot !== null && snapshot.state !== "missing" && snapshot.state !== "blocked" && snapshot.state !== "corrupt" && !gnothiIsUnsafe && snapshot.gnothi.revision_id !== null;
     const expectedRevision = snapshot?.gnothi.revision_id ?? void 0;
     const requestedKinds = useMemo(
@@ -31458,6 +31473,7 @@
     return {
       text: [
         "Research public documentation for a local evolution opportunity.",
+        `Topic: ${suggestion.public_research_topic}`,
         `Score: ${decimal(suggestion.score)}`,
         `Telos alignment: ${decimal(suggestion.telos_alignment)}`,
         `Observed sessions: ${Math.max(0, suggestion.distinct_session_count)}`,
@@ -31986,7 +32002,7 @@
     useEffect(() => {
       void load();
     }, [load]);
-    const unsafe = snapshot?.state === "corrupt" || snapshot?.state === "blocked" || snapshot?.telos.state === "corrupt" || snapshot?.telos.state === "blocked";
+    const unsafe = snapshot?.state === "corrupt" || snapshot?.state === "blocked" || snapshot?.telos.state === "corrupt";
     const selected = useMemo(() => transitionTarget(telos, savedRevision, selectedDigest), [savedRevision, selectedDigest, telos]);
     const current = telos?.active_revision ?? null;
     const canTransition = !unsafe && current !== null && selected !== null && selected.digest !== current.digest;

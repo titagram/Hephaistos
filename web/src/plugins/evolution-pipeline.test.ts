@@ -15,6 +15,7 @@ const suggestion = (state = "eligible"): PipelineSuggestion => ({
   telos_alignment: 0.86,
   observation_count: 4,
   distinct_session_count: 3,
+  public_research_topic: "Local capability improvement",
   summary: "Users repeatedly request a practical capability summary.",
   created_at: "2026-07-28T10:00:00Z",
   updated_at: "2026-07-28T10:01:00Z",
@@ -95,13 +96,14 @@ describe("Evolution pipeline model", () => {
     });
   });
 
-  it("builds a clipboard-only public research brief without evidence, paths, logs, memory, prompts, or authorization", () => {
+  it("builds a clipboard-only public research brief with its safe server topic but without evidence, paths, logs, memory, prompts, or authorization", () => {
     const brief = publicResearchBrief({
       ...suggestion(),
       summary: "private /Users/example/log.txt memory prompt artifact",
     });
 
     expect(brief).toMatchObject({ destination: "/chat", toast: "Research brief copied — paste it in Chat.", authorizationEndpoint: null });
+    expect(brief.text).toContain("Topic: Local capability improvement");
     expect(brief.text).toContain("Score: 0.91");
     expect(brief.text).toContain("Telos alignment: 0.86");
     expect(brief.text).not.toMatch(/Users|log|memory|prompt|artifact|evidence|private/i);

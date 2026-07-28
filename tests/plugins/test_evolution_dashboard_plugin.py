@@ -146,6 +146,38 @@ def test_read_routes_enforce_bounded_query_contracts(client):
         assert response.status_code == 200, response.text
 
 
+def test_graph_route_accepts_and_forwards_mixed_capability_and_provider_filters(
+    client, plugin, monkeypatch
+):
+    """A provider filter must not be rejected or silently removed at the API boundary."""
+    captured: dict[str, object] = {}
+
+    class Service:
+        def graph(self, **kwargs):
+            captured.update(kwargs)
+            return {
+                "schema_version": 1,
+                "revision_id": None,
+                "revision_digest": None,
+                "nodes": [],
+                "edges": [],
+                "blockers": [],
+                "total_nodes": 0,
+                "total_edges": 0,
+                "truncated": False,
+            }
+
+    monkeypatch.setattr(plugin, "_service", lambda **_kwargs: Service())
+
+    response = client.get(
+        "/api/plugins/evolution/graph",
+        params=[("kind", "capability"), ("kind", "provider")],
+    )
+
+    assert response.status_code == 200, response.text
+    assert captured["kinds"] == frozenset({"capability", "provider"})
+
+
 def test_jobs_mutations_and_polling_use_digest_bound_context(client):
     assert client.post("/api/plugins/evolution/initialize").status_code == 200
     context = _mutation_context(client)

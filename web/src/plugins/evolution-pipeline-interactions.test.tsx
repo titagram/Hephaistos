@@ -29,10 +29,10 @@ function snapshot(): EvolutionSnapshot {
   return {
     schema_version: 1, state: "ready", observed_at: "2026-07-28T10:00:00Z", snapshot_digest: "a".repeat(64), diagnostics: [],
     organism: { id_prefix: "organism", lineage_prefix: "lineage" },
-    gnothi: { state: "ready", revision_id: "revision", revision_digest: "b".repeat(64), node_count: 1, edge_count: 0 },
-    telos: { state: "ready", active_digest: "c".repeat(64), revision_count: 1 },
-    observer: { state: "ready", enabled: true, last_scan_at: null, observation_count: 1 },
-    generations: { state: "ready", active_generation_id: null, generation_count: 0 },
+    gnothi: { state: "ready", revision_id: "revision", revision_digest: "b".repeat(64), node_count: 1, edge_count: 0, coverage: { current_domains: 4, total_domains: 4, unknown_domains: [], truncated: false, drifted_domains: [], drift_truncated: false, collector_status: [], collector_status_truncated: false } },
+    telos: { state: "ready", active_digest_prefix: "c".repeat(12), revision_summary: { parent_digest_prefix: null, purpose: "Operate safely.", desired_trait_count: 1, capability_direction_count: 1, priority_count: 1, prohibition_count: 1, success_indicator_count: 1 } },
+    observer: { state: "ready", enabled: true, circuit_open: false, degraded_reason: null },
+    generations: { state: "ready", active_generation_prefix: null, last_known_good_generation_prefix: null, overlay_enabled: false },
     pipeline: { state: "ready", suggestions: { total: 1, by_state: { eligible: 1 }, truncated: false }, blueprints: { total: 0, by_state: {}, truncated: false }, lifecycle: { pending_approval_count: 0, decision_count: 0 } },
   };
 }
@@ -41,7 +41,7 @@ const pipeline: PipelineResponse = {
   schema_version: 1, state: "ready", attempt_id: "attempt-1",
   attempts: [{ attempt_id: "attempt-1", source_kind: "observer", state: "complete", created_at: "2026-07-28T10:00:00Z" }],
   total_attempts: 1, attempts_truncated: false,
-  suggestions: [{ suggestion_id: "suggestion-1", suggestion_digest: "d".repeat(64), state: "eligible", score: 0.91, telos_alignment: 0.86, observation_count: 4, distinct_session_count: 3, summary: "A bounded local summary.", created_at: "2026-07-28T10:00:00Z", updated_at: "2026-07-28T10:00:00Z" }],
+  suggestions: [{ suggestion_id: "suggestion-1", suggestion_digest: "d".repeat(64), state: "eligible", score: 0.91, telos_alignment: 0.86, observation_count: 4, distinct_session_count: 3, public_research_topic: "Local capability improvement", summary: "A bounded local summary.", created_at: "2026-07-28T10:00:00Z", updated_at: "2026-07-28T10:00:00Z" }],
   suggestion_counts: { eligible: 1 }, total_suggestions: 1, suggestions_truncated: false,
   blueprints: [], total_blueprints: 0, blueprints_truncated: false,
   stages: [{ id: "suggestion", available: true }, { id: "research", available: true }, { id: "blueprint", available: true }, { id: "build", available: false }, { id: "canary", available: false }, { id: "promotion", available: false }, { id: "stable", available: false }],

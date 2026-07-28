@@ -12,7 +12,7 @@ void React;
 const FILTER_KINDS = ["capability", "runtime", "invariant", "skill", "plugin", "provider"] as const;
 const GRAPH_NEIGHBORHOOD_DEPTH = 2;
 const GRAPH_RESPONSE_LIMIT = 200;
-const API_FILTER_KINDS = new Set(["capability", "runtime"]);
+const API_FILTER_KINDS: ReadonlySet<string> = new Set(FILTER_KINDS);
 
 type OrganismSurface = "graph" | "list";
 
@@ -50,7 +50,7 @@ export function OrganismView({ snapshot, onRefresh, onTrackJob }: OrganismViewPr
   const dialogTriggerRef = SDK.hooks.useRef<HTMLElement | null>(null);
   const inspectorTriggerRef = SDK.hooks.useRef<HTMLElement | null>(null);
 
-  const gnothiIsUnsafe = snapshot?.gnothi.state === "blocked" || snapshot?.gnothi.state === "corrupt";
+  const gnothiIsUnsafe = snapshot?.gnothi.state === "corrupt";
   const hasSafeGraph = snapshot !== null
     && snapshot.state !== "missing"
     && snapshot.state !== "blocked"

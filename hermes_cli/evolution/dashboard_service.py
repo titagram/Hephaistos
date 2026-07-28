@@ -85,6 +85,11 @@ PIPELINE_STAGES = (
     ("stable", False),
 )
 
+# This category is deliberately server-owned and independent of summaries,
+# evidence, filesystem values, logs, and private artifacts.  It is the only
+# topic the client may include in a public-documentation handoff.
+_PUBLIC_RESEARCH_TOPIC = "Local capability improvement"
+
 
 class PublicOrganism(TypedDict):
     id_prefix: str
@@ -1487,6 +1492,7 @@ class EvolutionDashboardService:
             "telos_alignment": self._public_number(record.telos_alignment),
             "observation_count": max(0, int(record.observation_count)),
             "distinct_session_count": max(0, int(record.distinct_session_count)),
+            "public_research_topic": _PUBLIC_RESEARCH_TOPIC,
             "summary": self._public_text(record.summary_reason, identity, limit=512),
             "created_at": self._public_text(record.created_at, identity, limit=64),
             "updated_at": self._public_text(record.updated_at, identity, limit=64),

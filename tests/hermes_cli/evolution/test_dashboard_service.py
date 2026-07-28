@@ -1153,6 +1153,7 @@ def test_pipeline_counts_only_the_bounded_suggestions_and_resolves_blueprints(
             result["suggestions"][0]["suggestion_id"]
         )
     )
+    assert result["suggestions"][0]["public_research_topic"] == "Local capability improvement"
     assert sum(result["suggestion_counts"].values()) == len(result["suggestions"])
     assert result["suggestions_truncated"] is False
     assert len(result["blueprints"]) == 1

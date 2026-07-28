@@ -6,6 +6,8 @@ export type HealthState =
   | "blocked"
   | "corrupt";
 
+export type ReadinessState = HealthState | "not_ready" | "paused" | "degraded";
+
 export type EvolutionView = "overview" | "organism" | "telos" | "pipeline";
 export type PipelineStageId =
   | "suggestion"
@@ -31,34 +33,62 @@ export interface StateCount {
 }
 
 export interface GnothiSummary {
-  state: HealthState | "not_ready";
+  state: "missing" | "ready" | "partial" | "stale" | "corrupt";
   revision_id: string | null;
   revision_digest: string | null;
   node_count: number | null;
   edge_count: number | null;
+  coverage: GnothiCoverage;
 }
 
-export interface TelosSummary {
-  state: HealthState | "not_ready";
-  active_digest: string | null;
-  revision_count: number | null;
+export interface GnothiCoverage {
+  current_domains: number;
+  total_domains: number;
+  unknown_domains: string[];
+  truncated: boolean;
+  drifted_domains: string[];
+  drift_truncated: boolean;
+  collector_status: Array<{ name: string; status: string }>;
+  collector_status_truncated: boolean;
 }
+
+export interface TelosRevisionSummary {
+  parent_digest_prefix: string | null;
+  purpose: string;
+  desired_trait_count: number;
+  capability_direction_count: number;
+  priority_count: number;
+  prohibition_count: number;
+  success_indicator_count: number;
+}
+
+export type TelosSummary =
+  | {
+    state: "ready";
+    active_digest_prefix: string;
+    revision_summary: TelosRevisionSummary;
+  }
+  | {
+    state: "missing" | "corrupt";
+    active_digest_prefix: null;
+  };
 
 export interface ObserverSummary {
-  state: HealthState | "not_ready";
+  state: "not_ready" | "paused" | "ready" | "degraded";
   enabled: boolean;
-  last_scan_at: string | null;
-  observation_count: number | null;
+  circuit_open: boolean;
+  degraded_reason: string | null;
 }
 
 export interface GenerationSummary {
-  state: HealthState | "not_ready";
-  active_generation_id: string | null;
-  generation_count: number | null;
+  state: "missing" | "ready" | "stale" | "blocked" | "corrupt";
+  active_generation_prefix: string | null;
+  last_known_good_generation_prefix: string | null;
+  overlay_enabled: boolean;
 }
 
 export interface PipelineSummary {
-  state: HealthState | "not_ready";
+  state: "ready" | "not_ready" | "stale" | "blocked" | "corrupt";
   suggestions: StateCount;
   blueprints: StateCount;
   lifecycle: {
@@ -234,6 +264,8 @@ export interface PipelineSuggestion {
   telos_alignment: number;
   observation_count: number;
   distinct_session_count: number;
+  /** Server-owned generic category; never derived from a local summary or evidence. */
+  public_research_topic: string;
   summary: string;
   created_at: string;
   updated_at: string;

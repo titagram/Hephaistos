@@ -35,10 +35,10 @@ function snapshot(): EvolutionSnapshot {
     snapshot_digest: "a".repeat(64),
     diagnostics: [],
     organism: { id_prefix: "organism", lineage_prefix: "lineage" },
-    gnothi: { state: "ready", revision_id: "rev-1", revision_digest: "b".repeat(64), node_count: 1, edge_count: 0 },
-    telos: { state: "ready", active_digest: "c".repeat(64), revision_count: 1 },
-    observer: { state: "ready", enabled: true, last_scan_at: null, observation_count: 0 },
-    generations: { state: "ready", active_generation_id: null, generation_count: 0 },
+    gnothi: { state: "ready", revision_id: "rev-1", revision_digest: "b".repeat(64), node_count: 1, edge_count: 0, coverage: { current_domains: 4, total_domains: 4, unknown_domains: [], truncated: false, drifted_domains: [], drift_truncated: false, collector_status: [], collector_status_truncated: false } },
+    telos: { state: "ready", active_digest_prefix: "c".repeat(12), revision_summary: { parent_digest_prefix: null, purpose: "Operate safely.", desired_trait_count: 1, capability_direction_count: 1, priority_count: 1, prohibition_count: 1, success_indicator_count: 1 } },
+    observer: { state: "ready", enabled: true, circuit_open: false, degraded_reason: null },
+    generations: { state: "ready", active_generation_prefix: null, last_known_good_generation_prefix: null, overlay_enabled: false },
     pipeline: {
       state: "ready",
       suggestions: { total: 0, by_state: {}, truncated: false },
@@ -74,15 +74,15 @@ function node(): GraphNode {
   };
 }
 
-function installSdk() {
+function installSdk(fetchJSON: ReturnType<typeof vi.fn> = vi.fn(<T,>(path: string) => {
+  if (path.includes("/graph")) return Promise.resolve(graph() as T);
+  return new Promise<T>(() => {});
+})) {
   Object.assign(window, {
     __HERMES_PLUGIN_SDK__: {
       React,
       hooks: React,
-      fetchJSON: vi.fn(<T,>(path: string) => {
-        if (path.includes("/graph")) return Promise.resolve(graph() as T);
-        return new Promise<T>(() => {});
-      }),
+      fetchJSON,
       components: {
         Badge: () => null,
         Button: () => null,
@@ -131,6 +131,38 @@ afterEach(async () => {
 });
 
 describe("Evolution dashboard accessibility", () => {
+  it("sends every selected server-supported kind together, including a capability and provider filter", async () => {
+    const paths: string[] = [];
+    const fetchJSON = vi.fn(<T,>(path: string) => {
+      paths.push(path);
+      if (path.includes("/graph")) return Promise.resolve(graph() as T);
+      return new Promise<T>(() => {});
+    });
+    installSdk(fetchJSON);
+    const { OrganismView } = await import("../../../plugins/evolution/dashboard/src/components/OrganismView");
+    const container = await render(<OrganismView snapshot={snapshot()} onRefresh={vi.fn().mockResolvedValue(undefined)} onTrackJob={vi.fn()} />);
+    const checkboxes = [...container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')];
+
+    await act(async () => {
+      checkboxes[0]?.click();
+      checkboxes[5]?.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(paths.at(-1)).toBe("/api/plugins/evolution/graph?limit=200&kind=capability&kind=provider&expected_revision=rev-1");
+  });
+
+  it("labels a truncated audit response as bounded history rather than recent activity", async () => {
+    installSdk();
+    const { AuditTimeline } = await import("../../../plugins/evolution/dashboard/src/components/AuditTimeline");
+    const container = await render(<AuditTimeline audit={{ schema_version: 1, state: "ready", events: [], total_events: 2, truncated: true, next_after: 1, mutable_actions: [] }} loading={false} error={null} />);
+
+    expect(container.textContent).toContain("Bounded audit history");
+    expect(container.textContent).toContain("earliest available events");
+    expect(container.textContent).not.toContain("Recent audit activity");
+  });
+
   it("exposes one named page heading and an internal tab navigation with one selected view", async () => {
     installSdk();
     const { EvolutionShell } = await import("../../../plugins/evolution/dashboard/src/components/EvolutionShell");

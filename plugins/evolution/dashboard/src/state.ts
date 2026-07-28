@@ -80,13 +80,19 @@ export function useEvolutionSnapshot(): EvolutionSnapshotStore {
   }, [refresh]);
 
   useEffect(() => {
-    if (activeJob === null || !isActiveJobState(activeJob.state)) return;
+    const jobId = activeJob?.job_id ?? null;
+    const jobState = activeJob?.state ?? null;
+    if (jobId === null || jobState === null || !isActiveJobState(jobState)) return;
+    let current = true;
     const poll = async () => {
       if (!documentIsVisible()) return;
       try {
-        const next = await evolutionApi.job(activeJob.job_id);
-        setActiveJob(isActiveJobState(next.state) ? next : null);
+        const next = await evolutionApi.job(jobId);
+        if (!current) return;
+        setActiveJob(next);
+        if (next.state === "completed") await refresh();
       } catch (error) {
+        if (!current) return;
         const nextWarning = warningForRefreshFailure(error);
         warningRef.current = nextWarning;
         setWarning(nextWarning);
@@ -94,11 +100,14 @@ export function useEvolutionSnapshot(): EvolutionSnapshotStore {
     };
     const interval = globalThis.setInterval(() => void poll(), JOB_POLL_INTERVAL_MS);
     void poll();
-    return () => globalThis.clearInterval(interval);
-  }, [activeJob]);
+    return () => {
+      current = false;
+      globalThis.clearInterval(interval);
+    };
+  }, [activeJob?.job_id, activeJob?.state, refresh]);
 
   const trackJob = useCallback((job: EvolutionJob) => {
-    setActiveJob(isActiveJobState(job.state) ? job : null);
+    setActiveJob(job);
   }, []);
 
   return { snapshot, loading, refreshing, warning, activeJob, refresh, trackJob };

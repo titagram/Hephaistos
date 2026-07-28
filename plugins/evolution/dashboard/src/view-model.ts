@@ -2,14 +2,14 @@ import type {
   EvolutionSnapshot,
   EvolutionJob,
   GnothiSummary,
-  HealthState,
   JobState,
   PipelineSummary,
+  ReadinessState,
 } from "./types";
 
 export interface ReadinessBlocker {
   source: "snapshot" | "gnothi" | "telos" | "observer" | "generations" | "pipeline";
-  state: HealthState | "not_ready";
+  state: ReadinessState;
   label: string;
 }
 
@@ -41,13 +41,15 @@ export interface PriorityBlockerLink extends ReadinessBlocker {
   view: EvolutionView;
 }
 
-const BLOCKER_PRIORITY: Record<HealthState | "not_ready", number> = {
-  corrupt: 6,
-  blocked: 5,
-  partial: 4,
-  stale: 3,
-  missing: 2,
-  not_ready: 1,
+const BLOCKER_PRIORITY: Record<ReadinessState, number> = {
+  corrupt: 8,
+  blocked: 7,
+  degraded: 6,
+  partial: 5,
+  stale: 4,
+  missing: 3,
+  not_ready: 2,
+  paused: 1,
   ready: 0,
 };
 
@@ -69,20 +71,20 @@ const BLOCKER_ORDER: ReadinessBlocker["source"][] = [
   "pipeline",
 ];
 
-function isNonReady(state: HealthState | "not_ready"): boolean {
+function isNonReady(state: ReadinessState): boolean {
   return state !== "ready";
 }
 
-function stateOfPipeline(pipeline: PipelineSummary): HealthState | "not_ready" {
+function stateOfPipeline(pipeline: PipelineSummary): PipelineSummary["state"] {
   return pipeline.state;
 }
 
 export function initialView(): EvolutionView {
-  return "overview";
+  return "organism";
 }
 
 export function readinessBlockers(snapshot: EvolutionSnapshot): ReadinessBlocker[] {
-  const sources: Array<[ReadinessBlocker["source"], HealthState | "not_ready"]> = [
+  const sources: Array<[ReadinessBlocker["source"], ReadinessState]> = [
     ["snapshot", snapshot.state],
     ["gnothi", snapshot.gnothi.state],
     ["telos", snapshot.telos.state],
@@ -164,7 +166,6 @@ function hasCorruption(snapshot: EvolutionSnapshot): boolean {
   return snapshot.state === "corrupt"
     || snapshot.gnothi.state === "corrupt"
     || snapshot.telos.state === "corrupt"
-    || snapshot.observer.state === "corrupt"
     || snapshot.generations.state === "corrupt"
     || snapshot.pipeline.state === "corrupt";
 }
@@ -178,7 +179,7 @@ export function priorityBlockerLinks(snapshot: EvolutionSnapshot): PriorityBlock
 
 export function coveragePresentation(summary: GnothiSummary): CoveragePresentation {
   if (summary.state === "ready") return { icon: "✓", text: "Graph coverage ready" };
-  if (summary.state === "corrupt" || summary.state === "blocked" || summary.state === "missing") {
+  if (summary.state === "corrupt" || summary.state === "missing") {
     return { icon: "×", text: `Graph coverage ${summary.state}` };
   }
   return { icon: "!", text: `Graph coverage ${summary.state}` };

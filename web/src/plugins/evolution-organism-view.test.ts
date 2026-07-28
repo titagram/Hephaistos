@@ -23,10 +23,10 @@ function snapshot(): EvolutionSnapshot {
   return {
     schema_version: 1, state: "ready", observed_at: "2026-07-28T10:00:00Z", snapshot_digest: "b".repeat(64), diagnostics: [],
     organism: { id_prefix: "organism", lineage_prefix: "lineage" },
-    gnothi: { state: "ready", revision_id: "rev-1", revision_digest: "a".repeat(64), node_count: 1, edge_count: 0 },
-    telos: { state: "ready", active_digest: "c".repeat(64), revision_count: 1 },
-    observer: { state: "ready", enabled: true, last_scan_at: null, observation_count: 0 },
-    generations: { state: "ready", active_generation_id: null, generation_count: 0 },
+    gnothi: { state: "ready", revision_id: "rev-1", revision_digest: "a".repeat(64), node_count: 1, edge_count: 0, coverage: { current_domains: 4, total_domains: 4, unknown_domains: [], truncated: false, drifted_domains: [], drift_truncated: false, collector_status: [], collector_status_truncated: false } },
+    telos: { state: "ready", active_digest_prefix: "c".repeat(12), revision_summary: { parent_digest_prefix: null, purpose: "Operate safely.", desired_trait_count: 1, capability_direction_count: 1, priority_count: 1, prohibition_count: 1, success_indicator_count: 1 } },
+    observer: { state: "ready", enabled: true, circuit_open: false, degraded_reason: null },
+    generations: { state: "ready", active_generation_prefix: null, last_known_good_generation_prefix: null, overlay_enabled: false },
     pipeline: { state: "ready", suggestions: { total: 0, by_state: {}, truncated: false }, blueprints: { total: 0, by_state: {}, truncated: false }, lifecycle: { pending_approval_count: 0, decision_count: 0 } },
   };
 }

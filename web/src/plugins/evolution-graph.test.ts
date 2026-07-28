@@ -36,6 +36,7 @@ afterEach(() => {
   }
   cytoscapeMock.factory.mockClear();
   cytoscapeMock.core.destroy.mockClear();
+  cytoscapeMock.core.on.mockClear();
   vi.resetModules();
 });
 
@@ -230,6 +231,45 @@ describe("Evolution organism graph model", () => {
     expect(cytoscapeMock.factory).toHaveBeenCalledWith(expect.objectContaining({ container }));
     cleanup?.();
     expect(cytoscapeMock.core.destroy).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens the compact inspector on graph tap while Enter still opens the selected node", async () => {
+    const container = {} as HTMLDivElement;
+    let refIndex = 0;
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: {
+        __HERMES_PLUGIN_SDK__: {
+          React: { createElement: (type: unknown, props: Record<string, unknown> | null, ...children: unknown[]) => ({ type, props, children }) },
+          hooks: {
+            useCallback: <T,>(callback: T) => callback,
+            useEffect: (effect: () => void | (() => void)) => { effect(); },
+            useMemo: <T,>(factory: () => T) => factory(),
+            useRef: <T,>() => {
+              const values = [{ current: container }, { current: null }];
+              return values[refIndex++] as { current: T };
+            },
+          },
+          fetchJSON: vi.fn(),
+          components: { Badge: () => null, Button: () => null, Checkbox: () => null, Input: () => null, Label: () => null, Select: () => null, SelectOption: () => null, Separator: () => null },
+          utils: { cn: () => "", timeAgo: () => "", isoTimeAgo: () => "" },
+        },
+      },
+    });
+    const { OrganismGraph } = await import("../../../plugins/evolution/dashboard/src/components/OrganismGraph");
+    const onSelect = vi.fn();
+    const onOpenInspector = vi.fn();
+    const data = graph();
+    const tree = OrganismGraph({ nodes: data.nodes, edges: data.edges, selectedId: data.nodes[0]!.id, onSelect, onOpenInspector }) as unknown as { props: { children: unknown[] } };
+    const tap = cytoscapeMock.core.on.mock.calls.find(call => call[0] === "tap")?.[2] as ((event: { target: { id(): string } }) => void) | undefined;
+
+    tap?.({ target: { id: () => data.nodes[1]!.id } });
+    const canvas = (tree.props.children[1] as { props: { onKeyDown(event: { key: string; preventDefault(): void }): void } }).props;
+    canvas.onKeyDown({ key: "Enter", preventDefault: vi.fn() });
+
+    expect(onSelect).toHaveBeenCalledWith(data.nodes[1]!.id);
+    expect(onOpenInspector).toHaveBeenCalledWith(data.nodes[1]!.id);
+    expect(onOpenInspector).toHaveBeenCalledWith(data.nodes[0]!.id);
   });
 
   it("gives the interactive canvas a responsive nonzero minimum height before host CSS loads", async () => {

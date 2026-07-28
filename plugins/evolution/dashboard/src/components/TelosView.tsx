@@ -66,7 +66,7 @@ export function TelosView({ snapshot, onRefresh }: TelosViewProps): React.ReactE
 
   useEffect(() => { void load(); }, [load]);
 
-  const unsafe = snapshot?.state === "corrupt" || snapshot?.state === "blocked" || snapshot?.telos.state === "corrupt" || snapshot?.telos.state === "blocked";
+  const unsafe = snapshot?.state === "corrupt" || snapshot?.state === "blocked" || snapshot?.telos.state === "corrupt";
   const selected = useMemo(() => transitionTarget(telos, savedRevision, selectedDigest), [savedRevision, selectedDigest, telos]);
   const current = telos?.active_revision ?? null;
   const canTransition = !unsafe && current !== null && selected !== null && selected.digest !== current.digest;

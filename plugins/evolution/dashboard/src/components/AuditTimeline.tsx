@@ -13,8 +13,8 @@ export interface AuditTimelineProps {
 export function AuditTimeline({ audit, loading, error }: AuditTimelineProps): React.ReactElement {
   return (
     <section className="evo-audit" aria-labelledby="evo-audit-heading">
-      <h2 id="evo-audit-heading">Recent audit activity</h2>
-      {loading ? <p role="status">Loading recent durable audit events…</p> : null}
+      <h2 id="evo-audit-heading">Bounded audit history</h2>
+      {loading ? <p role="status">Loading bounded durable audit history…</p> : null}
       {error !== null ? <p role="status">{error}</p> : null}
       {!loading && error === null && audit !== null && audit.events.length === 0 ? <p>No durable audit events are available.</p> : null}
       {audit !== null && audit.events.length > 0 ? (
@@ -26,7 +26,7 @@ export function AuditTimeline({ audit, loading, error }: AuditTimelineProps): Re
           ))}
         </ol>
       ) : null}
-      {audit?.truncated ? <p>Only the most recent bounded audit events are shown.</p> : null}
+      {audit?.truncated ? <p>This bounded audit history begins with the earliest available events.</p> : null}
     </section>
   );
 }

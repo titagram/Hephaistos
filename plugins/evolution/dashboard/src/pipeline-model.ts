@@ -69,6 +69,7 @@ export function publicResearchBrief(suggestion: PipelineSuggestion): PublicResea
   return {
     text: [
       "Research public documentation for a local evolution opportunity.",
+      `Topic: ${suggestion.public_research_topic}`,
       `Score: ${decimal(suggestion.score)}`,
       `Telos alignment: ${decimal(suggestion.telos_alignment)}`,
       `Observed sessions: ${Math.max(0, suggestion.distinct_session_count)}`,
