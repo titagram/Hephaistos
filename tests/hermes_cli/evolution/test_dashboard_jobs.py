@@ -225,6 +225,8 @@ def test_foreign_running_record_reads_as_interrupted_unknown_without_rewriting(t
         assert job is not None
         assert job.state == "unknown"
         assert job.error_code == "process_interrupted"
+        assert job.finished_at is None
+        assert manager.get_job(job_id) == job
         assert record_path.read_bytes() == before
     finally:
         manager.shutdown()
@@ -252,6 +254,63 @@ def test_revision_diff_result_uses_known_kind_and_fixed_payload_budget(tmp_path,
         assert job.result is not None
         assert job.result["kind"] == "revision_diff"
         assert len(json.dumps(job.result, sort_keys=True).encode("utf-8")) <= MAX_JOB_RESULT_BYTES
+    finally:
+        manager.shutdown()
+
+
+def test_revision_diff_result_whitelists_the_public_query_contract(tmp_path, monkeypatch):
+    """Persisting an arbitrary query dictionary must fail this closed result contract."""
+    manager = _manager(tmp_path)
+
+    class FakeQuery:
+        def __init__(self, store):
+            pass
+
+        def diff(self, left, right):
+            return {
+                "added_capabilities": [
+                    {
+                        "id": "capability:one",
+                        "kind": "capability",
+                        "label": "One",
+                        "owner_class": "core",
+                        "generation_scope": "stable",
+                        "state": {"available": True, "private": "no"},
+                        "evidence_refs": ["safe", {"private": "no"}],
+                    }
+                ],
+                "untrusted": {"private": "must-not-persist"},
+            }
+
+    monkeypatch.setattr(jobs_module, "OrganismQuery", FakeQuery)
+    try:
+        job = _wait(manager, manager.submit_revision_diff("rev:left", "rev:right").job_id)
+        assert job.result is not None
+        assert job.result["kind"] == "revision_diff"
+        assert set(job.result["diff"]) == {
+            "added_capabilities",
+            "removed_capabilities",
+            "changed_state",
+            "dependency_changes",
+            "invariant_impact",
+            "runtime_changes",
+            "quality_changes",
+            "coverage_changes",
+            "truncated",
+        }
+        assert job.result["diff"]["added_capabilities"] == [
+            {
+                "id": "capability:one",
+                "kind": "capability",
+                "label": "One",
+                "owner_class": "core",
+                "generation_scope": "stable",
+                "state": {"available": True},
+                "evidence_refs": ["safe"],
+            }
+        ]
+        assert "untrusted" not in json.dumps(job.result)
+        assert "must-not-persist" not in json.dumps(job.result)
     finally:
         manager.shutdown()
 
@@ -351,6 +410,18 @@ def test_manager_accepts_only_a_server_selected_repository_root(tmp_path):
         EvolutionJobManager(tmp_path / "organism", workspace_root=tmp_path / "browser-path")
 
 
+def test_manager_rejects_a_symlinked_configured_workspace_root(tmp_path):
+    """Resolving a configured repository through a link must fail this server-root boundary."""
+    workspace = _workspace(tmp_path)
+    symlinked_workspace = tmp_path / "workspace-link"
+    symlinked_workspace.symlink_to(workspace, target_is_directory=True)
+
+    with pytest.raises(EvolutionJobValidationError, match="invalid_workspace_root"):
+        EvolutionJobManager(
+            tmp_path / "organism", workspace_root=symlinked_workspace
+        )
+
+
 def test_process_nonce_is_an_opaque_server_instance_identifier(tmp_path):
     """Requiring a UUID for an otherwise opaque server nonce must fail this contract."""
     manager = EvolutionJobManager(
@@ -374,3 +445,149 @@ def test_default_process_nonce_is_shared_by_managers_in_one_server_process(tmp_p
     finally:
         first.shutdown()
         second.shutdown()
+
+
+def test_default_process_nonce_is_regenerated_after_a_pid_change(tmp_path, monkeypatch):
+    """Reusing an inherited server nonce after fork must fail this restart boundary."""
+    workspace = _workspace(tmp_path)
+    before = EvolutionJobManager(tmp_path / "organism-a", workspace_root=workspace)
+    try:
+        inherited_nonce = before.process_nonce
+    finally:
+        before.shutdown()
+
+    pid = os.getpid()
+    monkeypatch.setattr(jobs_module.os, "getpid", lambda: pid + 1)
+    after = EvolutionJobManager(tmp_path / "organism-b", workspace_root=workspace)
+    try:
+        assert after.process_nonce != inherited_nonce
+    finally:
+        after.shutdown()
+
+
+def test_global_capacity_rejects_the_101st_revision_diff_before_persisting(tmp_path, monkeypatch):
+    """Writing a 101st diff record must fail the global bounded-queue contract."""
+    workspace = _workspace(tmp_path)
+    first = EvolutionJobManager(tmp_path / "organism", workspace_root=workspace)
+    second = EvolutionJobManager(tmp_path / "organism", workspace_root=workspace)
+
+    class FastQuery:
+        def __init__(self, store):
+            pass
+
+        def diff(self, left, right):
+            return {}
+
+    monkeypatch.setattr(jobs_module, "OrganismQuery", FastQuery)
+    try:
+        for index in range(100):
+            manager = first if index % 2 == 0 else second
+            manager.submit_revision_diff("rev:left", "rev:right")
+
+        with pytest.raises(EvolutionJobConflict, match="job_capacity_reached"):
+            first.submit_revision_diff("rev:left", "rev:right")
+
+        records = list(
+            (tmp_path / "organism" / "evolution" / "dashboard-jobs").glob("*.json")
+        )
+        assert len(records) == 100
+        assert len(first._requests) <= 100
+        assert len(first._futures) <= 100
+        assert len(second._requests) <= 100
+        assert len(second._futures) <= 100
+    finally:
+        first.shutdown()
+        second.shutdown()
+
+
+def test_observer_scan_reports_its_actual_bounded_update_count(tmp_path, monkeypatch):
+    """Capping a real 101-record Observer result at 100 must fail this truthfulness contract."""
+    manager = _manager(tmp_path)
+
+    class ManyUpdatesObserver:
+        def __init__(self, root):
+            pass
+
+        def scan_and_update_suggestions(self, *, max_events):
+            assert max_events == 1000
+            return [object()] * 101
+
+    monkeypatch.setattr(jobs_module, "ObserverService", ManyUpdatesObserver)
+    try:
+        job = _wait(manager, manager.submit_observer_scan().job_id)
+        assert job.result == {"kind": "observer_scan", "updated_suggestions": 101}
+    finally:
+        manager.shutdown()
+
+
+def test_shutdown_rejects_submission_without_creating_a_queued_record(tmp_path):
+    """Writing a durable record after shutdown must fail this lifecycle boundary."""
+    root = tmp_path / "organism"
+    manager = EvolutionJobManager(root, workspace_root=_workspace(tmp_path))
+    manager.shutdown()
+
+    with pytest.raises(EvolutionJobConflict, match="job_manager_closed"):
+        manager.submit_revision_diff("rev:left", "rev:right")
+    assert not root.exists()
+
+
+def test_executor_submit_failure_is_persisted_as_terminal_not_queued(tmp_path, monkeypatch):
+    """Leaving a durable queued record when executor submission fails must fail this contract."""
+    manager = _manager(tmp_path)
+
+    def unavailable_executor(*args, **kwargs):
+        raise RuntimeError("executor unavailable")
+
+    monkeypatch.setattr(manager.executor, "submit", unavailable_executor)
+    try:
+        job = manager.submit_revision_diff("rev:left", "rev:right")
+        assert job.state == "failed"
+        assert job.error_code == "job_failed"
+        persisted = manager.get_job(job.job_id)
+        assert persisted is not None
+        assert persisted.state == "failed"
+        assert persisted.finished_at is not None
+    finally:
+        manager.shutdown()
+
+
+def test_symlinked_ancestor_never_redirects_job_storage_outside_root(tmp_path):
+    """Creating jobs through a swapped ancestor link must fail without touching its target."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    ancestor = tmp_path / "ancestor"
+    ancestor.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(EvolutionJobStorageError, match="job_storage_unsafe"):
+        EvolutionJobManager(ancestor / "organism", workspace_root=_workspace(tmp_path))
+    assert not (outside / "organism").exists()
+
+
+def test_ancestor_swap_before_submission_never_redirects_job_storage(tmp_path, monkeypatch):
+    """Revalidating only the leaf after its parent swap must fail this TOCTOU contract."""
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    root = parent / "organism"
+    manager = EvolutionJobManager(root, workspace_root=_workspace(tmp_path))
+
+    class FastQuery:
+        def __init__(self, store):
+            pass
+
+        def diff(self, left, right):
+            return {}
+
+    monkeypatch.setattr(jobs_module, "OrganismQuery", FastQuery)
+    try:
+        _wait(manager, manager.submit_revision_diff("rev:left", "rev:right").job_id)
+        original_parent = tmp_path / "original-parent"
+        parent.rename(original_parent)
+        outside = tmp_path / "outside-after-swap"
+        outside.mkdir()
+        parent.symlink_to(outside, target_is_directory=True)
+
+        with pytest.raises(EvolutionJobStorageError, match="job_storage_unsafe"):
+            manager.submit_revision_diff("rev:left", "rev:right")
+        assert not (outside / "organism").exists()
+    finally:
+        manager.shutdown()

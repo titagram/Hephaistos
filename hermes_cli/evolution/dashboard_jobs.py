@@ -31,6 +31,7 @@ from hermes_cli.gnothi.query import OrganismQuery
 from hermes_cli.gnothi.store import OrganismRevisionStore
 
 from .observer_service import ObserverService
+from .organism_home import OrganismHomeError, resolve_organism_root
 
 try:  # pragma: no branch - platform dependent implementation
     import fcntl
@@ -69,6 +70,8 @@ MAX_JOB_RESULT_BYTES = 32 * 1024
 _MAX_JOB_RESULT_ITEMS = 100
 _MAX_PUBLIC_TEXT = 512
 _MAX_JOB_RECORDS = 100
+_MAX_OBSERVER_UPDATES = 1000
+_MAX_DIFF_ROWS = 100
 _UUID = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
     re.ASCII,
@@ -76,6 +79,27 @@ _UUID = re.compile(
 _PROCESS_NONCE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$", re.ASCII)
 _REVISION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _SERVER_PROCESS_NONCE = str(uuid.uuid4())
+_SERVER_PROCESS_NONCE_PID = os.getpid()
+
+
+def _server_process_nonce() -> str:
+    """Return a process-instance nonce, regenerating inherited fork state."""
+    global _SERVER_PROCESS_NONCE, _SERVER_PROCESS_NONCE_PID
+    pid = os.getpid()
+    if pid != _SERVER_PROCESS_NONCE_PID:
+        _SERVER_PROCESS_NONCE = str(uuid.uuid4())
+        _SERVER_PROCESS_NONCE_PID = pid
+    return _SERVER_PROCESS_NONCE
+
+
+def _reset_nonce_after_fork() -> None:
+    global _SERVER_PROCESS_NONCE, _SERVER_PROCESS_NONCE_PID
+    _SERVER_PROCESS_NONCE = str(uuid.uuid4())
+    _SERVER_PROCESS_NONCE_PID = os.getpid()
+
+
+if hasattr(os, "register_at_fork"):  # pragma: no branch - unavailable on Windows
+    os.register_at_fork(after_in_child=_reset_nonce_after_fork)
 
 
 class EvolutionJobError(RuntimeError):
@@ -118,6 +142,27 @@ class _JobRequest:
     collector_names: tuple[str, ...] = ()
     left: str | None = None
     right: str | None = None
+
+
+@dataclass
+class _JobDirectory:
+    """Retained private directory descriptors for one storage transaction."""
+
+    path: Path
+    root_fd: int | None = None
+    evolution_fd: int | None = None
+    fd: int | None = None
+
+    def close(self) -> None:
+        for descriptor in (self.fd, self.evolution_fd, self.root_fd):
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+        self.fd = None
+        self.evolution_fd = None
+        self.root_fd = None
 
 
 def _utc_now() -> str:
@@ -198,6 +243,185 @@ def _is_bounded_public_value(value: object, *, depth: int = 0) -> bool:
     return False
 
 
+_DIFF_FIELDS = frozenset(
+    {
+        "added_capabilities",
+        "removed_capabilities",
+        "changed_state",
+        "dependency_changes",
+        "invariant_impact",
+        "runtime_changes",
+        "quality_changes",
+        "coverage_changes",
+        "truncated",
+    }
+)
+
+
+def _public_diff_text(value: object, *, limit: int) -> str:
+    return _safe_public_text(value, limit=limit)
+
+
+def _public_diff_node(value: object) -> dict[str, Any]:
+    row = value if isinstance(value, dict) else {}
+    state = row.get("state")
+    public_state = (
+        {
+            _public_diff_text(key, limit=128): item
+            for key, item in list(state.items())[:_MAX_DIFF_ROWS]
+            if isinstance(key, str) and isinstance(item, bool)
+        }
+        if isinstance(state, dict)
+        else {}
+    )
+    refs = row.get("evidence_refs")
+    return {
+        "id": _public_diff_text(row.get("id"), limit=256),
+        "kind": _public_diff_text(row.get("kind"), limit=128),
+        "label": _public_diff_text(row.get("label"), limit=500),
+        "owner_class": _public_diff_text(row.get("owner_class"), limit=128),
+        "generation_scope": _public_diff_text(row.get("generation_scope"), limit=64),
+        "state": public_state,
+        "evidence_refs": [
+            _public_diff_text(item, limit=256)
+            for item in (refs[:20] if isinstance(refs, list) else [])
+            if isinstance(item, (str, int, float))
+        ],
+    }
+
+
+def _bounded_diff_rows(value: object) -> tuple[list[object], bool]:
+    if not isinstance(value, list):
+        return [], value is not None
+    return value[:_MAX_DIFF_ROWS], len(value) > _MAX_DIFF_ROWS
+
+
+def _public_revision_diff(value: object) -> dict[str, Any]:
+    """Project only the fixed public ``OrganismQuery.diff`` contract."""
+    raw = value if isinstance(value, dict) else {}
+    truncated = bool(raw.get("truncated", False))
+
+    def nodes(name: str) -> list[dict[str, Any]]:
+        nonlocal truncated
+        rows, cut = _bounded_diff_rows(raw.get(name))
+        truncated = truncated or cut
+        return [_public_diff_node(row) for row in rows]
+
+    changed_rows, changed_cut = _bounded_diff_rows(raw.get("changed_state"))
+    dependency_rows, dependency_cut = _bounded_diff_rows(raw.get("dependency_changes"))
+    quality_rows, quality_cut = _bounded_diff_rows(raw.get("quality_changes"))
+    coverage_rows, coverage_cut = _bounded_diff_rows(raw.get("coverage_changes"))
+    truncated = truncated or changed_cut or dependency_cut or quality_cut or coverage_cut
+
+    return {
+        "added_capabilities": nodes("added_capabilities"),
+        "removed_capabilities": nodes("removed_capabilities"),
+        "changed_state": [
+            {
+                "id": _public_diff_text(row.get("id"), limit=256),
+                "before": {
+                    _public_diff_text(key, limit=128): item
+                    for key, item in list(row.get("before", {}).items())[:_MAX_DIFF_ROWS]
+                    if isinstance(key, str) and isinstance(item, bool)
+                },
+                "after": {
+                    _public_diff_text(key, limit=128): item
+                    for key, item in list(row.get("after", {}).items())[:_MAX_DIFF_ROWS]
+                    if isinstance(key, str) and isinstance(item, bool)
+                },
+            }
+            for row in changed_rows
+            if isinstance(row, dict)
+        ],
+        "dependency_changes": [
+            {
+                "kind": _public_diff_text(row[0], limit=128),
+                "from": _public_diff_text(row[1], limit=256),
+                "to": _public_diff_text(row[2], limit=256),
+            }
+            for row in dependency_rows
+            if isinstance(row, (tuple, list)) and len(row) == 3
+        ],
+        "invariant_impact": nodes("invariant_impact"),
+        "runtime_changes": nodes("runtime_changes"),
+        "quality_changes": [
+            {
+                "before": _public_diff_text(row.get("before"), limit=32),
+                "after": _public_diff_text(row.get("after"), limit=32),
+            }
+            for row in quality_rows
+            if isinstance(row, dict)
+        ],
+        "coverage_changes": [
+            {
+                "domain": _public_diff_text(row.get("domain"), limit=64),
+                "before": _public_diff_text(row.get("before"), limit=32),
+                "after": _public_diff_text(row.get("after"), limit=32),
+            }
+            for row in coverage_rows
+            if isinstance(row, dict)
+        ],
+        "truncated": truncated,
+    }
+
+
+def _valid_public_diff(value: object) -> bool:
+    if not isinstance(value, dict) or set(value) != _DIFF_FIELDS:
+        return False
+    if type(value.get("truncated")) is not bool:
+        return False
+    for name in (
+        "added_capabilities",
+        "removed_capabilities",
+        "changed_state",
+        "dependency_changes",
+        "invariant_impact",
+        "runtime_changes",
+        "quality_changes",
+        "coverage_changes",
+    ):
+        rows = value.get(name)
+        if not isinstance(rows, list) or len(rows) > _MAX_DIFF_ROWS:
+            return False
+    for name in ("added_capabilities", "removed_capabilities", "invariant_impact", "runtime_changes"):
+        for row in value[name]:
+            if not isinstance(row, dict) or set(row) != {
+                "id", "kind", "label", "owner_class", "generation_scope", "state", "evidence_refs"
+            }:
+                return False
+            if not all(
+                isinstance(row[field], str) and len(row[field]) <= limit
+                for field, limit in (("id", 256), ("kind", 128), ("label", 500), ("owner_class", 128), ("generation_scope", 64))
+            ):
+                return False
+            if (
+                not isinstance(row["state"], dict)
+                or len(row["state"]) > _MAX_DIFF_ROWS
+                or not all(isinstance(key, str) and len(key) <= 128 and isinstance(item, bool) for key, item in row["state"].items())
+                or not isinstance(row["evidence_refs"], list)
+                or len(row["evidence_refs"]) > 20
+                or not all(isinstance(item, str) and len(item) <= 256 for item in row["evidence_refs"])
+            ):
+                return False
+    for row in value["changed_state"]:
+        if not isinstance(row, dict) or set(row) != {"id", "before", "after"} or not isinstance(row["id"], str) or len(row["id"]) > 256:
+            return False
+        for state in (row["before"], row["after"]):
+            if not isinstance(state, dict) or len(state) > _MAX_DIFF_ROWS or not all(isinstance(key, str) and len(key) <= 128 and isinstance(item, bool) for key, item in state.items()):
+                return False
+    for row in value["dependency_changes"]:
+        if not isinstance(row, dict) or set(row) != {"kind", "from", "to"} or not all(isinstance(row[field], str) and len(row[field]) <= limit for field, limit in (("kind", 128), ("from", 256), ("to", 256))):
+            return False
+    for name, fields, limits in (
+        ("quality_changes", ("before", "after"), (32, 32)),
+        ("coverage_changes", ("domain", "before", "after"), (64, 32, 32)),
+    ):
+        for row in value[name]:
+            if not isinstance(row, dict) or set(row) != set(fields) or not all(isinstance(row[field], str) and len(row[field]) <= limit for field, limit in zip(fields, limits)):
+                return False
+    return True
+
+
 def _validate_result_payload(kind: str, result: dict[str, Any]) -> None:
     """Reject storage records that are not one of the fixed public shapes."""
     if result.get("kind") != kind:
@@ -219,11 +443,21 @@ def _validate_result_payload(kind: str, result: dict[str, Any]) -> None:
         return
     if kind == "observer_scan":
         value = result.get("updated_suggestions")
-        if (
-            set(result) != {"kind", "updated_suggestions"}
-            or type(value) is not int
-            or not 0 <= value <= _MAX_JOB_RESULT_ITEMS
-        ):
+        normal = (
+            set(result) == {"kind", "updated_suggestions"}
+            and type(value) is int
+            and 0 <= value <= _MAX_OBSERVER_UPDATES
+        )
+        truncated = (
+            set(result)
+            == {"kind", "updated_suggestions", "total_updated_suggestions", "truncated"}
+            and type(value) is int
+            and value == _MAX_OBSERVER_UPDATES
+            and type(result["total_updated_suggestions"]) is int
+            and result["total_updated_suggestions"] > _MAX_OBSERVER_UPDATES
+            and result["truncated"] is True
+        )
+        if not normal and not truncated:
             raise EvolutionJobStorageError("job_record_invalid")
         return
     if kind == "revision_diff":
@@ -235,7 +469,7 @@ def _validate_result_payload(kind: str, result: dict[str, Any]) -> None:
             or not _REVISION_ID.fullmatch(result["left"])
             or not _REVISION_ID.fullmatch(result["right"])
             or not isinstance(result["diff"], dict)
-            or not _is_bounded_public_value(result["diff"])
+            or not _valid_public_diff(result["diff"])
         ):
             raise EvolutionJobStorageError("job_record_invalid")
         return
@@ -255,13 +489,17 @@ def _public_result(kind: str, result: dict[str, Any]) -> dict[str, Any]:
             "build_result": _safe_public_text(result["build_result"], limit=32),
         }
     if kind == "observer_scan":
-        return {"kind": kind, "updated_suggestions": result["updated_suggestions"]}
+        public = {"kind": kind, "updated_suggestions": result["updated_suggestions"]}
+        if result.get("truncated") is True:
+            public["total_updated_suggestions"] = result["total_updated_suggestions"]
+            public["truncated"] = True
+        return public
     return _fit_result(
         {
             "kind": kind,
             "left": result["left"],
             "right": result["right"],
-            "diff": _bounded_value(result["diff"]),
+            "diff": result["diff"],
         }
     )
 
@@ -276,18 +514,23 @@ class EvolutionJobManager:
         workspace_root: Path | None = None,
         process_nonce: str | None = None,
     ) -> None:
-        self.root = Path(
-            hermes_constants.get_organism_home() if organism_root is None else organism_root
-        )
+        raw_root = hermes_constants.get_organism_home() if organism_root is None else organism_root
+        self.root = Path(os.path.abspath(os.fspath(raw_root)))
+        try:
+            resolve_organism_root(self.root)
+        except OrganismHomeError:
+            raise EvolutionJobStorageError("job_storage_unsafe") from None
         self.workspace_root = self._validated_workspace_root(
             Path.cwd() if workspace_root is None else Path(workspace_root)
         )
         # An explicit root makes the invariant visible: this is always the
         # cross-profile global store, never the active profile's storage.
         self.store = OrganismRevisionStore(self.root / "gnothi_seauton")
-        self.process_nonce = self._validated_nonce(process_nonce or _SERVER_PROCESS_NONCE)
+        self.process_nonce = self._validated_nonce(process_nonce or _server_process_nonce())
         self.executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="evolution-job")
         self._lock = threading.RLock()
+        self._lifecycle_lock = threading.RLock()
+        self._closed = False
         self._futures: dict[str, Future[None]] = {}
         self._requests: dict[str, _JobRequest] = {}
 
@@ -298,10 +541,16 @@ class EvolutionJobManager:
     @staticmethod
     def _validated_workspace_root(value: Path) -> Path:
         try:
-            root = value.resolve(strict=True)
+            root = Path(os.path.abspath(os.fspath(value)))
+            walked = Path(root.anchor)
+            for part in root.parts[1:]:
+                walked = walked / part
+                info = walked.lstat()
+                if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+                    raise EvolutionJobValidationError("invalid_workspace_root")
             info = root.lstat()
             git_info = (root / ".git").lstat()
-        except (OSError, RuntimeError, ValueError):
+        except (OSError, RuntimeError, ValueError, EvolutionJobValidationError):
             raise EvolutionJobValidationError("invalid_workspace_root") from None
         if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
             raise EvolutionJobValidationError("invalid_workspace_root")
@@ -328,25 +577,16 @@ class EvolutionJobManager:
         return raw
 
     @staticmethod
-    def _validate_private_directory(path: Path) -> os.stat_result:
-        try:
-            info = path.lstat()
-        except (OSError, TypeError, NotImplementedError):
-            raise EvolutionJobStorageError("job_storage_unsafe") from None
+    def _validate_private_directory_info(info: os.stat_result) -> None:
         if (
             stat.S_ISLNK(info.st_mode)
             or not stat.S_ISDIR(info.st_mode)
             or not _private_mode(info, 0o700)
         ):
             raise EvolutionJobStorageError("job_storage_unsafe")
-        return info
 
     @staticmethod
-    def _validate_private_file(path: Path) -> os.stat_result:
-        try:
-            info = path.lstat()
-        except (OSError, TypeError, NotImplementedError):
-            raise EvolutionJobStorageError("job_storage_unsafe") from None
+    def _validate_private_file_info(info: os.stat_result) -> None:
         if (
             stat.S_ISLNK(info.st_mode)
             or not stat.S_ISREG(info.st_mode)
@@ -354,6 +594,23 @@ class EvolutionJobManager:
             or not _private_mode(info, 0o600)
         ):
             raise EvolutionJobStorageError("job_storage_unsafe")
+
+    @classmethod
+    def _validate_private_directory(cls, path: Path) -> os.stat_result:
+        try:
+            info = path.lstat()
+        except (OSError, TypeError, NotImplementedError):
+            raise EvolutionJobStorageError("job_storage_unsafe") from None
+        cls._validate_private_directory_info(info)
+        return info
+
+    @classmethod
+    def _validate_private_file(cls, path: Path) -> os.stat_result:
+        try:
+            info = path.lstat()
+        except (OSError, TypeError, NotImplementedError):
+            raise EvolutionJobStorageError("job_storage_unsafe") from None
+        cls._validate_private_file_info(info)
         return info
 
     @classmethod
@@ -371,48 +628,167 @@ class EvolutionJobManager:
             raise EvolutionJobStorageError("job_storage_unsafe") from None
         return cls._validate_private_directory(path)
 
-    def _ensure_jobs_directory(self) -> Path:
-        # Create only as part of submission or a worker state update.  Each
-        # component is validated first so mkdir cannot quietly traverse a link.
-        self._ensure_private_directory(self.root)
-        self._ensure_private_directory(self.root / "evolution")
-        self._ensure_private_directory(self.jobs_dir)
-        return self.jobs_dir
+    @staticmethod
+    def _supports_anchored_storage() -> bool:
+        supported = getattr(os, "supports_dir_fd", frozenset())
+        return (
+            os.name == "posix"
+            and hasattr(os, "O_DIRECTORY")
+            and hasattr(os, "O_NOFOLLOW")
+            and os.open in supported
+            and os.stat in supported
+            and os.mkdir in supported
+        )
 
-    def _jobs_directory_for_read(self) -> Path | None:
+    @staticmethod
+    def _directory_flags() -> int:
+        return os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+
+    @classmethod
+    def _open_or_create_child_directory(
+        cls, parent_fd: int, name: str, *, create: bool, private: bool = True
+    ) -> int | None:
         try:
-            root_info = self.root.lstat()
+            info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            if not create:
+                return None
+            try:
+                os.mkdir(name, 0o700, dir_fd=parent_fd)
+            except FileExistsError:
+                pass
+            info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except (OSError, TypeError, NotImplementedError):
+            raise EvolutionJobStorageError("job_storage_unsafe") from None
+        if private:
+            cls._validate_private_directory_info(info)
+        elif stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise EvolutionJobStorageError("job_storage_unsafe")
+        try:
+            descriptor = os.open(name, cls._directory_flags(), dir_fd=parent_fd)
+            opened = os.fstat(descriptor)
+            if private:
+                cls._validate_private_directory_info(opened)
+            elif not stat.S_ISDIR(opened.st_mode):
+                raise EvolutionJobStorageError("job_storage_unsafe")
+            if not _same_inode(info, opened):
+                raise EvolutionJobStorageError("job_storage_unsafe")
+            return descriptor
+        except BaseException:
+            if "descriptor" in locals():
+                os.close(descriptor)
+            raise
+
+    def _open_anchored_root(self, *, create: bool) -> int | None:
+        descriptor = os.open(self.root.anchor, self._directory_flags())
+        try:
+            parts = self.root.parts[1:]
+            for index, part in enumerate(parts):
+                child = self._open_or_create_child_directory(
+                    descriptor,
+                    part,
+                    create=create,
+                    private=index == len(parts) - 1,
+                )
+                if child is None:
+                    os.close(descriptor)
+                    return None
+                os.close(descriptor)
+                descriptor = child
+            return descriptor
+        except BaseException:
+            os.close(descriptor)
+            raise
+
+    def _verify_linked_directory(self, directory: _JobDirectory) -> None:
+        """Reject a lexical path swap while retained descriptors keep I/O safe."""
+        try:
+            resolve_organism_root(self.root)
+            expected = (
+                (self.root, directory.root_fd),
+                (self.root / "evolution", directory.evolution_fd),
+                (self.jobs_dir, directory.fd),
+            )
+            for path, descriptor in expected:
+                if descriptor is None:
+                    continue
+                linked = path.lstat()
+                self._validate_private_directory_info(linked)
+                if not _same_inode(linked, os.fstat(descriptor)):
+                    raise EvolutionJobStorageError("job_storage_unsafe")
+        except OrganismHomeError:
+            raise EvolutionJobStorageError("job_storage_unsafe") from None
+        except (OSError, TypeError, NotImplementedError):
+            raise EvolutionJobStorageError("job_storage_unsafe") from None
+
+    def _open_jobs_directory(self, *, create: bool) -> _JobDirectory | None:
+        if not self._supports_anchored_storage():
+            try:
+                resolve_organism_root(self.root)
+            except OrganismHomeError:
+                raise EvolutionJobStorageError("job_storage_unsafe") from None
+            if create:
+                self._ensure_private_directory(self.root)
+                self._ensure_private_directory(self.root / "evolution")
+                self._ensure_private_directory(self.jobs_dir)
+            else:
+                try:
+                    self._validate_private_directory(self.root)
+                    self._validate_private_directory(self.root / "evolution")
+                    self._validate_private_directory(self.jobs_dir)
+                except FileNotFoundError:
+                    return None
+            return _JobDirectory(self.jobs_dir)
+
+        root_fd = self._open_anchored_root(create=create)
+        if root_fd is None:
+            return None
+        evolution_fd: int | None = None
+        jobs_fd: int | None = None
+        try:
+            evolution_fd = self._open_or_create_child_directory(
+                root_fd, "evolution", create=create
+            )
+            if evolution_fd is None:
+                os.close(root_fd)
+                return None
+            jobs_fd = self._open_or_create_child_directory(
+                evolution_fd, "dashboard-jobs", create=create
+            )
+            if jobs_fd is None:
+                os.close(evolution_fd)
+                os.close(root_fd)
+                return None
+            directory = _JobDirectory(
+                self.jobs_dir,
+                root_fd=root_fd,
+                evolution_fd=evolution_fd,
+                fd=jobs_fd,
+            )
+            self._verify_linked_directory(directory)
+            return directory
+        except BaseException:
+            for descriptor in (jobs_fd, evolution_fd, root_fd):
+                if descriptor is not None:
+                    os.close(descriptor)
+            raise
+
+    @staticmethod
+    def _private_file_info_at(directory: _JobDirectory, name: str) -> os.stat_result | None:
+        try:
+            if directory.fd is not None:
+                return os.stat(name, dir_fd=directory.fd, follow_symlinks=False)
+            return (directory.path / name).lstat()
         except FileNotFoundError:
             return None
         except (OSError, TypeError, NotImplementedError):
             raise EvolutionJobStorageError("job_storage_unsafe") from None
-        if (
-            stat.S_ISLNK(root_info.st_mode)
-            or not stat.S_ISDIR(root_info.st_mode)
-            or not _private_mode(root_info, 0o700)
-        ):
-            raise EvolutionJobStorageError("job_storage_unsafe")
-        evolution = self.root / "evolution"
-        try:
-            evolution.lstat()
-        except FileNotFoundError:
-            return None
-        self._validate_private_directory(evolution)
-        try:
-            self.jobs_dir.lstat()
-        except FileNotFoundError:
-            return None
-        self._validate_private_directory(self.jobs_dir)
-        return self.jobs_dir
 
-    @staticmethod
-    def _open_private_lock(path: Path, *, create: bool) -> int | None:
-        try:
-            existing = path.lstat()
-        except FileNotFoundError:
-            existing = None
-        except OSError:
-            raise EvolutionJobStorageError("job_storage_unsafe") from None
+    @classmethod
+    def _open_private_lock(
+        cls, directory: _JobDirectory, name: str, *, create: bool
+    ) -> int | None:
+        existing = cls._private_file_info_at(directory, name)
         flags = os.O_RDWR | getattr(os, "O_BINARY", 0)
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
@@ -422,30 +798,35 @@ class EvolutionJobManager:
                 if not create:
                     return None
                 try:
-                    descriptor = os.open(path, flags | os.O_CREAT | os.O_EXCL, 0o600)
+                    if directory.fd is not None:
+                        descriptor = os.open(
+                            name, flags | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=directory.fd
+                        )
+                    else:
+                        descriptor = os.open(
+                            directory.path / name, flags | os.O_CREAT | os.O_EXCL, 0o600
+                        )
                 except FileExistsError:
-                    existing = path.lstat()
+                    existing = cls._private_file_info_at(directory, name)
                 else:
                     os.fchmod(descriptor, 0o600)
             if descriptor is None:
                 if existing is None:
-                    existing = path.lstat()
-                if (
-                    stat.S_ISLNK(existing.st_mode)
-                    or not stat.S_ISREG(existing.st_mode)
-                    or existing.st_nlink != 1
-                    or not _private_mode(existing, 0o600)
-                ):
-                    raise EvolutionJobStorageError("job_storage_unsafe")
-                descriptor = os.open(path, flags)
+                    existing = cls._private_file_info_at(directory, name)
+                assert existing is not None
+                cls._validate_private_file_info(existing)
+                descriptor = (
+                    os.open(name, flags, dir_fd=directory.fd)
+                    if directory.fd is not None
+                    else os.open(directory.path / name, flags)
+                )
             opened = os.fstat(descriptor)
-            linked = path.lstat()
-            if (
-                not stat.S_ISREG(opened.st_mode)
-                or opened.st_nlink != 1
-                or not _private_mode(opened, 0o600)
-                or not _same_inode(opened, linked)
-            ):
+            linked = cls._private_file_info_at(directory, name)
+            if linked is None:
+                raise EvolutionJobStorageError("job_storage_unsafe")
+            cls._validate_private_file_info(opened)
+            cls._validate_private_file_info(linked)
+            if not _same_inode(opened, linked):
                 raise EvolutionJobStorageError("job_storage_unsafe")
             return descriptor
         except BaseException:
@@ -476,24 +857,28 @@ class EvolutionJobManager:
             msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
 
     @contextmanager
-    def _storage_lock(self, *, create: bool) -> Iterator[Path | None]:
+    def _storage_lock(self, *, create: bool) -> Iterator[_JobDirectory | None]:
         with self._lock:
-            directory = self._ensure_jobs_directory() if create else self._jobs_directory_for_read()
+            directory = self._open_jobs_directory(create=create)
             if directory is None:
                 yield None
                 return
-            descriptor = self._open_private_lock(directory / ".jobs.lock", create=create)
+            descriptor = self._open_private_lock(directory, ".jobs.lock", create=create)
             if descriptor is None:
-                # Existing records are atomically replaced, so a non-creating
-                # reader can safely proceed if a legacy directory lacks a lock.
-                yield directory
+                try:
+                    self._verify_linked_directory(directory)
+                    yield directory
+                finally:
+                    directory.close()
                 return
             try:
                 self._acquire_file_lock(descriptor)
+                self._verify_linked_directory(directory)
                 yield directory
             finally:
                 self._release_file_lock(descriptor)
                 os.close(descriptor)
+                directory.close()
 
     @contextmanager
     def _kind_lock(self, kind: JobKind) -> Iterator[None]:
@@ -503,7 +888,7 @@ class EvolutionJobManager:
         with self._storage_lock(create=False) as directory:
             if directory is None:
                 raise EvolutionJobStorageError("job_storage_unsafe")
-            descriptor = self._open_private_lock(directory / f".{kind}.lock", create=True)
+            descriptor = self._open_private_lock(directory, f".{kind}.lock", create=True)
             assert descriptor is not None
         try:
             self._acquire_file_lock(descriptor)
@@ -513,27 +898,33 @@ class EvolutionJobManager:
             os.close(descriptor)
 
     @staticmethod
-    def _record_path(directory: Path, job_id: str) -> Path:
-        return directory / f"{job_id}.json"
+    def _record_name(job_id: str) -> str:
+        return f"{job_id}.json"
 
-    def _read_record(self, directory: Path, job_id: str) -> EvolutionJob | None:
-        path = self._record_path(directory, job_id)
-        try:
-            expected = path.lstat()
-        except FileNotFoundError:
+    def _read_record(
+        self, directory: _JobDirectory, job_id: str
+    ) -> EvolutionJob | None:
+        name = self._record_name(job_id)
+        expected = self._private_file_info_at(directory, name)
+        if expected is None:
             return None
-        except OSError:
-            raise EvolutionJobStorageError("job_storage_unsafe") from None
-        self._validate_private_file(path)
+        self._validate_private_file_info(expected)
         flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
         descriptor: int | None = None
         try:
-            descriptor = os.open(path, flags)
+            descriptor = (
+                os.open(name, flags, dir_fd=directory.fd)
+                if directory.fd is not None
+                else os.open(directory.path / name, flags)
+            )
             opened = os.fstat(descriptor)
-            if not _same_inode(expected, opened):
+            linked = self._private_file_info_at(directory, name)
+            if linked is None or not _same_inode(expected, opened) or not _same_inode(opened, linked):
                 raise EvolutionJobStorageError("job_storage_unsafe")
+            self._validate_private_file_info(opened)
+            self._validate_private_file_info(linked)
             data = os.read(descriptor, _MAX_RECORD_BYTES + 1)
             if len(data) > _MAX_RECORD_BYTES:
                 raise EvolutionJobStorageError("job_record_invalid")
@@ -622,22 +1013,38 @@ class EvolutionJobManager:
             asdict(job), sort_keys=True, separators=(",", ":"), ensure_ascii=False
         ).encode("utf-8")
 
-    def _write_record(self, directory: Path, job: EvolutionJob) -> None:
-        path = self._record_path(directory, job.job_id)
-        try:
-            existing = path.lstat()
-        except FileNotFoundError:
-            existing = None
-        except OSError:
-            raise EvolutionJobStorageError("job_storage_unsafe") from None
+    def _write_record(self, directory: _JobDirectory, job: EvolutionJob) -> None:
+        name = self._record_name(job.job_id)
+        existing = self._private_file_info_at(directory, name)
         if existing is not None:
-            self._validate_private_file(path)
+            self._validate_private_file_info(existing)
         content = self._record_bytes(job)
-        descriptor, temporary_name = tempfile.mkstemp(
-            prefix=f".{job.job_id}.", suffix=".tmp", dir=directory
-        )
-        temporary = Path(temporary_name)
+        if len(content) > _MAX_RECORD_BYTES:
+            raise EvolutionJobStorageError("job_record_invalid")
+        descriptor: int | None = None
+        temporary_name: str | None = None
         try:
+            if directory.fd is None:
+                descriptor, temporary_path = tempfile.mkstemp(
+                    prefix=f".{job.job_id}.", suffix=".tmp", dir=directory.path
+                )
+                temporary_name = temporary_path
+            else:
+                for _ in range(16):
+                    candidate = f".{job.job_id}.{uuid.uuid4().hex}.tmp"
+                    try:
+                        descriptor = os.open(
+                            candidate,
+                            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                            0o600,
+                            dir_fd=directory.fd,
+                        )
+                    except FileExistsError:
+                        continue
+                    temporary_name = candidate
+                    break
+                if descriptor is None or temporary_name is None:
+                    raise EvolutionJobStorageError("job_storage_unavailable")
             os.fchmod(descriptor, 0o600)
             view = memoryview(content)
             while view:
@@ -647,28 +1054,39 @@ class EvolutionJobManager:
                 view = view[written:]
             os.fsync(descriptor)
             os.close(descriptor)
-            descriptor = -1
-            os.replace(temporary, path)
-            self._validate_private_file(path)
-            directory_descriptor = os.open(
-                directory,
-                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
-            )
-            try:
-                os.fsync(directory_descriptor)
-            finally:
-                os.close(directory_descriptor)
+            descriptor = None
+            if directory.fd is None:
+                assert temporary_name is not None
+                os.replace(temporary_name, directory.path / name)
+            else:
+                assert temporary_name is not None
+                self._verify_linked_directory(directory)
+                os.replace(
+                    temporary_name,
+                    name,
+                    src_dir_fd=directory.fd,
+                    dst_dir_fd=directory.fd,
+                )
+                os.fsync(directory.fd)
+            linked = self._private_file_info_at(directory, name)
+            if linked is None:
+                raise EvolutionJobStorageError("job_storage_unsafe")
+            self._validate_private_file_info(linked)
         except EvolutionJobError:
             raise
-        except OSError:
+        except (OSError, TypeError, NotImplementedError):
             raise EvolutionJobStorageError("job_storage_unavailable") from None
         finally:
-            if descriptor != -1:
+            if descriptor is not None:
                 os.close(descriptor)
-            try:
-                temporary.unlink()
-            except FileNotFoundError:
-                pass
+            if temporary_name is not None:
+                try:
+                    if directory.fd is None:
+                        Path(temporary_name).unlink()
+                    else:
+                        os.unlink(temporary_name, dir_fd=directory.fd)
+                except FileNotFoundError:
+                    pass
 
     def _visible_job(self, job: EvolutionJob) -> EvolutionJob:
         # A queued job also cannot be resumed after a process restart because
@@ -678,7 +1096,7 @@ class EvolutionJobManager:
             return replace(
                 job,
                 state="unknown",
-                finished_at=job.finished_at or _utc_now(),
+                finished_at=job.finished_at,
                 error_code="process_interrupted",
             )
         if job.result is not None:
@@ -697,26 +1115,32 @@ class EvolutionJobManager:
         with self._storage_lock(create=False) as directory:
             if directory is None:
                 return []
-            try:
-                entries = sorted(
-                    (entry for entry in directory.iterdir() if entry.name.endswith(".json")),
-                    key=lambda entry: entry.name,
-                    reverse=True,
-                )
-            except OSError:
-                raise EvolutionJobStorageError("job_storage_unsafe") from None
-            if len(entries) > _MAX_JOB_RECORDS:
-                raise EvolutionJobStorageError("job_list_limit")
             jobs: list[EvolutionJob] = []
-            for entry in entries:
-                job_id = entry.stem
-                # Treat every .json member as a record; a bad name must not be
-                # silently skipped because it could otherwise hide a link.
-                safe_id = self._validated_job_id(job_id)
+            for safe_id in self._iter_record_ids(directory):
                 job = self._read_record(directory, safe_id)
                 if job is not None:
                     jobs.append(self._visible_job(job))
         return sorted(jobs, key=lambda job: (job.created_at, job.job_id), reverse=True)
+
+    def _iter_record_ids(self, directory: _JobDirectory) -> Iterator[str]:
+        """Yield at most the fixed durable cap without materializing a directory."""
+        try:
+            scan_target: int | Path = (
+                os.dup(directory.fd) if directory.fd is not None else directory.path
+            )
+            with os.scandir(scan_target) as entries:
+                count = 0
+                for entry in entries:
+                    if not entry.name.endswith(".json"):
+                        continue
+                    count += 1
+                    if count > _MAX_JOB_RECORDS:
+                        raise EvolutionJobStorageError("job_list_limit")
+                    yield self._validated_job_id(entry.name[:-5])
+        except EvolutionJobError:
+            raise
+        except (OSError, TypeError, NotImplementedError):
+            raise EvolutionJobStorageError("job_storage_unsafe") from None
 
     @staticmethod
     def _validate_collectors(value: object) -> tuple[str, ...]:
@@ -762,44 +1186,53 @@ class EvolutionJobManager:
                 raise EvolutionJobValidationError("invalid_job_input")
             request = _JobRequest(left=self._validate_revision(left), right=self._validate_revision(right))
 
-        with self._storage_lock(create=True) as directory:
-            assert directory is not None
-            if kind in _EXCLUSIVE_KINDS:
-                for existing in self._list_records_locked(directory):
-                    if (
-                        existing.kind == kind
-                        and existing.process_nonce == self.process_nonce
-                        and existing.state in {"queued", "running"}
-                    ):
-                        raise EvolutionJobConflict("job_already_active")
-            job = EvolutionJob(
-                job_id=str(uuid.uuid4()),
-                kind=kind,
-                state="queued",
-                progress=0,
-                created_at=_utc_now(),
-                started_at=None,
-                finished_at=None,
-                process_nonce=self.process_nonce,
-                result=None,
-                error_code=None,
-            )
-            self._write_record(directory, job)
-            self._requests[job.job_id] = request
-            self._futures[job.job_id] = self.executor.submit(self._run, job.job_id)
-        return job
-
-    def _list_records_locked(self, directory: Path) -> list[EvolutionJob]:
-        try:
-            entries = list(directory.glob("*.json"))
-        except OSError:
-            raise EvolutionJobStorageError("job_storage_unsafe") from None
-        if len(entries) > _MAX_JOB_RECORDS:
-            raise EvolutionJobStorageError("job_list_limit")
-        records: list[EvolutionJob] = []
-        for entry in entries:
-            records.append(self._read_record(directory, self._validated_job_id(entry.stem)))
-        return records
+        with self._lifecycle_lock:
+            if self._closed:
+                raise EvolutionJobConflict("job_manager_closed")
+            with self._storage_lock(create=True) as directory:
+                assert directory is not None
+                count = 0
+                for existing_id in self._iter_record_ids(directory):
+                    count += 1
+                    if kind in _EXCLUSIVE_KINDS:
+                        existing = self._read_record(directory, existing_id)
+                        if (
+                            existing is not None
+                            and existing.kind == kind
+                            and existing.process_nonce == self.process_nonce
+                            and existing.state in {"queued", "running"}
+                        ):
+                            raise EvolutionJobConflict("job_already_active")
+                if count >= _MAX_JOB_RECORDS:
+                    raise EvolutionJobConflict("job_capacity_reached")
+                job = EvolutionJob(
+                    job_id=str(uuid.uuid4()),
+                    kind=kind,
+                    state="queued",
+                    progress=0,
+                    created_at=_utc_now(),
+                    started_at=None,
+                    finished_at=None,
+                    process_nonce=self.process_nonce,
+                    result=None,
+                    error_code=None,
+                )
+                self._write_record(directory, job)
+                self._requests[job.job_id] = request
+                try:
+                    future = self.executor.submit(self._run, job.job_id)
+                except BaseException:
+                    terminal = replace(
+                        job,
+                        state="failed",
+                        finished_at=_utc_now(),
+                        error_code="job_failed",
+                    )
+                    self._write_record(directory, terminal)
+                    self._requests.pop(job.job_id, None)
+                    return terminal
+                self._futures[job.job_id] = future
+                return job
 
     def submit_rebuild(
         self,
@@ -886,6 +1319,13 @@ class EvolutionJobManager:
             raise EvolutionJobValidationError("invalid_job_input")
         return runner(self, job)
 
+    def _workspace_for_work(self) -> Path:
+        """Revalidate the server-owned repository binding before a fixed worker runs."""
+        root = self._validated_workspace_root(self.workspace_root)
+        if root != self.workspace_root:
+            raise EvolutionJobValidationError("invalid_workspace_root")
+        return root
+
     def update_progress(self, job_id: str, progress: int) -> EvolutionJob:
         safe_id = self._validated_job_id(job_id)
         if type(progress) is not int:
@@ -935,7 +1375,11 @@ class EvolutionJobManager:
         return self.get_job(safe_id)
 
     def shutdown(self) -> None:
-        self.executor.shutdown(wait=True)
+        with self._lifecycle_lock:
+            if self._closed:
+                return
+            self._closed = True
+            self.executor.shutdown(wait=True)
 
 
 def _run_organism_rebuild(
@@ -945,7 +1389,7 @@ def _run_organism_rebuild(
     if request is None:
         raise EvolutionJobValidationError("invalid_job_input")
     artifact = build_organism_revision(
-        manager.workspace_root,
+        manager._workspace_for_work(),
         store=manager.store,
         force=request.force,
         collector_names=list(request.collector_names),
@@ -970,9 +1414,16 @@ def _run_organism_rebuild(
 
 def _run_observer_scan(manager: EvolutionJobManager, job: EvolutionJob) -> dict[str, Any]:
     records = ObserverService(manager.root).scan_and_update_suggestions(max_events=1000)
+    if len(records) > _MAX_OBSERVER_UPDATES:
+        return {
+            "kind": "observer_scan",
+            "updated_suggestions": _MAX_OBSERVER_UPDATES,
+            "total_updated_suggestions": len(records),
+            "truncated": True,
+        }
     return {
         "kind": "observer_scan",
-        "updated_suggestions": min(len(records), _MAX_JOB_RESULT_ITEMS),
+        "updated_suggestions": len(records),
     }
 
 
@@ -980,13 +1431,15 @@ def _run_revision_diff(manager: EvolutionJobManager, job: EvolutionJob) -> dict[
     request = manager._requests.get(job.job_id)
     if request is None or request.left is None or request.right is None:
         raise EvolutionJobValidationError("invalid_job_input")
-    diff = OrganismQuery(manager.store).diff(request.left, request.right)
+    diff = _public_revision_diff(
+        OrganismQuery(manager.store).diff(request.left, request.right)
+    )
     return _fit_result(
         {
             "kind": "revision_diff",
             "left": request.left,
             "right": request.right,
-            "diff": _bounded_value(diff),
+            "diff": diff,
         }
     )
 
