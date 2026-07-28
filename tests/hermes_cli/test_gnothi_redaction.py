@@ -27,6 +27,85 @@ def test_bounds_untrusted_strings():
     assert count == 1
 
 
+def test_redacts_embedded_paths_without_consuming_context_or_line_locations():
+    value = (
+        'Open "/private/secret/plugin.py:42:7", then '
+        '[//server/share/logs/agent.log:9] and retry '
+        r"C:\\Users\\secret\\tool.py:12; or \\server\\share\\private\\trace.log:4."
+    )
+
+    redacted, count = redact_value(value)
+
+    assert redacted == (
+        'Open "[ABSOLUTE_PATH]:42:7", then '
+        '[[ABSOLUTE_PATH]:9] and retry '
+        '[ABSOLUTE_PATH]:12; or [ABSOLUTE_PATH]:4.'
+    )
+    assert count == 4
+
+
+def test_embedded_path_redaction_leaves_urls_and_non_paths_unchanged():
+    value = (
+        "Read https://example.test/docs/path?next=/private/secret and "
+        "https://example.test/#/private/secret; keep capability:terminal and "
+        "./relative/file.py."
+    )
+
+    redacted, count = redact_value(value)
+
+    assert redacted == value
+    assert count == 0
+
+
+def test_embedded_path_redaction_preserves_markdown_quote_delimiters():
+    value = "See `/private/secret/plugin.py:8` and '/private/secret/other.py:9'."
+
+    redacted, count = redact_value(value)
+
+    assert redacted == "See `[ABSOLUTE_PATH]:8` and '[ABSOLUTE_PATH]:9'."
+    assert count == 2
+
+
+def test_embedded_path_redaction_keeps_bracketed_path_components_together():
+    value = (
+        r"Open /private/alice/[billing-prod]/report.txt and "
+        r"C:\Users\alice\[billing-prod]\report.txt."
+    )
+
+    redacted, count = redact_value(value)
+
+    assert redacted == "Open [ABSOLUTE_PATH] and [ABSOLUTE_PATH]."
+    assert count == 2
+
+
+def test_embedded_file_uris_redact_local_locations_and_preserve_line_suffixes():
+    value = (
+        "See (file:///private/secret/plugin.py:42), "
+        "FILE:///C:/Users/alice/private/tool.py:8:3; and "
+        "file://server/share/private/trace.log:4!"
+    )
+
+    redacted, count = redact_value(value)
+
+    assert redacted == (
+        "See ([ABSOLUTE_PATH]:42), [ABSOLUTE_PATH]:8:3; and "
+        "[ABSOLUTE_PATH]:4!"
+    )
+    assert count == 3
+
+
+def test_embedded_file_uris_inside_public_url_query_and_fragment_stay_public():
+    value = (
+        "Read https://example.test/docs?next=file:///private/secret/plugin.py:42 "
+        "and https://example.test/#file://server/share/private/trace.log:4."
+    )
+
+    redacted, count = redact_value(value)
+
+    assert redacted == value
+    assert count == 0
+
+
 def test_exception_exposes_class_only():
     assert safe_exception_class(RuntimeError("/private/path token=secret")) == (
         "RuntimeError"

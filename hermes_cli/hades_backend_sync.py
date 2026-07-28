@@ -39,7 +39,6 @@ class BackgroundSyncDecision:
 BACKGROUND_SYNC_STATE_KEY = "background_sync"
 ARTIFACT_UPLOAD_CACHE_PREFIX = "artifact_upload_cache"
 ARTIFACT_COMPRESSION_MIN_BYTES = 64 * 1024
-ORGANISM_GRAPH_SCHEMA = "hades.organism_graph.v1"
 GRAPH_V2_UPLOAD_CACHE_PREFIX = "graph_v2_upload_cache"
 GRAPH_V2_ACTIVE_CACHE_PREFIX = "graph_v2_active"
 GRAPH_IMPORT_POLL_TIMEOUT_SECONDS = 180.0
@@ -335,7 +334,6 @@ def run_backend_sync(
     )
     clients: dict[str, object] = {}
     queue_capabilities: dict[str, bool] = {}
-    advertised_capabilities: dict[str, dict[str, object]] = {}
     polled_agent_queues: set[tuple[str, str]] = set()
     route_auth: dict[tuple[str, str], dict[str, bool | int]] = {}
     used_credential_fingerprints: dict[str, str | None] = {}
@@ -473,9 +471,6 @@ def run_backend_sync(
                     auth_observation["unauthorized"] = True
                     auth_observation["unauthorized_errors"] += 1
                 advertised = {}
-            advertised_capabilities[binding_agent.agent_id] = (
-                advertised if isinstance(advertised, dict) else {}
-            )
             queue_capabilities[binding_agent.agent_id] = bool(
                 isinstance(advertised, dict)
                 and advertised.get(BACKEND_CAPABILITY) is True
@@ -678,17 +673,6 @@ def run_backend_sync(
                         f"backend sync: failed to upload baseline artifacts for {binding.display_path}: "
                         f"{redact_secret(str(exc))}"
                     )
-
-        if _supports_organism_graph(
-            advertised_capabilities.get(binding_agent.agent_id, {})
-        ):
-            organism_uploaded, organism_failed, organism_skipped = (
-                _sync_current_organism_artifact(client, binding_agent, binding)
-            )
-            artifacts_uploaded += organism_uploaded
-            artifact_errors += organism_failed
-            artifacts_skipped += organism_skipped
-            sync_errors += organism_failed
 
     with db.connect_closing() as conn:
         active_binding_ids = {
@@ -902,60 +886,6 @@ def _refresh_workspace_binding_metadata(
     if refreshed is None:
         raise RuntimeError("local workspace binding disappeared during metadata refresh")
     return refreshed, True
-
-
-def _supports_organism_graph(advertised: dict[str, object]) -> bool:
-    if advertised.get("organism_graph_schema") == ORGANISM_GRAPH_SCHEMA:
-        return True
-    scopes = advertised.get("graph_scopes")
-    return isinstance(scopes, list) and "organism" in scopes
-
-
-def _sync_current_organism_artifact(
-    client: object,
-    agent: db.BackendAgent,
-    binding: db.WorkspaceBinding,
-) -> tuple[int, int, int]:
-    """Upload the current revision when it belongs to this binding.
-
-    Sync is intentionally non-constructive: absence or a workspace mismatch is
-    a clean skip and never triggers an implicit organism rebuild.
-    """
-    from hermes_cli.gnothi.store import OrganismRevisionStore
-
-    try:
-        artifact = OrganismRevisionStore().current()
-    except (OSError, ValueError):
-        return (0, 1, 0)
-    if not artifact or not _organism_artifact_matches_binding(artifact, binding):
-        return (0, 0, 0)
-    return _upload_job_artifact(
-        client,
-        agent,
-        binding,
-        None,
-        {"artifact": artifact},
-    )
-
-
-def _organism_artifact_matches_binding(
-    artifact: dict[str, object],
-    binding: db.WorkspaceBinding,
-) -> bool:
-    contract = artifact.get("organism_contract")
-    if not isinstance(contract, dict):
-        return False
-    source = contract.get("source")
-    artifact_head = str(source.get("head_commit") or "") if isinstance(source, dict) else ""
-    binding_head = str(binding.head_commit or "")
-    if artifact_head and binding_head and artifact_head != binding_head:
-        return False
-    workspace_labels = {
-        str(node.get("label") or "")
-        for node in artifact.get("nodes", [])
-        if isinstance(node, dict) and node.get("kind") == "workspace"
-    }
-    return not workspace_labels or Path(binding.repo_root).name in workspace_labels
 
 
 def _agent_has_capability(agent: db.BackendAgent, capability: str) -> bool:
@@ -1593,7 +1523,6 @@ def _upload_job_artifact(
     if schema not in {
         "hades.git_tree.v1",
         "hades.symbols.v1",
-        ORGANISM_GRAPH_SCHEMA,
     }:
         return (0, 0, 0)
     artifact_payload = dict(artifact)

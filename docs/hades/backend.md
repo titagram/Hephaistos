@@ -3,10 +3,12 @@
 ## Gnothi Seauton: local organism awareness
 
 `gnothi_seauton` is the local, evidence-backed description of the installed
-Hades organism. It inventories source anatomy, capabilities, runtime state,
-protected contracts, declared dependencies, and bounded experience events into
-immutable `hades.organism_graph.v1` revisions under
-`$HERMES_HOME/gnothi_seauton/`.
+Hades organism, shared across all Hermes profiles. It inventories source
+anatomy, capabilities, runtime state, protected contracts, declared
+dependencies, and bounded experience events into immutable
+`hades.organism_graph.v1` revisions under
+`<default Hermes root>/organism/gnothi_seauton/`. This single global organism
+is never remote-synced.
 
 Operator commands:
 
@@ -23,9 +25,9 @@ hades gnothi-seauton wiki
 The conversational `/gnothi_seauton` command is also available in the classic
 CLI, messaging gateway, and TUI. It submits a normal user turn, preserving the
 conversation's cached system-prompt prefix and tool schema. It is read-only:
-it may inspect the current revision and graph tools with `scope=organism`, but
-it does not rebuild, research, download, install, mutate configuration, or
-start an evolution.
+it inspects the current global revision through `hades gnothi-seauton` commands,
+not graph tools. It does not rebuild, research, download, install, mutate
+configuration, or start an evolution.
 
 Each revision contains an `organism_contract` with generation identity,
 semantic fingerprint, per-collector coverage, and freshness. Coverage states
@@ -51,23 +53,17 @@ bounded `$HERMES_HOME/logs/organism-events.jsonl` stream. When the backend
 database does not already exist, runtime inspection reports the backend as
 unconfigured without creating that database.
 
-Ordinary `hades backend sync` may publish the already-current organism
-revision through the existing artifact channel. It never triggers an organism
-build. Publication is capability-gated: the agent uploads only when backend
-discovery advertises `organism_graph_schema=hades.organism_graph.v1` or the
-`organism` graph scope, and unchanged content is skipped by checksum. Older
-backends therefore keep their existing behavior and receive no organism
-artifact.
+Ordinary `hades backend sync` never publishes, uploads, or otherwise includes
+organism artifacts in remote synchronization. It never triggers an organism
+build. The single global organism and its Gnothi revisions never enter remote
+sync, regardless of backend capabilities or graph scopes.
 
-The existing service-gated graph search and traversal tools accept
-`scope=project|organism`, defaulting to `project`. The default preserves prior
-payloads and normalized results. With `scope=organism`, live search is limited
-to `hades.organism_graph.v1`; if the backend is unavailable, both tools read
-the current immutable `OrganismRevisionStore` revision instead of the local
-project code-graph cache. Matching backend validation, awareness coverage,
-indexing, and traversal support are still required before live organism
-queries are available. No new route, migration, deploy, restart, or database
-change is required to use the local commands or fallback.
+The existing service-gated graph search and traversal tools accept only
+`scope=project` and fall back to the local synced project code-graph cache when
+the backend is unavailable. Organism inspection uses the local
+`hades gnothi-seauton` commands, not graph tools. No new route, migration,
+deploy, restart, or database change is required to use the local commands or
+project-graph fallback.
 
 Troubleshooting:
 

@@ -40,8 +40,9 @@ propose a new capability:
    hermes evolution blueprint list --json
    ```
 5. Stop after presenting the blueprint. A proposal does not build, install,
-   research, or modify source files. Explicit user approval is required
-   before any later research or build step.
+   modify source files, or advance the governed lifecycle. Public read-only
+   research remains available under the policy below; explicit authorization
+   is required for lifecycle progression and any later build step.
 
 The blueprint is a local review artifact. Never describe it as implemented,
 installed, activated, tested in a candidate workspace, or ready for
@@ -63,7 +64,22 @@ When conducting a Telos Workshop (`/autopoiesis`):
    ```
    hermes evolution telos approve <digest>
    ```
-6. **Never perform web research, install packages, edit Hades source files, or activate a revision** without explicit user approval.
+6. **Keep lifecycle actions separately governed**: public research is not an approval to build, install, edit Hades source files, or activate a revision.
+
+## Public Research and Lifecycle Governance
+
+Public read-only research is always available: use public search and read
+public documentation when they help evaluate a suggestion or prepare a
+blueprint. Never include private data in search queries or uploads.
+
+This does not create a broader network permission. Authenticated browsing,
+form submissions, downloads, package installs, and execution are outside this
+research permission and remain subject to their own applicable controls.
+
+`research_authorized` is a lifecycle state for governed attempt progression;
+it is not a network permission. It records the separately authorized path from
+`draft` toward `blueprint_ready`. Build, activation, promotion, rollback, and
+retirement remain separately governed lifecycle actions.
 
 ## Viewing Drafts
 

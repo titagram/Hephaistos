@@ -10,8 +10,8 @@ from __future__ import annotations
 
 _GNOTHI_PREFIX = """\
 [/gnothi_seauton] Perform a read-only, evidence-backed inspection of the
-installed Hades organism. Use the existing local Hades CLI and graph tools;
-when using graph tools, always set `scope=organism`.
+installed Hades organism. Use the existing local Hades CLI for organism
+inspection; do not use graph tools for it.
 
 Operating contract:
 - Treat the current immutable organism revision as the source of claims.

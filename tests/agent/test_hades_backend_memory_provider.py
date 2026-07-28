@@ -249,88 +249,6 @@ def _live_project_topology(*, canonical_start="route:orders.show"):
     }
 
 
-def _live_organism_topology(*, schema="hades.organism_graph.v1"):
-    return {
-        "project_id": "proj_1",
-        "workspace_binding_id": "wb_1",
-        "schema": schema,
-        "start": "capability:graph-search",
-        "nodes": [
-            {
-                "id": "capability:graph-search",
-                "kind": "capability",
-                "label": "Graph search",
-            },
-            {
-                "id": "runtime:local-cli",
-                "kind": "runtime",
-                "label": "Local CLI",
-            },
-        ],
-        "edges": [
-            {
-                "id": "edge:graph-search-requires-cli",
-                "kind": "requires",
-                "from": "capability:graph-search",
-                "to": "runtime:local-cli",
-            }
-        ],
-    }
-
-
-def _organism_graph_artifact():
-    return {
-        "schema": "hades.organism_graph.v1",
-        "organism_contract": {
-            "version": "hades.gnothi_seauton.v1",
-            "revision_id": "revision_test_1",
-            "generation": {"id": "generation_test_1", "scope": "stable"},
-            "source": {"head_commit": "abc123"},
-            "collected_at": "2026-07-14T10:00:00Z",
-            "status": "current",
-            "coverage": {},
-        },
-        "nodes": [
-            {
-                "id": "capability:graph-search",
-                "kind": "capability",
-                "label": "Graph search",
-                "owner": {"class": "plugin", "id": "hades_backend"},
-                "generation_scope": "stable",
-                "state": {"available": True},
-                "evidence_refs": ["source:plugins/memory/hades_backend/__init__.py"],
-                "properties": {"surface": "model_tool"},
-                "verified_at": "2026-07-14T10:00:00Z",
-            },
-            {
-                "id": "runtime:local-cli",
-                "kind": "runtime",
-                "label": "Local CLI",
-                "owner": {"class": "core", "id": "hermes"},
-                "generation_scope": "stable",
-                "state": {"available": True},
-                "evidence_refs": ["source:cli.py"],
-                "properties": {"platform": "cli"},
-                "verified_at": "2026-07-14T10:00:00Z",
-            },
-        ],
-        "edges": [
-            {
-                "id": "edge:graph-search-requires-cli",
-                "kind": "requires",
-                "from": "capability:graph-search",
-                "to": "runtime:local-cli",
-                "evidence_refs": ["source:plugins/memory/hades_backend/__init__.py"],
-                "properties": {"reason": "execution surface"},
-            }
-        ],
-        "redactions": 0,
-        "truncated": False,
-        "raw_source_included": False,
-        "retention_class": "organism_metadata",
-    }
-
-
 def test_hades_backend_memory_provider_prefetches_linked_project_cache(monkeypatch, tmp_path):
     from hermes_cli import hades_backend_db as db
     from hermes_cli.hades_backend_runtime import workspace_fingerprint
@@ -1050,71 +968,57 @@ def test_hades_backend_graph_search_rejects_unhandled_live_v1_items(
     assert result["count"] == 0
 
 
-def test_hades_backend_graph_tools_expose_project_and_organism_scopes(
-    monkeypatch, tmp_path
-):
+def test_hades_backend_graph_tools_expose_only_project_scope(monkeypatch, tmp_path):
     provider = _create_linked_provider(monkeypatch, tmp_path)
     schemas = {schema["name"]: schema for schema in provider.get_tool_schemas()}
 
-    for tool_name in (
-        "hades_backend_graph_search",
-        "hades_backend_graph_traverse",
-    ):
-        scope = schemas[tool_name]["parameters"]["properties"]["scope"]
-        assert scope["enum"] == ["project", "organism"]
-        assert scope["default"] == "project"
+    graph_search = schemas["hades_backend_graph_search"]
+    graph_traverse = schemas["hades_backend_graph_traverse"]
+
+    assert graph_search["parameters"]["properties"]["scope"]["enum"] == [
+        "project"
+    ]
+    assert graph_traverse["parameters"]["properties"]["scope"]["enum"] == [
+        "project"
+    ]
 
 
-def test_hades_backend_graph_search_organism_scope_filters_live_backend(
-    monkeypatch, tmp_path
+@pytest.mark.parametrize(
+    ("tool_name", "args"),
+    [
+        pytest.param(
+            "hades_backend_graph_search",
+            {"query": "Graph search", "scope": "organism"},
+            id="search",
+        ),
+        pytest.param(
+            "hades_backend_graph_traverse",
+            {"start": "capability:graph-search", "scope": "organism"},
+            id="traverse",
+        ),
+    ],
+)
+def test_hades_backend_graph_organism_scope_is_rejected_before_remote_or_revision_io(
+    monkeypatch, tmp_path, tool_name, args
 ):
     provider = _create_linked_provider(monkeypatch, tmp_path)
 
-    class FakeClient:
-        def __init__(self):
-            self.calls = []
-
-        def memory_search(self, **payload):
-            self.calls.append(payload)
-            return {
-                "project_id": payload["project_id"],
-                "workspace_binding_id": payload["workspace_binding_id"],
-                "query": payload["query"],
-                "domain": payload["domain"],
-                "count": 0,
-                "items": [],
-            }
-
-        def close(self):
-            pass
-
-    fake = FakeClient()
     import plugins.memory.hades_backend as hades_memory
+    from hermes_cli.gnothi.store import OrganismRevisionStore
 
-    monkeypatch.setattr(
-        hades_memory.runtime, "client_from_config", lambda *, timeout=None: fake
-    )
+    def unexpected_client(*, timeout=None):
+        raise AssertionError("organism scope reached the remote client")
 
-    result = json.loads(
-        provider.handle_tool_call(
-            "hades_backend_graph_search",
-            {"query": "Graph search", "scope": "organism", "limit": 4},
-        )
-    )
+    def unexpected_current(self):
+        raise AssertionError("organism scope reached the revision store")
 
-    assert result["status"] == "ok"
-    assert result["scope"] == "organism"
-    assert fake.calls == [
-        {
-            "project_id": "proj_1",
-            "workspace_binding_id": "wb_1",
-            "query": "Graph search",
-            "domain": "artifacts",
-            "limit": 4,
-            "include_raw_chunks": False,
-            "schema": "hades.organism_graph.v1",
-        }
-    ]
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", unexpected_client)
+    monkeypatch.setattr(OrganismRevisionStore, "current", unexpected_current)
+
+    result = json.loads(provider.handle_tool_call(tool_name, args))
+
+    assert "Unsupported graph scope" in result["error"]
+    assert result["allowed_scopes"] == ["project"]
 
 
 def test_hades_backend_graph_scope_rejects_unknown_value_before_backend_call(
@@ -1143,9 +1047,9 @@ def test_hades_backend_graph_scope_rejects_unknown_value_before_backend_call(
     )
 
     assert "Unsupported graph scope" in search["error"]
-    assert search["allowed_scopes"] == ["project", "organism"]
+    assert search["allowed_scopes"] == ["project"]
     assert "Unsupported graph scope" in traverse["error"]
-    assert traverse["allowed_scopes"] == ["project", "organism"]
+    assert traverse["allowed_scopes"] == ["project"]
 
 
 @pytest.mark.parametrize(
@@ -1381,126 +1285,6 @@ def test_hades_backend_graph_traverse_rejects_malformed_live_v2_topology(
     assert error_fragment in result["backend_topology_error"]
 
 
-def test_hades_backend_graph_search_resolves_organism_vector_topology(
-    monkeypatch, tmp_path
-):
-    provider = _create_linked_provider(monkeypatch, tmp_path)
-    provider._backend_memory_search = lambda **_payload: (
-        {
-            "project_id": "proj_1",
-            "workspace_binding_id": "wb_1",
-            "domain": "artifacts",
-            "count": 1,
-            "items": [
-                {
-                    "id": "organism-vector-hit",
-                    "graph_handle": "capability:graph-search",
-                    "summary": "Graph search capability",
-                }
-            ],
-        },
-        None,
-    )
-    provider._backend_graph_traverse = lambda **payload: (
-        _live_organism_topology(),
-        None,
-    )
-
-    result = json.loads(
-        provider.handle_tool_call(
-            "hades_backend_graph_search",
-            {"query": "Graph search", "scope": "organism"},
-        )
-    )
-
-    assert result["status"] == "ok"
-    assert result["scope"] == "organism"
-    assert result["topology_resolved"] is True
-    assert result["topology_resolved_handles"] == ["capability:graph-search"]
-    assert {node["id"] for node in result["nodes"]} == {
-        "capability:graph-search",
-        "runtime:local-cli",
-    }
-
-
-def test_hades_backend_graph_search_rejects_wrong_schema_for_organism_vector(
-    monkeypatch, tmp_path
-):
-    provider = _create_linked_provider(monkeypatch, tmp_path)
-    provider._backend_memory_search = lambda **_payload: (
-        {
-            "project_id": "proj_1",
-            "workspace_binding_id": "wb_1",
-            "domain": "artifacts",
-            "count": 1,
-            "items": [{"graph_handle": "capability:graph-search"}],
-        },
-        None,
-    )
-    provider._backend_graph_traverse = lambda **_payload: (
-        _live_organism_topology(schema="hades.code_graph.v2"),
-        None,
-    )
-
-    result = json.loads(
-        provider.handle_tool_call(
-            "hades_backend_graph_search",
-            {"query": "Graph search", "scope": "organism"},
-        )
-    )
-
-    assert result["status"] == "ok"
-    assert result["topology_resolved"] is False
-    assert "hades.organism_graph.v1" in result["backend_topology_error"]
-
-
-@pytest.mark.parametrize(
-    ("field", "wrong_value"),
-    [
-        pytest.param("project_id", "proj_other", id="wrong-project"),
-        pytest.param("workspace_binding_id", "wb_other", id="wrong-workspace-binding"),
-    ],
-)
-def test_hades_backend_graph_traverse_rejects_wrong_organism_envelope(
-    monkeypatch, tmp_path, field, wrong_value
-):
-    provider = _create_linked_provider(monkeypatch, tmp_path)
-    topology = _live_organism_topology()
-    topology[field] = wrong_value
-    provider._backend_graph_traverse = lambda **_payload: (topology, None)
-
-    result = json.loads(
-        provider.handle_tool_call(
-            "hades_backend_graph_traverse",
-            {"start": "capability:graph-search", "scope": "organism"},
-        )
-    )
-
-    assert result["status"] == "backend_invalid_graph"
-    assert result["nodes"] == []
-    assert result["edges"] == []
-
-
-def test_hades_backend_graph_traverse_rejects_project_schema_for_organism(
-    monkeypatch, tmp_path
-):
-    provider = _create_linked_provider(monkeypatch, tmp_path)
-    provider._backend_graph_traverse = lambda **_payload: (
-        _live_organism_topology(schema="hades.code_graph.v2"),
-        None,
-    )
-
-    result = json.loads(
-        provider.handle_tool_call(
-            "hades_backend_graph_traverse",
-            {"start": "capability:graph-search", "scope": "organism"},
-        )
-    )
-
-    assert result["status"] == "backend_invalid_graph"
-    assert "hades.organism_graph.v1" in result["backend_topology_error"]
-
-
 def test_hades_backend_graph_traverse_rejects_live_v1_topology(monkeypatch, tmp_path):
     provider = _create_linked_provider(monkeypatch, tmp_path)
     provider._active_graph_identity = lambda _scope: {
@@ -1637,115 +1421,6 @@ def test_hades_backend_graph_traverse_accepts_canonical_start_for_fuzzy_query(
     ]
     assert fake.closed == 1
     assert timeouts == [0.75]
-
-
-def test_hades_backend_graph_traverse_sends_organism_scope(monkeypatch, tmp_path):
-    provider = _create_linked_provider(monkeypatch, tmp_path)
-
-    class FakeClient:
-        def __init__(self):
-            self.calls = []
-
-        def graph_traverse(self, **payload):
-            self.calls.append(payload)
-            return _live_organism_topology() | {
-                "direction": payload["direction"],
-                "max_depth": payload["max_depth"],
-                "limit": payload["limit"],
-            }
-
-        def close(self):
-            pass
-
-    fake = FakeClient()
-    import plugins.memory.hades_backend as hades_memory
-
-    monkeypatch.setattr(
-        hades_memory.runtime, "client_from_config", lambda *, timeout=None: fake
-    )
-
-    result = json.loads(
-        provider.handle_tool_call(
-            "hades_backend_graph_traverse",
-            {
-                "start": "capability:graph-search",
-                "scope": "organism",
-                "direction": "out",
-                "max_depth": 1,
-                "limit": 10,
-            },
-        )
-    )
-
-    assert result["status"] == "ok"
-    assert result["scope"] == "organism"
-    assert fake.calls == [
-        {
-            "project_id": "proj_1",
-            "workspace_binding_id": "wb_1",
-            "start": "capability:graph-search",
-            "direction": "out",
-            "max_depth": 1,
-            "limit": 10,
-            "scope": "organism",
-        }
-    ]
-
-
-def test_hades_backend_graph_organism_scope_falls_back_to_current_revision(
-    monkeypatch, tmp_path
-):
-    provider = _create_linked_provider(monkeypatch, tmp_path)
-
-    from hermes_cli.gnothi.store import OrganismRevisionStore
-
-    OrganismRevisionStore().publish(_organism_graph_artifact())
-
-    import plugins.memory.hades_backend as hades_memory
-
-    def unavailable_client(*, timeout=None):
-        raise RuntimeError("backend offline")
-
-    monkeypatch.setattr(hades_memory.runtime, "client_from_config", unavailable_client)
-
-    search = json.loads(
-        provider.handle_tool_call(
-            "hades_backend_graph_search",
-            {"query": "Graph search", "scope": "organism", "limit": 5},
-        )
-    )
-    traverse = json.loads(
-        provider.handle_tool_call(
-            "hades_backend_graph_traverse",
-            {
-                "start": "capability:graph-search",
-                "scope": "organism",
-                "direction": "out",
-                "max_depth": 1,
-                "limit": 10,
-            },
-        )
-    )
-
-    assert search["status"] == "ok"
-    assert search["scope"] == "organism"
-    assert search["schema"] == "hades.organism_graph.v1"
-    assert search["artifact_id"] == "revision_test_1"
-    assert search["provenance"]["artifacts"][0]["origin"] == "organism_revision"
-    assert any(
-        item.get("graph_ref", {}).get("id") == "capability:graph-search"
-        for item in search["items"]
-    )
-
-    assert traverse["status"] == "ok"
-    assert traverse["scope"] == "organism"
-    assert traverse["schema"] == "hades.organism_graph.v1"
-    assert traverse["artifact_id"] == "revision_test_1"
-    assert {node["id"] for node in traverse["nodes"]} == {
-        "capability:graph-search",
-        "runtime:local-cli",
-    }
-    assert [edge["kind"] for edge in traverse["edges"]] == ["requires"]
 
 
 def test_hades_backend_memory_live_search_uses_short_timeout(monkeypatch, tmp_path):

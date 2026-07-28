@@ -3,7 +3,9 @@ from pathlib import Path
 
 import pytest
 
+import hermes_constants
 from hermes_cli.gnothi.contract import new_artifact
+from hermes_cli.gnothi.query import OrganismQuery
 from hermes_cli.gnothi.store import OrganismRevisionStore
 
 
@@ -28,14 +30,18 @@ def test_publish_writes_revision_and_atomically_updates_current(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        hermes_constants, "get_default_hermes_root", lambda: tmp_path
+    )
     store = OrganismRevisionStore()
     artifact = _artifact("rev-1", collected_at="2026-07-11T00:00:00Z")
 
     pointer = store.publish(artifact, published_at="2026-07-11T00:01:00Z")
 
-    revision_path = tmp_path / "gnothi_seauton" / "revisions" / "rev-1.json"
-    pointer_path = tmp_path / "gnothi_seauton" / "current.json"
+    revision_path = (
+        tmp_path / "organism" / "gnothi_seauton" / "revisions" / "rev-1.json"
+    )
+    pointer_path = tmp_path / "organism" / "gnothi_seauton" / "current.json"
     assert json.loads(revision_path.read_text()) == artifact
     assert json.loads(pointer_path.read_text()) == pointer
     assert pointer == {
@@ -45,8 +51,235 @@ def test_publish_writes_revision_and_atomically_updates_current(
         "published_at": "2026-07-11T00:01:00Z",
     }
     assert store.current() == artifact
+    assert (tmp_path / "organism").stat().st_mode & 0o777 == 0o700
+    assert revision_path.parent.stat().st_mode & 0o777 == 0o700
+    assert pointer_path.parent.stat().st_mode & 0o777 == 0o700
     assert revision_path.stat().st_mode & 0o777 == 0o600
     assert pointer_path.stat().st_mode & 0o777 == 0o600
+
+
+def test_default_store_is_global_across_profile_switches(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    default_root = tmp_path / ".hermes"
+    profile_root = default_root / "profiles" / "reviewer"
+    monkeypatch.setattr(
+        hermes_constants, "get_default_hermes_root", lambda: default_root
+    )
+    monkeypatch.setenv("HERMES_HOME", str(profile_root))
+
+    store = OrganismRevisionStore()
+
+    assert store.root == default_root / "organism" / "gnothi_seauton"
+
+
+def test_default_store_reads_current_revision_after_profile_switch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    default_root = tmp_path / ".hermes"
+    monkeypatch.setattr(
+        hermes_constants, "get_default_hermes_root", lambda: default_root
+    )
+    artifact = _artifact("rev-1", collected_at="2026-07-11T00:00:00Z")
+
+    monkeypatch.setenv("HERMES_HOME", str(default_root))
+    pointer = OrganismRevisionStore().publish(
+        artifact, published_at="2026-07-11T00:01:00Z"
+    )
+
+    monkeypatch.setenv("HERMES_HOME", str(default_root / "profiles" / "reviewer"))
+    profile_store = OrganismRevisionStore()
+
+    assert profile_store.current() == artifact
+    assert (
+        json.loads(profile_store.current_path.read_text())["sha256"]
+        == pointer["sha256"]
+    )
+
+
+def test_global_store_reads_leave_an_absent_root_absent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    default_root = tmp_path / ".hermes"
+    monkeypatch.setattr(
+        hermes_constants, "get_default_hermes_root", lambda: default_root
+    )
+    store = OrganismRevisionStore()
+
+    assert store.current() is None
+    assert store.get("rev-1") is None
+    assert store.list_revisions() == []
+    assert not store.root.exists()
+
+
+def test_global_store_rejects_a_symlinked_root_on_reads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    default_root = tmp_path / ".hermes"
+    monkeypatch.setattr(
+        hermes_constants, "get_default_hermes_root", lambda: default_root
+    )
+    target = tmp_path / "outside-store"
+    OrganismRevisionStore(root=target).publish(
+        _artifact("rev-1", collected_at="2026-07-11T00:00:00Z")
+    )
+    canonical_root = default_root / "organism" / "gnothi_seauton"
+    canonical_root.parent.mkdir(parents=True)
+    canonical_root.symlink_to(target, target_is_directory=True)
+
+    store = OrganismRevisionStore()
+    with pytest.raises(ValueError, match="unsafe organism store root"):
+        store.current()
+    with pytest.raises(ValueError, match="unsafe organism store root"):
+        store.get("rev-1")
+    with pytest.raises(ValueError, match="unsafe organism store root"):
+        store.list_revisions()
+
+
+def test_global_store_reads_reject_symlinked_current_pointer_and_revision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(
+        hermes_constants, "get_default_hermes_root", lambda: tmp_path / ".hermes"
+    )
+    store = OrganismRevisionStore()
+    artifact = _artifact("rev-1", collected_at="2026-07-11T00:00:00Z")
+    store.publish(artifact)
+
+    pointer_target = tmp_path / "pointer-target.json"
+    store.current_path.rename(pointer_target)
+    store.current_path.symlink_to(pointer_target)
+    with pytest.raises(ValueError, match="unsafe organism current pointer"):
+        store.current()
+
+    store.current_path.unlink()
+    pointer_target.rename(store.current_path)
+    revision_path = store.revisions_dir / "rev-1.json"
+    revision_target = tmp_path / "revision-target.json"
+    revision_path.rename(revision_target)
+    revision_path.symlink_to(revision_target)
+
+    with pytest.raises(ValueError, match="unsafe organism revision"):
+        store.get("rev-1")
+    with pytest.raises(ValueError, match="unsafe organism revision"):
+        store.current()
+    with pytest.raises(ValueError, match="unsafe organism revision"):
+        store.list_revisions()
+
+
+def test_global_store_reads_reject_nonregular_current_pointer_and_revision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(
+        hermes_constants, "get_default_hermes_root", lambda: tmp_path / ".hermes"
+    )
+    store = OrganismRevisionStore()
+    store.root.mkdir(parents=True)
+    store.current_path.mkdir()
+
+    with pytest.raises(ValueError, match="unsafe organism current pointer"):
+        store.current()
+
+    store.current_path.rmdir()
+    store.revisions_dir.mkdir()
+    (store.revisions_dir / "rev-1.json").mkdir()
+
+    with pytest.raises(ValueError, match="unsafe organism revision"):
+        store.get("rev-1")
+    with pytest.raises(ValueError, match="unsafe organism revision"):
+        store.list_revisions()
+
+
+def test_legacy_profile_store_is_reported_but_not_imported(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    default_root = tmp_path / ".hermes"
+    profile_root = default_root / "profiles" / "reviewer"
+    global_root = default_root / "organism" / "gnothi_seauton"
+    monkeypatch.setattr(
+        hermes_constants, "get_default_hermes_root", lambda: default_root
+    )
+    monkeypatch.setenv("HERMES_HOME", str(profile_root))
+    legacy_store = OrganismRevisionStore(root=profile_root / "gnothi_seauton")
+    legacy_store.publish(
+        _artifact("legacy-rev", collected_at="2026-07-11T00:00:00Z"),
+        published_at="2026-07-11T00:01:00Z",
+    )
+
+    result = OrganismQuery(OrganismRevisionStore()).status()
+
+    assert result == {
+        "status": "missing",
+        "actions": ["rebuild"],
+        "diagnostics": ["legacy_profile_state_detected"],
+    }
+    assert not global_root.exists()
+
+
+def test_unreadable_legacy_profile_state_is_reported_without_importing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    default_root = tmp_path / ".hermes"
+    profile_root = default_root / "profiles" / "reviewer"
+    global_root = default_root / "organism" / "gnothi_seauton"
+    monkeypatch.setattr(
+        hermes_constants, "get_default_hermes_root", lambda: default_root
+    )
+    monkeypatch.setenv("HERMES_HOME", str(profile_root))
+    legacy_store = OrganismRevisionStore(root=profile_root / "gnothi_seauton")
+    legacy_store.publish(
+        _artifact("legacy-rev", collected_at="2026-07-11T00:00:00Z"),
+        published_at="2026-07-11T00:01:00Z",
+    )
+    original_mode = legacy_store.root.stat().st_mode & 0o777
+    legacy_store.root.chmod(0)
+    try:
+        result = OrganismQuery(OrganismRevisionStore()).status()
+    finally:
+        legacy_store.root.chmod(original_mode)
+
+    assert result == {
+        "status": "missing",
+        "actions": ["rebuild"],
+        "diagnostics": ["legacy_profile_state_unreadable"],
+    }
+    assert not global_root.exists()
+
+
+@pytest.mark.parametrize("target_exists", [False, True])
+def test_legacy_pointer_symlink_is_reported_as_unreadable_without_importing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    target_exists: bool,
+):
+    default_root = tmp_path / ".hermes"
+    profile_root = default_root / "profiles" / "reviewer"
+    global_root = default_root / "organism" / "gnothi_seauton"
+    monkeypatch.setattr(
+        hermes_constants, "get_default_hermes_root", lambda: default_root
+    )
+    monkeypatch.setenv("HERMES_HOME", str(profile_root))
+    legacy_root = profile_root / "gnothi_seauton"
+    legacy_root.mkdir(parents=True)
+    target = legacy_root / "pointer-target.json"
+    if target_exists:
+        target.write_text('{"schema":"hades.gnothi_pointer.v1"}', encoding="utf-8")
+    (legacy_root / "current.json").symlink_to(target.name)
+
+    result = OrganismQuery(OrganismRevisionStore()).status()
+
+    assert result == {
+        "status": "missing",
+        "actions": ["rebuild"],
+        "diagnostics": ["legacy_profile_state_unreadable"],
+    }
+    assert not global_root.exists()
 
 
 def test_publish_is_idempotent_but_refuses_conflicting_revision(tmp_path: Path):

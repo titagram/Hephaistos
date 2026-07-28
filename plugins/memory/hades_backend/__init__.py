@@ -14,8 +14,6 @@ from typing import Any, Dict, List
 from agent.memory_provider import MemoryProvider
 from hermes_cli import hades_backend_db as db
 from hermes_cli import hades_backend_runtime as runtime
-from hermes_cli.gnothi.contract import ORGANISM_SCHEMA
-from hermes_cli.gnothi.store import OrganismRevisionStore
 from hermes_cli.hades_backend_client import redact_secret
 from hermes_cli.hades_backend_sync import _graph_v2_active_cache_key, run_backend_sync
 from tools.registry import tool_error, tool_result
@@ -83,8 +81,8 @@ DOMAIN_ALIASES = {
     "wiki_revision": "wiki",
 }
 SEARCH_DOMAINS = ("all", "project_memory", "logbook", "wiki", "agent_notes", "source_chunks", "artifacts")
-GRAPH_SCOPES = ("project", "organism")
-GRAPH_ARTIFACT_SCHEMAS = {"hades.code_graph.v2", ORGANISM_SCHEMA}
+GRAPH_SCOPES = ("project",)
+GRAPH_ARTIFACT_SCHEMAS = {"hades.code_graph.v2"}
 BUG_EVIDENCE_KINDS = (
     "all",
     "stack_trace",
@@ -221,7 +219,7 @@ GRAPH_SEARCH_TOOL_SCHEMA: Dict[str, Any] = {
                 "type": "string",
                 "enum": list(GRAPH_SCOPES),
                 "default": "project",
-                "description": "Search the linked project graph or Hades' own organism graph.",
+                "description": "Search the linked project graph.",
             },
             "limit": {
                 "type": "integer",
@@ -257,7 +255,7 @@ GRAPH_TRAVERSE_TOOL_SCHEMA: Dict[str, Any] = {
                 "type": "string",
                 "enum": list(GRAPH_SCOPES),
                 "default": "project",
-                "description": "Traverse the linked project graph or Hades' own organism graph.",
+                "description": "Traverse the linked project graph.",
             },
             "direction": {
                 "type": "string",
@@ -1384,24 +1382,17 @@ class HadesBackendMemoryProvider(MemoryProvider):
         backend_result, backend_error = self._backend_memory_search(
             query=query,
             domain="artifacts",
-            filters={
-                "schema": ORGANISM_SCHEMA
-                if scope == "organism"
-                else "hades.code_graph.v2"
-            },
+            filters={"schema": "hades.code_graph.v2"},
             limit=limit,
             include_raw_chunks=False,
         )
         if backend_result is not None:
-            active_identity: dict[str, Any] | None = None
-            if scope == "project":
-                try:
-                    active_identity = self._active_graph_identity(scope)
-                except Exception:
-                    active_identity = None
+            try:
+                active_identity = self._active_graph_identity(scope)
+            except Exception:
+                active_identity = None
             boundary_error = _graph_search_boundary_error(
                 backend_result,
-                scope=scope,
                 project_id=self._binding.project_id,
                 workspace_binding_id=self._binding.backend_workspace_binding_id,
                 active_identity=active_identity,
@@ -1412,12 +1403,10 @@ class HadesBackendMemoryProvider(MemoryProvider):
                         project_id=self._binding.project_id,
                         workspace_binding_id=self._binding.backend_workspace_binding_id,
                         error=boundary_error,
-                        scope=scope,
                         search=True,
                     )
                 )
-            if scope == "project":
-                backend_result = _v2_graph_search_response(backend_result)
+            backend_result = _v2_graph_search_response(backend_result)
             handles = _vector_graph_handles(backend_result)
             topologies: list[tuple[str, dict[str, Any]]] = []
             topology_errors: dict[str, str] = {}
@@ -1427,16 +1416,14 @@ class HadesBackendMemoryProvider(MemoryProvider):
                     direction="any",
                     max_depth=1,
                     limit=limit,
-                    scope=scope,
                 )
                 if topology is None:
                     topology_errors[handle] = (
                         topology_error or "graph query returned no topology"
                     )
                     continue
-                validation_error = _authoritative_scope_topology_error(
+                validation_error = _authoritative_project_topology_error(
                     topology,
-                    scope=scope,
                     handle=handle,
                     project_id=self._binding.project_id,
                     workspace_binding_id=self._binding.backend_workspace_binding_id,
@@ -1474,18 +1461,14 @@ class HadesBackendMemoryProvider(MemoryProvider):
                         result["backend_topology_error"] = next(
                             iter(topology_errors.values())
                         )
-            if scope == "organism":
-                result["scope"] = scope
             return tool_result(result)
 
-        local_result = self._local_graph_search(query=query, scope=scope, limit=limit)
+        local_result = self._local_graph_search(query=query, limit=limit)
         if local_result is not None:
             local_result["project_id"] = self._binding.project_id
             local_result["workspace_binding_id"] = (
                 self._binding.backend_workspace_binding_id
             )
-            if scope == "organism":
-                local_result["scope"] = scope
             if backend_error:
                 local_result["backend_live_error"] = backend_error
             return tool_result(local_result)
@@ -1543,18 +1526,14 @@ class HadesBackendMemoryProvider(MemoryProvider):
             direction=direction,
             max_depth=max_depth,
             limit=limit,
-            scope=scope,
         )
         if backend_result is not None:
-            active_identity: dict[str, Any] | None = None
-            if scope == "project":
-                try:
-                    active_identity = self._active_graph_identity(scope)
-                except Exception:
-                    active_identity = None
-            validation_error = _authoritative_scope_topology_error(
+            try:
+                active_identity = self._active_graph_identity(scope)
+            except Exception:
+                active_identity = None
+            validation_error = _authoritative_project_topology_error(
                 backend_result,
-                scope=scope,
                 handle=None,
                 project_id=self._binding.project_id,
                 workspace_binding_id=self._binding.backend_workspace_binding_id,
@@ -1566,13 +1545,10 @@ class HadesBackendMemoryProvider(MemoryProvider):
                         project_id=self._binding.project_id,
                         workspace_binding_id=self._binding.backend_workspace_binding_id,
                         error=validation_error,
-                        scope=scope,
                         search=False,
                     )
                 )
             result = _tool_result_from_backend_graph_traverse(backend_result)
-            if scope == "organism":
-                result["scope"] = scope
             return tool_result(result)
 
         local_result = self._local_graph_traverse(
@@ -1580,15 +1556,12 @@ class HadesBackendMemoryProvider(MemoryProvider):
             direction=direction,
             max_depth=max_depth,
             limit=limit,
-            scope=scope,
         )
         if local_result is not None:
             local_result["project_id"] = self._binding.project_id
             local_result["workspace_binding_id"] = (
                 self._binding.backend_workspace_binding_id
             )
-            if scope == "organism":
-                local_result["scope"] = scope
             if backend_error:
                 local_result["backend_live_error"] = backend_error
             return tool_result(local_result)
@@ -1640,29 +1613,12 @@ class HadesBackendMemoryProvider(MemoryProvider):
 
         return sources
 
-    @staticmethod
-    def _local_organism_graph_sources() -> list[dict[str, Any]]:
-        try:
-            artifact = OrganismRevisionStore().current()
-        except (OSError, ValueError):
-            return []
-        if artifact is None:
-            return []
-        contract = artifact.get("organism_contract")
-        revision_id = str(contract.get("revision_id") or ORGANISM_SCHEMA) if isinstance(contract, dict) else ORGANISM_SCHEMA
-        return [{"origin": "organism_revision", "job_id": revision_id, "item": artifact}]
-
-    def _graph_sources_for_scope(self, scope: str) -> list[dict[str, Any]]:
-        if scope == "organism":
-            return self._local_organism_graph_sources()
-        return self._local_graph_sources()
-
-    def _local_graph_search(self, *, query: str, scope: str, limit: int) -> dict[str, Any] | None:
+    def _local_graph_search(self, *, query: str, limit: int) -> dict[str, Any] | None:
         return _local_graph_search_response(
-            self._graph_sources_for_scope(scope),
+            self._local_graph_sources(),
             query=query,
             limit=limit,
-            active_graph_identity=self._active_graph_identity(scope),
+            active_graph_identity=self._active_graph_identity("project"),
         )
 
     def _local_graph_traverse(
@@ -1672,19 +1628,18 @@ class HadesBackendMemoryProvider(MemoryProvider):
         direction: str,
         max_depth: int,
         limit: int,
-        scope: str,
     ) -> dict[str, Any] | None:
         return _local_graph_traverse_response(
-            self._graph_sources_for_scope(scope),
+            self._local_graph_sources(),
             start=start,
             direction=direction,
             max_depth=max_depth,
             limit=limit,
-            active_graph_identity=self._active_graph_identity(scope),
+            active_graph_identity=self._active_graph_identity("project"),
         )
 
     def _active_graph_identity(self, scope: str) -> dict[str, Any] | None:
-        if scope == "organism" or self._binding is None:
+        if self._binding is None:
             return None
         with db.connect_closing() as conn:
             return db.get_sync_state(
@@ -1848,7 +1803,6 @@ class HadesBackendMemoryProvider(MemoryProvider):
         direction: str,
         max_depth: int,
         limit: int,
-        scope: str,
     ) -> tuple[dict[str, Any] | None, str | None]:
         if self._binding is None:
             return None, None
@@ -1863,8 +1817,6 @@ class HadesBackendMemoryProvider(MemoryProvider):
                     "max_depth": max_depth,
                     "limit": limit,
                 }
-                if scope == "organism":
-                    payload["scope"] = scope
                 response = client.graph_traverse(
                     **payload,
                 )
@@ -2743,7 +2695,6 @@ def _backend_invalid_graph_response(
     project_id: str,
     workspace_binding_id: str,
     error: str,
-    scope: str,
     search: bool,
 ) -> dict[str, Any]:
     result: dict[str, Any] = {
@@ -2753,8 +2704,6 @@ def _backend_invalid_graph_response(
         "message": "Hades backend returned an invalid graph response.",
         "backend_topology_error": error,
     }
-    if scope == "organism":
-        result["scope"] = scope
     if search:
         result["items"] = []
         result["count"] = 0
@@ -2799,7 +2748,6 @@ def _ready_v2_identity_error(
 def _graph_search_boundary_error(
     response: dict[str, Any],
     *,
-    scope: str,
     project_id: str,
     workspace_binding_id: str,
     active_identity: dict[str, Any] | None,
@@ -2818,9 +2766,6 @@ def _graph_search_boundary_error(
         )
         if envelope_error:
             return envelope_error
-    if scope != "project":
-        return None
-
     for item in items:
         if _item_schema(item) != "hades.code_graph.v2":
             continue
@@ -2983,39 +2928,26 @@ def _topology_records_error(
     return None
 
 
-def _authoritative_scope_topology_error(
+def _authoritative_project_topology_error(
     response: dict[str, Any],
     *,
-    scope: str,
     handle: str | None,
     project_id: str,
     workspace_binding_id: str,
     active_identity: dict[str, Any] | None,
 ) -> str | None:
-    if scope == "project":
-        validation_error = _authoritative_v2_graph_error(
-            response,
-            project_id=project_id,
-            workspace_binding_id=workspace_binding_id,
-            active_identity=active_identity,
-        )
-        require_coverage = True
-    else:
-        if response.get("schema") != ORGANISM_SCHEMA:
-            return f"graph topology schema is not {ORGANISM_SCHEMA}"
-        validation_error = _linked_graph_envelope_error(
-            response,
-            project_id=project_id,
-            workspace_binding_id=workspace_binding_id,
-            context="organism graph topology",
-        )
-        require_coverage = False
+    validation_error = _authoritative_v2_graph_error(
+        response,
+        project_id=project_id,
+        workspace_binding_id=workspace_binding_id,
+        active_identity=active_identity,
+    )
     if validation_error:
         return validation_error
     return _topology_records_error(
         response,
         handle=handle,
-        require_coverage=require_coverage,
+        require_coverage=True,
     )
 
 
@@ -3380,33 +3312,6 @@ def _local_graph_build(
                     }),
                 })
             continue
-
-        if schema == ORGANISM_SCHEMA:
-            for graph_node in graph.get("nodes") or []:
-                if not isinstance(graph_node, dict):
-                    continue
-                properties = (
-                    graph_node.get("properties")
-                    if isinstance(graph_node.get("properties"), dict)
-                    else {}
-                )
-                _local_graph_add_node(
-                    nodes,
-                    graph_node.get("id"),
-                    kind=str(graph_node.get("kind") or "graph_node"),
-                    label=graph_node.get("label"),
-                    path=properties.get("path"),
-                    attributes={
-                        "owner": graph_node.get("owner"),
-                        "generation_scope": graph_node.get("generation_scope"),
-                        "state": graph_node.get("state"),
-                        "evidence_refs": graph_node.get("evidence_refs"),
-                        "properties": properties,
-                        "verified_at": graph_node.get("verified_at"),
-                        "schema": schema,
-                        "artifact_id": artifact_id,
-                    },
-                )
 
         for route in graph.get("routes") or []:
             if not isinstance(route, dict):

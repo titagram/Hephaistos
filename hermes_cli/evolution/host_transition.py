@@ -3,13 +3,12 @@
 Owned by ``hermes_cli/evolution``.  Not a model command or core tool.
 Called by the Classic CLI host flow and the gateway-owned
 ``TelosCoordinator``.  No assert as authorization.  No env flag,
-global registry, importable capability token, receipt, clarify,
+global registry, caller-supplied authority token, receipt, clarify,
 or raw SQL as authority.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 from dataclasses import dataclass
@@ -23,6 +22,11 @@ if TYPE_CHECKING:
     from .telos_store import TelosStore
 
 logger = logging.getLogger("evolution.host_transition")
+
+# Held only by this host-side service.  It is not serialisable, persisted, or
+# available to browser/CLI command inputs; telos_store verifies identity before
+# any pointer write.
+_TELOS_POINTER_CAPABILITY = object()
 
 
 def _utcnow() -> str:
@@ -64,7 +68,7 @@ def perform_telos_transition(
         TelosApprovalError,
         compute_context_digest,
     )
-    from .telos_store import TelosStoreError
+    from .telos_store import TelosStoreError, _publish_host_approved_transition
 
     broker = SqliteTelosApprovalBroker()
 
@@ -261,47 +265,33 @@ def perform_telos_transition(
             message="chain verification fields mismatch",
         )
 
-    # ── Atomically publish active/lkg pointer ──
-    now = _utcnow()
-
-    if action == "activate":
-        if store.active_pointer.exists():
-            current_active = json.loads(
-                store.active_pointer.read_text(encoding="utf-8")
-            )
-            lkg_data = {"digest": current_active["digest"]}
-            tmp_lkg = store.lkg_pointer.with_suffix(".json.tmp")
-            tmp_lkg.write_text(
-                json.dumps(lkg_data, sort_keys=True), encoding="utf-8"
-            )
-            tmp_lkg.chmod(0o600)
-            tmp_lkg.rename(store.lkg_pointer)
-
-        active_data = {
-            "digest": telos_digest,
-            "activated_at": now,
-            "grant_id": grant_id,
-        }
-        tmp = store.active_pointer.with_suffix(".json.tmp")
-        tmp.write_text(
-            json.dumps(active_data, sort_keys=True), encoding="utf-8"
+    # ── Atomically publish active/lkg pointer through the host-only bridge ──
+    # The request was validated above without mutating authority records.  The
+    # bridge repeats revision proof immediately before the first Telos write,
+    # and accepts only this in-memory host-transition capability.
+    try:
+        _publish_host_approved_transition(
+            store,
+            capability=_TELOS_POINTER_CAPABILITY,
+            organism_id=organism_id,
+            digest=telos_digest,
+            grant_id=grant_id,
+            action=action,
+            now=_utcnow(),
         )
-        tmp.chmod(0o600)
-        tmp.rename(store.active_pointer)
-
-    elif action == "rollback":
-        active_data = {
-            "digest": telos_digest,
-            "activated_at": now,
-            "grant_id": grant_id,
-            "rollback": True,
-        }
-        tmp = store.active_pointer.with_suffix(".json.tmp")
-        tmp.write_text(
-            json.dumps(active_data, sort_keys=True), encoding="utf-8"
+    except TelosStoreError as exc:
+        if str(exc) == "telos_revision_changed":
+            return TelosTransitionResult(
+                status="rejected",
+                request_id=request_id,
+                message="revision changed before publication",
+            )
+        logger.warning("Telos pointer publication failed safely: %s", exc)
+        return TelosTransitionResult(
+            status="rejected",
+            request_id=request_id,
+            message="pointer publication failed",
         )
-        tmp.chmod(0o600)
-        tmp.rename(store.active_pointer)
 
     return TelosTransitionResult(
         status="approved",

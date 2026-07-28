@@ -229,8 +229,27 @@ class SuggestionRepository:
         # Connection used only for validation; close it explicitly
         connection.close()
         self.db_path = db_path
+        self._verified_read_connection: sqlite3.Connection | None = None
+
+    @classmethod
+    def from_verified_read_connection(
+        cls, connection: sqlite3.Connection
+    ) -> "SuggestionRepository":
+        """Read suggestions through a caller-owned, already-verified connection.
+
+        This avoids reopening a mutable SQLite source when a higher-level reader
+        has already established an immutable snapshot.  The returned repository
+        never closes the borrowed connection; its owner remains responsible for
+        its lifetime.
+        """
+        repository = cls.__new__(cls)
+        repository.db_path = None
+        repository._verified_read_connection = connection
+        return repository
 
     def _get_connection(self) -> sqlite3.Connection:
+        if self.db_path is None:
+            raise SuggestionRepositoryError("observer_read_only_connection")
         try:
             conn = _connect_existing(self.db_path)
         except SuggestionRepositoryError:
@@ -238,6 +257,12 @@ class SuggestionRepository:
         except Exception:
             raise SuggestionRepositoryError("observer_database_missing") from None
         return conn
+
+    def _get_read_connection(self) -> tuple[sqlite3.Connection, bool]:
+        """Return a connection and whether this repository must close it."""
+        if self._verified_read_connection is not None:
+            return self._verified_read_connection, False
+        return self._get_connection(), True
 
     def insert_observation_envelope(self, envelope: ObservationEnvelope) -> bool:
         validate_observation_envelope(envelope)
@@ -289,57 +314,106 @@ class SuggestionRepository:
         return True
 
     def get_envelopes_for_opportunity(self, capability_key: str, operation_key: str, outcome_key: str, constraint_key: str) -> list[ObservationEnvelope]:
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            SELECT canonical_envelope_json FROM observation_envelopes
-            WHERE capability_key = ? AND operation_key = ? AND outcome_key = ? AND constraint_key = ?
-            ORDER BY occurred_at ASC
-            """,
-            (capability_key, operation_key, outcome_key, constraint_key),
-        )
-        rows = cursor.fetchall()
-        conn.close()
+        conn, should_close = self._get_read_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT canonical_envelope_json FROM observation_envelopes
+                WHERE capability_key = ? AND operation_key = ? AND outcome_key = ? AND constraint_key = ?
+                ORDER BY occurred_at ASC
+                """,
+                (capability_key, operation_key, outcome_key, constraint_key),
+            )
+            rows = cursor.fetchall()
+        finally:
+            if should_close:
+                conn.close()
         return [observation_envelope_from_dict(json.loads(row[0])) for row in rows]
 
     def list_all_envelopes(self) -> list[ObservationEnvelope]:
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT canonical_envelope_json FROM observation_envelopes ORDER BY occurred_at ASC")
-        rows = cursor.fetchall()
-        conn.close()
+        conn, should_close = self._get_read_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT canonical_envelope_json FROM observation_envelopes ORDER BY occurred_at ASC")
+            rows = cursor.fetchall()
+        finally:
+            if should_close:
+                conn.close()
         return [observation_envelope_from_dict(json.loads(row[0])) for row in rows]
 
     def get_suggestion_by_id(self, suggestion_id: str) -> SuggestionRecord | None:
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM opportunity_suggestions WHERE suggestion_id = ?", (suggestion_id,))
-        row = cursor.fetchone()
-        conn.close()
+        conn, should_close = self._get_read_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM opportunity_suggestions WHERE suggestion_id = ?", (suggestion_id,))
+            row = cursor.fetchone()
+        finally:
+            if should_close:
+                conn.close()
         if not row:
             return None
         return self._record_from_row(row)
 
     def get_suggestion_by_opportunity_key(self, opportunity_key: str) -> SuggestionRecord | None:
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM opportunity_suggestions WHERE opportunity_key = ?", (opportunity_key,))
-        row = cursor.fetchone()
-        conn.close()
+        conn, should_close = self._get_read_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM opportunity_suggestions WHERE opportunity_key = ?", (opportunity_key,))
+            row = cursor.fetchone()
+        finally:
+            if should_close:
+                conn.close()
         if not row:
             return None
         return self._record_from_row(row)
 
-    def list_suggestions(self, state: str | None = None) -> list[SuggestionRecord]:
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        if state:
-            cursor.execute("SELECT * FROM opportunity_suggestions WHERE state = ? ORDER BY score DESC, created_at ASC", (state,))
-        else:
-            cursor.execute("SELECT * FROM opportunity_suggestions ORDER BY score DESC, created_at ASC")
-        rows = cursor.fetchall()
-        conn.close()
+    def count_suggestions(self, state: str | None = None) -> int:
+        """Count suggestions without materializing their records."""
+        conn, should_close = self._get_read_connection()
+        try:
+            if state:
+                row = conn.execute(
+                    "SELECT COUNT(*) FROM opportunity_suggestions WHERE state = ?",
+                    (state,),
+                ).fetchone()
+            else:
+                row = conn.execute("SELECT COUNT(*) FROM opportunity_suggestions").fetchone()
+        finally:
+            if should_close:
+                conn.close()
+        return int(row[0])
+
+    def list_suggestions(
+        self, state: str | None = None, *, limit: int | None = None
+    ) -> list[SuggestionRecord]:
+        if limit is not None and (
+            isinstance(limit, bool) or not isinstance(limit, int) or limit < 1
+        ):
+            raise SuggestionRepositoryError("invalid_suggestion_list_limit")
+        conn, should_close = self._get_read_connection()
+        try:
+            cursor = conn.cursor()
+            if state:
+                query = (
+                    "SELECT * FROM opportunity_suggestions "
+                    "WHERE state = ? ORDER BY score DESC, created_at ASC"
+                )
+                parameters: tuple[object, ...] = (state,)
+            else:
+                query = (
+                    "SELECT * FROM opportunity_suggestions "
+                    "ORDER BY score DESC, created_at ASC"
+                )
+                parameters = ()
+            if limit is not None:
+                query += " LIMIT ?"
+                parameters += (limit,)
+            cursor.execute(query, parameters)
+            rows = cursor.fetchall()
+        finally:
+            if should_close:
+                conn.close()
         return [self._record_from_row(r) for r in rows]
 
     def upsert_suggestion(

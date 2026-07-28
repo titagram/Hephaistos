@@ -58,6 +58,7 @@ def test_evolution_doctor_reports_backend_independent_local_storage(
 def test_evolution_command_telos_actions(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     org_root = tmp_path / "organism"
+    org_root.mkdir(mode=0o700)
     tstore = TelosStore(org_root)
 
     telos = TelosRevision(

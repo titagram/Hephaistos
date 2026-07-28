@@ -6,7 +6,9 @@ from agent.gnothi_prompt import build_gnothi_prompt
 def test_bare_request_builds_read_only_evidence_summary_prompt():
     prompt = build_gnothi_prompt("")
 
-    assert "scope=organism" in prompt
+    assert "scope=organism" not in prompt
+    assert "local Hades CLI" in prompt
+    assert "do not use graph tools" in prompt
     assert "read-only" in prompt.lower()
     assert "evidence" in prompt.lower()
     assert "status" in prompt.lower()

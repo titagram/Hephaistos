@@ -80,6 +80,26 @@ def test_verify_chain_has_the_exact_public_signature() -> None:
     ]
 
 
+def test_bounded_chain_verifier_rejects_an_oversized_valid_chain(tmp_path) -> None:
+    """Dashboard callers cannot mistake a partial chain prefix for a valid chain."""
+    ledger = EvolutionLedger(tmp_path / "evolution.db")
+    attempt_id = ledger.create_attempt("manual", "ticket-1")
+    ledger.append_event(event(event_id="event-1", attempt_id=attempt_id))
+    ledger.append_event(event(event_id="event-2", attempt_id=attempt_id))
+    queries: list[str] = []
+    ledger.connection.set_trace_callback(queries.append)
+
+    with pytest.raises(EvolutionLedgerError, match="lifecycle_event_read_limit"):
+        ledger.verify_chain_bounded(max_events=1)
+
+    assert any(
+        "SELECT * FROM lifecycle_events ORDER BY event_sequence LIMIT 2"
+        in " ".join(query.split())
+        for query in queries
+    )
+    assert ledger.verify_chain() == []
+
+
 def test_authorization_grants_are_immutable_in_real_sqlite(tmp_path) -> None:
     ledger = EvolutionLedger(tmp_path / "evolution.db")
     attempt_id = ledger.create_attempt("manual", "ticket-1")

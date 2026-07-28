@@ -912,23 +912,30 @@ def test_sync_runner_uploads_baseline_artifacts_without_remote_jobs(monkeypatch,
     assert "verify_project_wiki" in fake.pull_payloads[0]["capabilities"]
 
 
-def test_sync_runner_uploads_current_organism_with_dedupe_and_safe_manifest(
+def test_sync_runner_keeps_organism_local_when_legacy_backend_advertises_scope(
     monkeypatch,
     tmp_path,
 ):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
 
+    import subprocess
+
     from hermes_cli import hades_backend_db as hdb
     from hermes_cli.gnothi.contract import add_node, new_artifact
     from hermes_cli.gnothi.store import OrganismRevisionStore
-    from hermes_cli.hades_backend_sync import (
-        _artifact_upload_cache_key,
-        run_backend_sync,
-    )
+    from hermes_cli.hades_backend_sync import run_backend_sync
 
     workspace = tmp_path / "repo"
     workspace.mkdir()
-    head = "a" * 40
+    (workspace / "README.md").write_text("hello\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=workspace, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=workspace, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=workspace, check=True)
+    subprocess.run(["git", "add", "README.md"], cwd=workspace, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=workspace, check=True)
+    head = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=workspace, text=True
+    ).strip()
     with hdb.connect_closing() as conn:
         hdb.save_agent(
             conn,
@@ -937,11 +944,7 @@ def test_sync_runner_uploads_current_organism_with_dedupe_and_safe_manifest(
             base_url="https://backend.example",
             label="dev",
             token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
-            capabilities={
-                "artifacts": True,
-                "sync_git_tree": False,
-                "populate_backend_ast": False,
-            },
+            capabilities={"artifacts": True, "jobs": True},
         )
         hdb.upsert_workspace_binding(
             conn,
@@ -957,9 +960,9 @@ def test_sync_runner_uploads_current_organism_with_dedupe_and_safe_manifest(
             backend_workspace_binding_id="wb_1",
         )
 
-    def artifact(revision: str, semantic: str):
+    def organism_artifact():
         value = new_artifact(
-            revision_id=revision,
+            revision_id="rev-org-1",
             generation_id=f"git:{head}",
             generation_scope="stable",
             head_commit=head,
@@ -967,8 +970,8 @@ def test_sync_runner_uploads_current_organism_with_dedupe_and_safe_manifest(
         )
         value["organism_contract"].update(
             status="current",
-            coverage={"source": {"status": "current", "fingerprint": semantic}},
-            semantic_fingerprint=semantic,
+            coverage={"source": {"status": "current", "fingerprint": "sha256:first"}},
+            semantic_fingerprint="sha256:first",
         )
         value["evidence"] = []
         add_node(
@@ -1004,17 +1007,17 @@ def test_sync_runner_uploads_current_organism_with_dedupe_and_safe_manifest(
         return value
 
     store = OrganismRevisionStore()
-    store.publish(artifact("rev-org-1", "sha256:first"))
+    store.publish(organism_artifact())
 
     class FakeClient:
         def __init__(self):
-            self.lookups = []
-            self.uploads = []
+            self.artifact_calls = []
 
         def capabilities(self):
             return {
                 "organism_graph_schema": "hades.organism_graph.v1",
                 "graph_scopes": ["project", "organism"],
+                "persephone_agent_queue_v1": True,
             }
 
         def memory_snapshot(self, **payload):
@@ -1024,40 +1027,42 @@ def test_sync_runner_uploads_current_organism_with_dedupe_and_safe_manifest(
             return {"events": []}
 
         def pull_jobs(self, **payload):
-            return {"jobs": []}
+            return {
+                "jobs": [
+                    {
+                        "job_id": "job_tree",
+                        "capability": "sync_git_tree",
+                        "payload": {"max_files": 10, "max_bytes": 20_000},
+                    }
+                ]
+            }
+
+        def update_job_status(self, job_id, **payload):
+            return {}
+
+        def submit_job_result(self, job_id, **payload):
+            return {}
 
         def artifact_lookup(self, **payload):
-            self.lookups.append(payload)
             return {"exists": False}
 
         def upload_artifact(self, **payload):
-            self.uploads.append(payload)
-            return {"artifact": {"id": f"artifact_{len(self.uploads)}"}}
+            self.artifact_calls.append({"payload": payload})
+            return {"artifact": {"id": f"artifact_{len(self.artifact_calls)}"}}
 
     fake = FakeClient()
-    first = run_backend_sync(client_factory=lambda: fake, quiet=True)
-    unchanged = run_backend_sync(client_factory=lambda: fake, quiet=True)
-    store.publish(artifact("rev-org-2", "sha256:changed"))
-    changed = run_backend_sync(client_factory=lambda: fake, quiet=True)
+    result = run_backend_sync(client_factory=lambda: fake, quiet=True)
 
-    assert first.summary["artifacts_uploaded"] == 1
-    assert unchanged.summary["artifacts_skipped"] == 1
-    assert changed.summary["artifacts_uploaded"] == 1
-    assert [upload["schema"] for upload in fake.uploads] == [
-        "hades.organism_graph.v1",
-        "hades.organism_graph.v1",
-    ]
-    assert len(fake.lookups) == 2
-    assert all(len(lookup["sha256"]) == 64 for lookup in fake.lookups)
-
-    with hdb.connect_closing() as conn:
-        binding = hdb.get_binding_for_backend_id(conn, "wb_1")
-        cache = hdb.get_sync_state(
-            conn,
-            _artifact_upload_cache_key(binding, "hades.organism_graph.v1"),
-        )
-    assert cache["file_manifest"]["paths"].keys() == {"src/demo.py"}
-    assert "/private/secret.py" not in str(cache)
+    assert result.exit_code == 0
+    assert any(
+        call["payload"].get("artifact", {}).get("schema") == "hades.git_tree.v1"
+        for call in fake.artifact_calls
+    )
+    assert not any(
+        call["payload"].get("artifact", {}).get("schema")
+        == "hades.organism_graph.v1"
+        for call in fake.artifact_calls
+    )
 
 
 def test_sync_runner_uses_binding_scoped_agent_for_each_project(monkeypatch, tmp_path):

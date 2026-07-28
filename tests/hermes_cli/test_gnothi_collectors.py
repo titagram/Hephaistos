@@ -1,3 +1,4 @@
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -74,6 +75,64 @@ def test_source_collector_emits_source_anatomy_without_absolute_paths(tmp_path: 
     repeated = SourceCollector().collect(_context(workspace))
     assert repeated.fingerprint == result.fingerprint
     assert SourceCollector().probe_fingerprint(_context(workspace)).startswith("sha256:")
+
+
+def test_source_binding_inspection_does_not_create_an_absent_backend_database(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from hermes_cli.gnothi.collectors import source
+
+    database = tmp_path / "state" / "hades_backend.db"
+    monkeypatch.setattr(source.backend_db, "hades_backend_db_path", lambda: database)
+
+    assert source._binding_for_workspace(tmp_path / "workspace") is None
+    assert not database.exists()
+
+
+@pytest.mark.parametrize("legacy", [False, True], ids=("uninitialized", "legacy"))
+def test_source_binding_inspection_keeps_existing_database_unchanged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    legacy: bool,
+):
+    from hermes_cli.gnothi.collectors import source
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    database = tmp_path / "state" / "hades_backend.db"
+    database.parent.mkdir()
+    writer: sqlite3.Connection | None = None
+    if legacy:
+        writer = sqlite3.connect(database)
+        writer.execute("PRAGMA journal_mode=WAL")
+        writer.execute("CREATE TABLE legacy_marker (value TEXT)")
+        writer.execute("INSERT INTO legacy_marker VALUES ('preserve')")
+        writer.commit()
+    else:
+        database.touch()
+    monkeypatch.setattr(source.backend_db, "hades_backend_db_path", lambda: database)
+
+    artifacts = (
+        database,
+        database.with_name(f"{database.name}-wal"),
+        database.with_name(f"{database.name}-shm"),
+    )
+    before = {
+        path.name: path.read_bytes() if path.exists() else None
+        for path in artifacts
+    }
+
+    try:
+        assert source._binding_for_workspace(workspace) is None
+
+        after = {
+            path.name: path.read_bytes() if path.exists() else None
+            for path in artifacts
+        }
+        assert after == before
+    finally:
+        if writer is not None:
+            writer.close()
 
 
 def test_source_collector_degrades_without_exposing_parser_error(

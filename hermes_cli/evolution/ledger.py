@@ -26,12 +26,17 @@ from .contract import (
     content_digest,
     require_digest,
 )
-from .state_machine import TransitionRequest, validate_transition
+from .state_machine import (
+    TransitionRequest,
+    transition_authorization_kind,
+    validate_transition,
+)
 
 
 SCHEMA_VERSION = 6
 _MAX_DIGESTS = 64
 _VERIFY_BATCH_SIZE = 256
+_MAX_BLUEPRINT_PROPOSAL_EVENTS = 1
 _PATH_SCHEME_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*:")
 _TIMESTAMP_PATTERN = re.compile(
     r"[0-9]{4}-[0-9]{2}-[0-9]{2}T"
@@ -2281,10 +2286,17 @@ class EvolutionLedger:
                     raise EvolutionLedgerError("incoherent_blueprint_draft")
 
                 events = connection.execute(
-                    "SELECT * FROM lifecycle_events WHERE attempt_id = ?",
-                    (row["attempt_id"],),
+                    """
+                    SELECT * FROM lifecycle_events
+                    WHERE attempt_id = ?
+                    LIMIT ?
+                    """,
+                    (
+                        row["attempt_id"],
+                        _MAX_BLUEPRINT_PROPOSAL_EVENTS + 1,
+                    ),
                 ).fetchall()
-                if len(events) != 1:
+                if len(events) != _MAX_BLUEPRINT_PROPOSAL_EVENTS:
                     raise EvolutionLedgerError("incoherent_blueprint_draft")
                 event_row = events[0]
                 try:
@@ -2533,6 +2545,20 @@ class EvolutionLedger:
             request.attempt_id, limit=256, code="invalid_event"
         )
         with self.transaction() as connection:
+            required_kind = transition_authorization_kind(request)
+            if required_kind is not None:
+                grant = connection.execute(
+                    """
+                    SELECT 1
+                    FROM authorization_grants
+                    WHERE grant_id = ? AND attempt_id = ? AND grant_kind = ?
+                    """,
+                    (request.authorization_id, attempt_id, required_kind),
+                ).fetchone()
+                if grant is None:
+                    raise EvolutionLedgerError(
+                        "transition_authorization_grant_mismatch"
+                    )
             updated = connection.execute(
                 """
                 UPDATE attempts
@@ -2665,6 +2691,44 @@ class EvolutionLedger:
                     previous = self._verify_records(
                         iter((record,)), previous=previous, errors=errors
                     )
+        return errors
+
+    def verify_chain_bounded(self, *, max_events: int) -> list[str]:
+        """Verify a complete chain only when it fits an explicit read budget."""
+        if (
+            isinstance(max_events, bool)
+            or not isinstance(max_events, int)
+            or max_events < 1
+        ):
+            raise EvolutionLedgerError("invalid_lifecycle_event_read_limit")
+        with self._lock:
+            rows = self.connection.execute(
+                """
+                SELECT * FROM lifecycle_events
+                ORDER BY event_sequence
+                LIMIT ?
+                """,
+                (max_events + 1,),
+            ).fetchmany(max_events + 1)
+            if len(rows) > max_events:
+                raise EvolutionLedgerError("lifecycle_event_read_limit")
+
+            errors: list[str] = []
+            previous: str | None = None
+            for row in rows:
+                try:
+                    record = self._stored(row)
+                except (ValueError, TypeError, json.JSONDecodeError):
+                    errors.append(str(row["event_sequence"]))
+                    previous = (
+                        row["event_digest"]
+                        if isinstance(row["event_digest"], str)
+                        else None
+                    )
+                    continue
+                previous = self._verify_records(
+                    iter((record,)), previous=previous, errors=errors
+                )
         return errors
 
     def prove_committed_event(self, expected: StoredEvent) -> StoredEvent:

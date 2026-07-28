@@ -1,4 +1,7 @@
+import copy
 from pathlib import Path
+
+import pytest
 
 from hermes_cli.gnothi.contract import add_edge, add_node, new_artifact
 from hermes_cli.gnothi.query import OrganismQuery
@@ -77,3 +80,375 @@ def test_query_status_inspect_explain_and_diff(tmp_path: Path):
     assert diff["changed_state"][0]["id"] == "capability:terminal"
     assert diff["quality_changes"] == []
     assert diff["truncated"] is False
+
+
+def _graph_artifact(revision: str = "rev-graph") -> dict:
+    artifact = _artifact(revision)
+    artifact["nodes"] = []
+    artifact["edges"] = []
+    add_node(
+        artifact,
+        node_id="capability:alpha",
+        kind="capability",
+        label="Alpha Capability",
+        owner_class="core",
+        owner_id="hermes",
+        state={"available": True},
+        evidence_refs=[
+            *[f"evidence:{index:02d}" for index in range(24)],
+        ],
+    )
+    add_node(
+        artifact,
+        node_id="capability:beta",
+        kind="capability",
+        label="Beta capability",
+        owner_class="core",
+        owner_id="hermes",
+        state={"available": True},
+        evidence_refs=["evidence:sk-abcdefghijklmnopqrstuvwxyz1234567890"],
+    )
+    add_node(
+        artifact,
+        node_id="capability:zeta",
+        kind="capability",
+        label="Zeta capability",
+        owner_class="core",
+        owner_id="hermes",
+        state={"available": True},
+        evidence_refs=["evidence:zeta"],
+    )
+    add_node(
+        artifact,
+        node_id="provider:terminal",
+        kind="provider",
+        label="Terminal provider",
+        owner_class="core",
+        owner_id="hermes",
+        state={"available": True},
+        evidence_refs=["evidence:provider"],
+    )
+    add_node(
+        artifact,
+        node_id="runtime:local",
+        kind="runtime",
+        label="Local runtime",
+        owner_class="core",
+        owner_id="hermes",
+        state={"available": False, "degraded": True},
+        evidence_refs=["evidence:runtime"],
+    )
+    add_edge(
+        artifact,
+        edge_id="edge:provides",
+        kind="provides",
+        source="provider:terminal",
+        target="capability:alpha",
+    )
+    add_edge(
+        artifact,
+        edge_id="edge:requires",
+        kind="requires",
+        source="capability:alpha",
+        target="runtime:local",
+    )
+    add_edge(
+        artifact,
+        edge_id="edge:depends",
+        kind="depends_on",
+        source="capability:beta",
+        target="capability:alpha",
+    )
+    add_edge(
+        artifact,
+        edge_id="edge:ignored",
+        kind="observed_on",
+        source="capability:zeta",
+        target="capability:alpha",
+    )
+    return artifact
+
+
+def test_subgraph_rejects_out_of_range_depth_and_limit(tmp_path: Path) -> None:
+    store = OrganismRevisionStore(root=tmp_path)
+    store.publish(_graph_artifact())
+    query = OrganismQuery(store)
+
+    for depth in (-1, 5):
+        with pytest.raises(ValueError, match="invalid graph depth"):
+            query.subgraph(
+                root_id=None,
+                depth=depth,
+                limit=1,
+                kinds=frozenset(),
+                search="",
+            )
+    for limit in (0, 201):
+        with pytest.raises(ValueError, match="invalid graph limit"):
+            query.subgraph(
+                root_id=None,
+                depth=0,
+                limit=limit,
+                kinds=frozenset(),
+                search="",
+            )
+
+
+def test_subgraph_is_stable_bounded_and_does_not_mutate_artifact(tmp_path: Path) -> None:
+    store = OrganismRevisionStore(root=tmp_path)
+    artifact = _graph_artifact()
+    store.publish(artifact)
+    query = OrganismQuery(store)
+    before = copy.deepcopy(store.current())
+
+    result = query.subgraph(
+        root_id=None,
+        depth=0,
+        limit=2,
+        kinds=frozenset(),
+        search="",
+    )
+
+    assert [node["id"] for node in result["nodes"]] == [
+        "capability:alpha",
+        "capability:beta",
+    ]
+    assert result["total_nodes"] == 5
+    assert result["total_edges"] == 3
+    assert result["truncated"] is True
+    assert result["edges"] == [
+        {
+            "id": "edge:depends",
+            "kind": "depends_on",
+            "from": "capability:beta",
+            "to": "capability:alpha",
+            "evidence_refs": [],
+        }
+    ]
+    assert store.current() == before
+
+
+def test_subgraph_traverses_both_dependency_directions_and_sanitizes_public_rows(
+    tmp_path: Path,
+) -> None:
+    store = OrganismRevisionStore(root=tmp_path)
+    store.publish(_graph_artifact())
+    query = OrganismQuery(store)
+
+    rooted = query.subgraph(
+        root_id="capability:alpha",
+        depth=1,
+        limit=20,
+        kinds=frozenset(),
+        search="",
+    )
+
+    assert [node["id"] for node in rooted["nodes"]] == [
+        "capability:alpha",
+        "capability:beta",
+        "provider:terminal",
+        "runtime:local",
+    ]
+    assert {edge["kind"] for edge in rooted["edges"]} == {
+        "provides",
+        "requires",
+        "depends_on",
+    }
+    assert [node["id"] for node in rooted["blockers"]] == ["runtime:local"]
+
+    alpha = next(node for node in rooted["nodes"] if node["id"] == "capability:alpha")
+    assert len(alpha["evidence_refs"]) == 20
+    beta = next(node for node in rooted["nodes"] if node["id"] == "capability:beta")
+    assert "abcdefghijklmnopqrstuvwxyz1234567890" not in str(beta["evidence_refs"])
+
+    capabilities = query.subgraph(
+        root_id="capability:alpha",
+        depth=1,
+        limit=20,
+        kinds=frozenset({"capability"}),
+        search="",
+    )
+    assert [node["id"] for node in capabilities["nodes"]] == [
+        "capability:alpha",
+        "capability:beta",
+    ]
+    assert capabilities["edges"] == [
+        {
+            "id": "edge:depends",
+            "kind": "depends_on",
+            "from": "capability:beta",
+            "to": "capability:alpha",
+            "evidence_refs": [],
+        }
+    ]
+
+    by_id = query.subgraph(
+        root_id=None,
+        depth=0,
+        limit=20,
+        kinds=frozenset(),
+        search="capability:ALPHA",
+    )
+    by_label = query.subgraph(
+        root_id=None,
+        depth=0,
+        limit=20,
+        kinds=frozenset(),
+        search="bEtA",
+    )
+    assert [node["id"] for node in by_id["nodes"]] == ["capability:alpha"]
+    assert [node["id"] for node in by_label["nodes"]] == ["capability:beta"]
+
+
+def test_subgraph_redacts_network_paths_without_consuming_evidence_context(
+    tmp_path: Path,
+) -> None:
+    store = OrganismRevisionStore(root=tmp_path)
+    artifact = _graph_artifact()
+    artifact["nodes"][0]["evidence_refs"] = [
+        r'Open "\\server\share\secret\plugin.py:42:7" and https://example.test/docs'
+    ]
+    store.publish(artifact)
+
+    result = OrganismQuery(store).subgraph(
+        root_id="capability:alpha",
+        depth=0,
+        limit=20,
+        kinds=frozenset(),
+        search="",
+    )
+
+    assert result["nodes"][0]["evidence_refs"] == [
+        'Open "[ABSOLUTE_PATH]:42:7" and https://example.test/docs'
+    ]
+
+
+def test_subgraph_redacts_file_uris_at_the_public_query_boundary(tmp_path: Path) -> None:
+    store = OrganismRevisionStore(root=tmp_path)
+    artifact = _graph_artifact()
+    node = artifact["nodes"][0]
+    node["label"] = "Source file:///private/secret/plugin.py:42 is unavailable"
+    node["evidence_refs"] = [
+        "FILE:///C:/Users/alice/private/tool.py:8:3; "
+        "file://server/share/private/trace.log:4",
+    ]
+    store.publish(artifact)
+
+    result = OrganismQuery(store).subgraph(
+        root_id="capability:alpha",
+        depth=0,
+        limit=1,
+        kinds=frozenset(),
+        search="",
+    )
+
+    public_node = result["nodes"][0]
+    assert public_node["label"] == "Source [ABSOLUTE_PATH]:42 is unavailable"
+    assert public_node["evidence_refs"] == [
+        "[ABSOLUTE_PATH]:8:3; [ABSOLUTE_PATH]:4",
+    ]
+
+
+def test_subgraph_uses_the_supplied_immutable_artifact(tmp_path: Path) -> None:
+    store = OrganismRevisionStore(root=tmp_path)
+    first = _graph_artifact("rev-graph-first")
+    first["nodes"][0]["label"] = "Frozen Alpha"
+    second = _graph_artifact("rev-graph-second")
+    second["nodes"][0]["label"] = "Current Alpha"
+    store.publish(first)
+    frozen = store.current()
+    assert frozen is not None
+    store.publish(second)
+
+    result = OrganismQuery(store, artifact=frozen).subgraph(
+        root_id="capability:alpha",
+        depth=0,
+        limit=20,
+        kinds=frozenset(),
+        search="",
+    )
+
+    assert result["nodes"][0]["label"] == "Frozen Alpha"
+
+
+def test_subgraph_redacts_embedded_absolute_paths(tmp_path: Path) -> None:
+    store = OrganismRevisionStore(root=tmp_path)
+    artifact = _graph_artifact()
+    node = artifact["nodes"][0]
+    node["label"] = "Source at /private/secret/plugin.py is unavailable"
+    node["evidence_refs"] = [
+        r"Inspect C:\\Users\\secret\\plugin.py before retrying",
+    ]
+    store.publish(artifact)
+
+    result = OrganismQuery(store).subgraph(
+        root_id="capability:alpha",
+        depth=0,
+        limit=20,
+        kinds=frozenset(),
+        search="",
+    )
+
+    public_node = result["nodes"][0]
+    assert public_node["label"] == "Source at [ABSOLUTE_PATH] is unavailable"
+    assert public_node["evidence_refs"] == [
+        "Inspect [ABSOLUTE_PATH] before retrying",
+    ]
+    assert "/private/secret" not in str(result)
+    assert r"C:\Users\secret" not in str(result)
+
+
+def test_subgraph_accepts_public_owner_class_shape(tmp_path: Path) -> None:
+    store = OrganismRevisionStore(root=tmp_path)
+    artifact = _graph_artifact()
+    node = artifact["nodes"][0]
+    node["owner"] = None
+    node["owner_class"] = "third-party"
+    store.publish(artifact)
+
+    result = OrganismQuery(store).subgraph(
+        root_id="capability:alpha",
+        depth=0,
+        limit=20,
+        kinds=frozenset(),
+        search="",
+    )
+
+    assert result["nodes"][0]["owner_class"] == "third-party"
+
+
+def test_diff_counts_all_dependency_changes_before_bounding_rows(tmp_path: Path) -> None:
+    store = OrganismRevisionStore(root=tmp_path)
+    left = _artifact("rev-dependency-left")
+    right = copy.deepcopy(left)
+    right["organism_contract"]["revision_id"] = "rev-dependency-right"
+    for index in range(201):
+        node_id = f"runtime:dependency-{index:03d}"
+        for artifact in (left, right):
+            add_node(
+                artifact,
+                node_id=node_id,
+                kind="runtime",
+                label=f"Dependency {index:03d}",
+                owner_class="core",
+                owner_id="hermes",
+            )
+        add_edge(
+            right,
+            edge_id=f"edge:dependency-{index:03d}",
+            kind="depends_on",
+            source="provider:terminal",
+            target=node_id,
+        )
+    store.publish(left)
+    store.publish(right)
+
+    result = OrganismQuery(store).diff("rev-dependency-left", "rev-dependency-right")
+
+    assert len(result["dependency_changes"]) == 200
+    assert result["dependency_changes"][0] == (
+        "depends_on",
+        "provider:terminal",
+        "runtime:dependency-000",
+    )
+    assert result["truncated"] is True

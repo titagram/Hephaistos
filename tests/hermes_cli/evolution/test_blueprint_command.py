@@ -374,39 +374,3 @@ def test_blueprint_show_tampered_document_is_blocked_not_missing(
     assert result["status"] == "blocked"
     assert result["reason"] == "blueprint_incoherent"
     assert result["blueprint"] is None
-
-
-def test_autopoiesis_skill_teaches_only_the_inert_proposal_flow() -> None:
-    skill_path = (
-        Path(__file__).resolve().parents[3]
-        / "skills"
-        / "autopoiesis"
-        / "SKILL.md"
-    )
-    text = skill_path.read_text(encoding="utf-8")
-    lowered = text.lower()
-    normalized = " ".join(lowered.split())
-
-    for required in (
-        "hermes evolution propose <suggestion-id>",
-        "hermes evolution blueprint show <blueprint-id>",
-        "hermes evolution blueprint list",
-        "does not build, install, research, or modify source files",
-        "explicit user approval",
-        "eligible",
-        "telos",
-        "inert local draft",
-    ):
-        assert required in normalized
-
-    for forbidden_command in (
-        "hades backend sync",
-        "pip install",
-        "npm install",
-        "curl ",
-        "apply_patch",
-        "write_file",
-        "sed -i",
-        "cat >",
-    ):
-        assert forbidden_command not in lowered

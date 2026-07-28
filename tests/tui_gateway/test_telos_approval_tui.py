@@ -238,6 +238,9 @@ def test_slash_exec_telos_approve_uses_host_dispatch(capture, tmp_path, monkeypa
     """The public slash path creates and emits the same session-bound request."""
     server, buf = capture
     org, org_id = _setup_organism(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "hermes_cli.evolution.organism_home.get_organism_home", lambda: org,
+    )
     revision = _make_telos(org_id, "Slash Dispatch")
     TelosStore(org).save_revision(revision)
 
