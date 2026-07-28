@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   availableActions,
+  coveragePresentation,
   initialView,
+  observerControl,
+  overviewPrimaryAction,
+  priorityBlockerLinks,
+  scanJobProgress,
   organismFacet,
   readinessBlockers,
   snapshotAfterRefreshFailure,
@@ -43,8 +48,8 @@ function snapshot(overrides: Partial<EvolutionSnapshot> = {}): EvolutionSnapshot
 }
 
 describe("Evolution dashboard view model", () => {
-  it("opens on the organism view", () => {
-    expect(initialView()).toBe("organism");
+  it("opens on the readiness overview", () => {
+    expect(initialView()).toBe("overview");
   });
 
   it("orders readiness blockers from the most serious state to the least", () => {
@@ -95,5 +100,58 @@ describe("Evolution dashboard view model", () => {
       "initialize",
     ]);
     expect(availableActions(snapshot({ state: "corrupt", organism: null }))).toEqual([]);
+  });
+
+  it("links priority blockers to the view where they can be investigated", () => {
+    const links = priorityBlockerLinks(snapshot({
+      state: "partial",
+      gnothi: { state: "stale", revision_id: "rev-1", revision_digest: "b".repeat(64), node_count: 2, edge_count: 1 },
+      telos: { state: "missing", active_digest: null, revision_count: 0 },
+    }));
+
+    expect(links).toEqual(expect.arrayContaining([
+      expect.objectContaining({ source: "gnothi", view: "organism" }),
+      expect.objectContaining({ source: "telos", view: "telos" }),
+    ]));
+  });
+
+  it("describes coverage with visible text and an icon, never color alone", () => {
+    expect(coveragePresentation(snapshot().gnothi)).toEqual({
+      icon: "✓",
+      text: "Graph coverage ready",
+    });
+    expect(coveragePresentation(snapshot({
+      gnothi: { state: "partial", revision_id: "rev-1", revision_digest: "b".repeat(64), node_count: 2, edge_count: 1 },
+    }).gnothi)).toEqual({
+      icon: "!",
+      text: "Graph coverage partial",
+    });
+  });
+
+  it("offers pause and resume according to the observer's current enabled state", () => {
+    expect(observerControl(snapshot({ observer: { state: "ready", enabled: true, last_scan_at: null, observation_count: 0 } }))).toEqual({
+      action: "pause",
+      label: "Pause observer",
+    });
+    expect(observerControl(snapshot({ observer: { state: "ready", enabled: false, last_scan_at: null, observation_count: 0 } }))).toEqual({
+      action: "resume",
+      label: "Resume observer",
+    });
+  });
+
+  it("reports observer scans as a tracked job with readable progress", () => {
+    expect(scanJobProgress({
+      job_id: "job-1", kind: "observer_scan", state: "running", progress: 42,
+      created_at: "2026-07-28T10:00:00Z", started_at: "2026-07-28T10:00:01Z", finished_at: null,
+      process_nonce: "nonce", result: null, error_code: null,
+    })).toBe("Observer scan running (42%)");
+  });
+
+  it("selects exactly one primary overview action and suppresses all mutations for corrupt diagnostics", () => {
+    expect(overviewPrimaryAction(snapshot())).toEqual({ action: "scan", label: "Run observer scan" });
+    expect(overviewPrimaryAction(snapshot({
+      observer: { state: "ready", enabled: false, last_scan_at: null, observation_count: 0 },
+    }))).toEqual({ action: "resume", label: "Resume observer" });
+    expect(overviewPrimaryAction(snapshot({ state: "corrupt", diagnostics: ["digest mismatch"] }))).toBeNull();
   });
 });

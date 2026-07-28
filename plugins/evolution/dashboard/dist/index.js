@@ -110,7 +110,7 @@
     return pipeline.state;
   }
   function initialView() {
-    return "organism";
+    return "overview";
   }
   function readinessBlockers(snapshot) {
     const sources = [
@@ -159,6 +159,43 @@
       label: "Local organism \xB7 all profiles",
       organism: snapshot.organism
     };
+  }
+  var BLOCKER_VIEWS = {
+    snapshot: "overview",
+    gnothi: "organism",
+    telos: "telos",
+    observer: "overview",
+    generations: "pipeline",
+    pipeline: "pipeline"
+  };
+  function hasCorruption(snapshot) {
+    return snapshot.state === "corrupt" || snapshot.gnothi.state === "corrupt" || snapshot.telos.state === "corrupt" || snapshot.observer.state === "corrupt" || snapshot.generations.state === "corrupt" || snapshot.pipeline.state === "corrupt";
+  }
+  function priorityBlockerLinks(snapshot) {
+    return readinessBlockers(snapshot).map((blocker) => ({
+      ...blocker,
+      view: BLOCKER_VIEWS[blocker.source]
+    }));
+  }
+  function coveragePresentation(summary) {
+    if (summary.state === "ready") return { icon: "\u2713", text: "Graph coverage ready" };
+    if (summary.state === "corrupt" || summary.state === "blocked" || summary.state === "missing") {
+      return { icon: "\xD7", text: `Graph coverage ${summary.state}` };
+    }
+    return { icon: "!", text: `Graph coverage ${summary.state}` };
+  }
+  function observerControl(snapshot) {
+    if (hasCorruption(snapshot) || snapshot.state === "blocked") return null;
+    return snapshot.observer.enabled ? { action: "pause", label: "Pause observer" } : { action: "resume", label: "Resume observer" };
+  }
+  function overviewPrimaryAction(snapshot) {
+    if (hasCorruption(snapshot) || snapshot.state === "blocked") return null;
+    if (snapshot.state === "missing") return { action: "initialize", label: "Initialize local organism" };
+    if (!snapshot.observer.enabled) return { action: "resume", label: "Resume observer" };
+    return { action: "scan", label: "Run observer scan" };
+  }
+  function scanJobProgress(job) {
+    return `Observer scan ${job.state} (${job.progress}%)`;
   }
   function isActiveJobState(state) {
     return state === "queued" || state === "running";
@@ -241,6 +278,140 @@
       setActiveJob(isActiveJobState(job.state) ? job : null);
     }, []);
     return { snapshot, loading, refreshing, warning, activeJob, refresh, trackJob };
+  }
+
+  // ../plugins/evolution/dashboard/src/components/AuditTimeline.tsx
+  function AuditTimeline({ audit, loading, error: error3 }) {
+    return /* @__PURE__ */ React.createElement("section", { className: "evo-audit", "aria-labelledby": "evo-audit-heading" }, /* @__PURE__ */ React.createElement("h2", { id: "evo-audit-heading" }, "Recent audit activity"), loading ? /* @__PURE__ */ React.createElement("p", { role: "status" }, "Loading recent durable audit events\u2026") : null, error3 !== null ? /* @__PURE__ */ React.createElement("p", { role: "status" }, error3) : null, !loading && error3 === null && audit !== null && audit.events.length === 0 ? /* @__PURE__ */ React.createElement("p", null, "No durable audit events are available.") : null, audit !== null && audit.events.length > 0 ? /* @__PURE__ */ React.createElement("ol", null, audit.events.map((event3) => /* @__PURE__ */ React.createElement("li", { key: event3.event_id }, /* @__PURE__ */ React.createElement("time", { dateTime: event3.created_at }, event3.created_at), " \xB7 ", event3.summary))) : null, audit?.truncated ? /* @__PURE__ */ React.createElement("p", null, "Only the most recent bounded audit events are shown.") : null);
+  }
+
+  // ../plugins/evolution/dashboard/src/components/ReadinessSummary.tsx
+  function readinessStatement(snapshot) {
+    return priorityBlockerLinks(snapshot).length === 0 ? "This local organism is ready for supervised evolution." : "Evolution readiness needs attention before the next change.";
+  }
+  function ReadinessSummary({ snapshot, onNavigate }) {
+    if (snapshot === null) {
+      return /* @__PURE__ */ React.createElement("section", { className: "evo-readiness", "aria-busy": "true" }, /* @__PURE__ */ React.createElement("h2", null, "Readiness"), /* @__PURE__ */ React.createElement("p", null, "Loading local readiness\u2026"));
+    }
+    const blockers = priorityBlockerLinks(snapshot);
+    const coverage = coveragePresentation(snapshot.gnothi);
+    return /* @__PURE__ */ React.createElement("section", { className: "evo-readiness", "aria-labelledby": "evo-readiness-heading" }, /* @__PURE__ */ React.createElement("h2", { id: "evo-readiness-heading" }, "Readiness"), /* @__PURE__ */ React.createElement("p", null, readinessStatement(snapshot)), /* @__PURE__ */ React.createElement("p", null, /* @__PURE__ */ React.createElement("span", { "aria-hidden": "true" }, coverage.icon), " ", coverage.text), /* @__PURE__ */ React.createElement("dl", null, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("dt", null, "Observer"), /* @__PURE__ */ React.createElement("dd", null, snapshot.observer.enabled ? "Enabled" : "Paused", " \xB7 ", snapshot.observer.state)), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("dt", null, "Telos"), /* @__PURE__ */ React.createElement("dd", null, snapshot.telos.state))), blockers.length > 0 ? /* @__PURE__ */ React.createElement("section", { "aria-labelledby": "evo-blockers-heading" }, /* @__PURE__ */ React.createElement("h3", { id: "evo-blockers-heading" }, "Priority blockers"), /* @__PURE__ */ React.createElement("ul", null, blockers.map((blocker) => /* @__PURE__ */ React.createElement("li", { key: blocker.source }, /* @__PURE__ */ React.createElement(
+      "a",
+      {
+        href: `#${blocker.view}`,
+        onClick: (event3) => {
+          event3.preventDefault();
+          onNavigate(blocker.view);
+        }
+      },
+      blocker.label,
+      ": ",
+      blocker.state
+    ))))) : null);
+  }
+
+  // ../plugins/evolution/dashboard/src/components/OverviewView.tsx
+  var AUDIT_LIMIT = 12;
+  var CONFLICT_MESSAGE = "The organism changed elsewhere. Refresh manually before continuing.";
+  function errorMessage(error3) {
+    return error3 instanceof Error ? error3.message : "The requested local evolution data is unavailable.";
+  }
+  function isConflict(error3) {
+    if (typeof error3 === "object" && error3 !== null && "status" in error3) return Reflect.get(error3, "status") === 409;
+    return error3 instanceof Error && /(^|\s)409(?::|\s|$)/.test(error3.message);
+  }
+  function eligibleSuggestion(pipeline) {
+    const suggestion = pipeline?.suggestions.find((item) => item.state === "eligible") ?? null;
+    return suggestion === null ? null : suggestion.summary;
+  }
+  function OverviewView({ snapshot, onRefresh, onTrackJob, onNavigate }) {
+    const { useCallback, useEffect, useState } = SDK.hooks;
+    const [pipeline, setPipeline] = useState(null);
+    const [audit, setAudit] = useState(null);
+    const [loadingDetails, setLoadingDetails] = useState(false);
+    const [detailsError, setDetailsError] = useState(null);
+    const [actionError, setActionError] = useState(null);
+    const [mutating, setMutating] = useState(false);
+    useEffect(() => {
+      let current = true;
+      setLoadingDetails(true);
+      setDetailsError(null);
+      void Promise.all([evolutionApi.pipeline(void 0, AUDIT_LIMIT), evolutionApi.audit(void 0, AUDIT_LIMIT)]).then(([nextPipeline, nextAudit]) => {
+        if (!current) return;
+        setPipeline(nextPipeline);
+        setAudit(nextAudit);
+      }).catch((error3) => {
+        if (current) setDetailsError(errorMessage(error3));
+      }).finally(() => {
+        if (current) setLoadingDetails(false);
+      });
+      return () => {
+        current = false;
+      };
+    }, [snapshot?.snapshot_digest]);
+    const resolveConflict = useCallback(async () => {
+      await onRefresh();
+      setActionError(CONFLICT_MESSAGE);
+    }, [onRefresh]);
+    const mutateObserver = useCallback(async (enabled) => {
+      if (mutating) return;
+      setMutating(true);
+      setActionError(null);
+      try {
+        const context = await evolutionApi.mutationContext();
+        await evolutionApi.setObserver({
+          organism_id: context.organism_id,
+          expected_snapshot_digest: context.expected_snapshot_digest,
+          enabled
+        });
+        await onRefresh();
+      } catch (error3) {
+        if (isConflict(error3)) await resolveConflict();
+        else setActionError(errorMessage(error3));
+      } finally {
+        setMutating(false);
+      }
+    }, [mutating, onRefresh, resolveConflict]);
+    const runScan = useCallback(async () => {
+      if (mutating || snapshot === null || !snapshot.observer.enabled) return;
+      setMutating(true);
+      setActionError(null);
+      try {
+        const context = await evolutionApi.mutationContext();
+        const job = await evolutionApi.observerScan({
+          organism_id: context.organism_id,
+          expected_snapshot_digest: context.expected_snapshot_digest
+        });
+        onTrackJob(job);
+        await onRefresh();
+      } catch (error3) {
+        if (isConflict(error3)) await resolveConflict();
+        else setActionError(errorMessage(error3));
+      } finally {
+        setMutating(false);
+      }
+    }, [mutating, onRefresh, onTrackJob, resolveConflict, snapshot]);
+    const initialize = useCallback(async () => {
+      if (mutating) return;
+      setMutating(true);
+      setActionError(null);
+      try {
+        await evolutionApi.initialize();
+        await onRefresh();
+      } catch (error3) {
+        setActionError(errorMessage(error3));
+      } finally {
+        setMutating(false);
+      }
+    }, [mutating, onRefresh]);
+    const primary = snapshot === null ? null : overviewPrimaryAction(snapshot);
+    const observer = snapshot === null ? null : observerControl(snapshot);
+    const runPrimary = () => {
+      if (primary?.action === "initialize") void initialize();
+      if (primary?.action === "scan") void runScan();
+      if (primary?.action === "resume") void mutateObserver(true);
+    };
+    return /* @__PURE__ */ React.createElement("section", { className: "evo-overview", "aria-label": "Evolution readiness overview" }, /* @__PURE__ */ React.createElement(ReadinessSummary, { snapshot, onNavigate }), snapshot?.state === "corrupt" ? /* @__PURE__ */ React.createElement("section", { className: "evo-diagnostics", "aria-labelledby": "evo-diagnostics-heading" }, /* @__PURE__ */ React.createElement("h2", { id: "evo-diagnostics-heading" }, "Local diagnostics"), /* @__PURE__ */ React.createElement("p", null, "Mutations are unavailable while local diagnostics report corruption."), snapshot.diagnostics.length > 0 ? /* @__PURE__ */ React.createElement("ul", null, snapshot.diagnostics.map((diagnostic) => /* @__PURE__ */ React.createElement("li", { key: diagnostic }, diagnostic))) : null) : null, primary !== null ? /* @__PURE__ */ React.createElement("section", { className: "evo-overview__actions", "aria-label": "Evolution actions" }, /* @__PURE__ */ React.createElement("button", { className: "evo-action--primary", type: "button", onClick: runPrimary, disabled: mutating }, mutating ? "Working\u2026" : primary.label), observer !== null && observer.action !== primary.action ? /* @__PURE__ */ React.createElement("button", { type: "button", onClick: () => void mutateObserver(observer.action === "resume"), disabled: mutating }, observer.label) : null, snapshot !== null && !snapshot.observer.enabled ? /* @__PURE__ */ React.createElement("p", null, "Observer scans are unavailable while the observer is paused.") : null) : null, actionError !== null ? /* @__PURE__ */ React.createElement("p", { role: "alert" }, actionError) : null, /* @__PURE__ */ React.createElement("section", { className: "evo-pipeline-summary", "aria-labelledby": "evo-pipeline-heading" }, /* @__PURE__ */ React.createElement("h2", { id: "evo-pipeline-heading" }, "Pipeline"), loadingDetails ? /* @__PURE__ */ React.createElement("p", { role: "status" }, "Loading bounded pipeline data\u2026") : null, detailsError !== null ? /* @__PURE__ */ React.createElement("p", { role: "status" }, detailsError) : null, !loadingDetails && detailsError === null ? /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("p", null, eligibleSuggestion(pipeline) === null ? "No eligible suggestion is available." : `Eligible suggestion: ${eligibleSuggestion(pipeline)}`), /* @__PURE__ */ React.createElement("p", null, "Durable pending decisions: ", snapshot?.pipeline.lifecycle.pending_approval_count ?? "unavailable")) : null), /* @__PURE__ */ React.createElement(AuditTimeline, { audit, loading: loadingDetails, error: detailsError }));
   }
 
   // ../plugins/evolution/dashboard/src/graph-model.ts
@@ -30964,7 +31135,7 @@
   var GRAPH_NEIGHBORHOOD_DEPTH = 2;
   var GRAPH_RESPONSE_LIMIT = 200;
   var API_FILTER_KINDS = /* @__PURE__ */ new Set(["capability", "runtime"]);
-  function errorMessage(error3) {
+  function errorMessage2(error3) {
     return error3 instanceof Error ? error3.message : "The requested local organism data is unavailable.";
   }
   function stateNotice(snapshot) {
@@ -31013,7 +31184,7 @@
         setGraph(next);
       }).catch((nextError) => {
         if (!current) return;
-        setGraphError(errorMessage(nextError));
+        setGraphError(errorMessage2(nextError));
       }).finally(() => {
         if (current) setGraphLoading(false);
       });
@@ -31051,7 +31222,7 @@
         setMutationContext(context);
         setDialog("rebuild");
       } catch (error3) {
-        setActionError(errorMessage(error3));
+        setActionError(errorMessage2(error3));
       }
     }, []);
     const initialize = useCallback(async () => {
@@ -31062,7 +31233,7 @@
         await evolutionApi.initialize();
         await onRefresh();
       } catch (error3) {
-        setActionError(errorMessage(error3));
+        setActionError(errorMessage2(error3));
       } finally {
         setInitializing(false);
       }
@@ -31150,7 +31321,15 @@
         onClick: () => setView(item.id)
       },
       item.label
-    ))), store.warning !== null ? /* @__PURE__ */ React.createElement("section", { className: "evo-warning", role: "status", "aria-live": "polite" }, /* @__PURE__ */ React.createElement("p", null, store.warning.message), /* @__PURE__ */ React.createElement("button", { type: "button", onClick: () => void store.refresh(), disabled: store.refreshing }, "Refresh now")) : null, store.activeJob !== null ? /* @__PURE__ */ React.createElement("section", { className: "evo-job-strip", role: "status", "aria-live": "polite" }, /* @__PURE__ */ React.createElement("p", null, store.activeJob.kind.replaceAll("_", " "), ": ", store.activeJob.state, " (", store.activeJob.progress, "%)")) : null, /* @__PURE__ */ React.createElement(StatusRail, { snapshot: store.snapshot, loading: store.loading }), /* @__PURE__ */ React.createElement("section", { className: "evo-shell__content", "aria-label": `${VIEWS.find((item) => item.id === view)?.label ?? "Evolution"} view` }, view === "organism" ? /* @__PURE__ */ React.createElement(OrganismView, { snapshot: store.snapshot, onRefresh: store.refresh, onTrackJob: store.trackJob }) : /* @__PURE__ */ React.createElement("p", null, VIEWS.find((item) => item.id === view)?.label, " view will appear here.")));
+    ))), store.warning !== null ? /* @__PURE__ */ React.createElement("section", { className: "evo-warning", role: "status", "aria-live": "polite" }, /* @__PURE__ */ React.createElement("p", null, store.warning.message), /* @__PURE__ */ React.createElement("button", { type: "button", onClick: () => void store.refresh(), disabled: store.refreshing }, "Refresh now")) : null, store.activeJob !== null ? /* @__PURE__ */ React.createElement("section", { className: "evo-job-strip", role: "status", "aria-live": "polite" }, /* @__PURE__ */ React.createElement("p", null, store.activeJob.kind === "observer_scan" ? scanJobProgress(store.activeJob) : `${store.activeJob.kind.replaceAll("_", " ")}: ${store.activeJob.state} (${store.activeJob.progress}%)`)) : null, /* @__PURE__ */ React.createElement(StatusRail, { snapshot: store.snapshot, loading: store.loading }), /* @__PURE__ */ React.createElement("section", { className: "evo-shell__content", "aria-label": `${VIEWS.find((item) => item.id === view)?.label ?? "Evolution"} view` }, view === "overview" ? /* @__PURE__ */ React.createElement(
+      OverviewView,
+      {
+        snapshot: store.snapshot,
+        onRefresh: store.refresh,
+        onTrackJob: store.trackJob,
+        onNavigate: setView
+      }
+    ) : view === "organism" ? /* @__PURE__ */ React.createElement(OrganismView, { snapshot: store.snapshot, onRefresh: store.refresh, onTrackJob: store.trackJob }) : /* @__PURE__ */ React.createElement("p", null, VIEWS.find((item) => item.id === view)?.label, " view will appear here.")));
   }
 
   // ../plugins/evolution/dashboard/src/index.tsx

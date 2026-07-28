@@ -1,5 +1,7 @@
 import type {
   EvolutionSnapshot,
+  EvolutionJob,
+  GnothiSummary,
   HealthState,
   JobState,
   PipelineSummary,
@@ -23,6 +25,21 @@ export interface OrganismFacet {
 }
 
 export type SnapshotAction = "initialize";
+export type OverviewMutationAction = "scan" | "pause" | "resume";
+
+export interface OverviewAction {
+  action: SnapshotAction | OverviewMutationAction;
+  label: string;
+}
+
+export interface CoveragePresentation {
+  icon: "✓" | "!" | "×";
+  text: string;
+}
+
+export interface PriorityBlockerLink extends ReadinessBlocker {
+  view: EvolutionView;
+}
 
 const BLOCKER_PRIORITY: Record<HealthState | "not_ready", number> = {
   corrupt: 6,
@@ -60,8 +77,8 @@ function stateOfPipeline(pipeline: PipelineSummary): HealthState | "not_ready" {
   return pipeline.state;
 }
 
-export function initialView(): "organism" {
-  return "organism";
+export function initialView(): EvolutionView {
+  return "overview";
 }
 
 export function readinessBlockers(snapshot: EvolutionSnapshot): ReadinessBlocker[] {
@@ -130,6 +147,59 @@ export function organismFacet(
 
 export function availableActions(snapshot: EvolutionSnapshot): SnapshotAction[] {
   return snapshot.state === "missing" ? ["initialize"] : [];
+}
+
+type EvolutionView = "overview" | "organism" | "telos" | "pipeline";
+
+const BLOCKER_VIEWS: Record<ReadinessBlocker["source"], EvolutionView> = {
+  snapshot: "overview",
+  gnothi: "organism",
+  telos: "telos",
+  observer: "overview",
+  generations: "pipeline",
+  pipeline: "pipeline",
+};
+
+function hasCorruption(snapshot: EvolutionSnapshot): boolean {
+  return snapshot.state === "corrupt"
+    || snapshot.gnothi.state === "corrupt"
+    || snapshot.telos.state === "corrupt"
+    || snapshot.observer.state === "corrupt"
+    || snapshot.generations.state === "corrupt"
+    || snapshot.pipeline.state === "corrupt";
+}
+
+export function priorityBlockerLinks(snapshot: EvolutionSnapshot): PriorityBlockerLink[] {
+  return readinessBlockers(snapshot).map(blocker => ({
+    ...blocker,
+    view: BLOCKER_VIEWS[blocker.source],
+  }));
+}
+
+export function coveragePresentation(summary: GnothiSummary): CoveragePresentation {
+  if (summary.state === "ready") return { icon: "✓", text: "Graph coverage ready" };
+  if (summary.state === "corrupt" || summary.state === "blocked" || summary.state === "missing") {
+    return { icon: "×", text: `Graph coverage ${summary.state}` };
+  }
+  return { icon: "!", text: `Graph coverage ${summary.state}` };
+}
+
+export function observerControl(snapshot: EvolutionSnapshot): OverviewAction | null {
+  if (hasCorruption(snapshot) || snapshot.state === "blocked") return null;
+  return snapshot.observer.enabled
+    ? { action: "pause", label: "Pause observer" }
+    : { action: "resume", label: "Resume observer" };
+}
+
+export function overviewPrimaryAction(snapshot: EvolutionSnapshot): OverviewAction | null {
+  if (hasCorruption(snapshot) || snapshot.state === "blocked") return null;
+  if (snapshot.state === "missing") return { action: "initialize", label: "Initialize local organism" };
+  if (!snapshot.observer.enabled) return { action: "resume", label: "Resume observer" };
+  return { action: "scan", label: "Run observer scan" };
+}
+
+export function scanJobProgress(job: EvolutionJob): string {
+  return `Observer scan ${job.state} (${job.progress}%)`;
 }
 
 export function isActiveJobState(state: JobState): boolean {

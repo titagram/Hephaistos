@@ -1,7 +1,8 @@
 import { React, SDK } from "../sdk";
 import { useEvolutionSnapshot } from "../state";
 import type { EvolutionView } from "../types";
-import { initialView, organismFacet } from "../view-model";
+import { initialView, organismFacet, scanJobProgress } from "../view-model";
+import { OverviewView } from "./OverviewView";
 import { OrganismView } from "./OrganismView";
 import { StatusRail } from "./StatusRail";
 
@@ -54,13 +55,22 @@ export function EvolutionShell(): React.ReactElement {
       {store.activeJob !== null ? (
         <section className="evo-job-strip" role="status" aria-live="polite">
           <p>
-            {store.activeJob.kind.replaceAll("_", " ")}: {store.activeJob.state} ({store.activeJob.progress}%)
+            {store.activeJob.kind === "observer_scan"
+              ? scanJobProgress(store.activeJob)
+              : `${store.activeJob.kind.replaceAll("_", " ")}: ${store.activeJob.state} (${store.activeJob.progress}%)`}
           </p>
         </section>
       ) : null}
       <StatusRail snapshot={store.snapshot} loading={store.loading} />
       <section className="evo-shell__content" aria-label={`${VIEWS.find(item => item.id === view)?.label ?? "Evolution"} view`}>
-        {view === "organism" ? (
+        {view === "overview" ? (
+          <OverviewView
+            snapshot={store.snapshot}
+            onRefresh={store.refresh}
+            onTrackJob={store.trackJob}
+            onNavigate={setView}
+          />
+        ) : view === "organism" ? (
           <OrganismView snapshot={store.snapshot} onRefresh={store.refresh} onTrackJob={store.trackJob} />
         ) : (
           <p>{VIEWS.find(item => item.id === view)?.label} view will appear here.</p>
