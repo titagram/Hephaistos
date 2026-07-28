@@ -51,13 +51,10 @@ bounded `$HERMES_HOME/logs/organism-events.jsonl` stream. When the backend
 database does not already exist, runtime inspection reports the backend as
 unconfigured without creating that database.
 
-Ordinary `hades backend sync` may publish the already-current organism
-revision through the existing artifact channel. It never triggers an organism
-build. Publication is capability-gated: the agent uploads only when backend
-discovery advertises `organism_graph_schema=hades.organism_graph.v1` or the
-`organism` graph scope, and unchanged content is skipped by checksum. Older
-backends therefore keep their existing behavior and receive no organism
-artifact.
+Ordinary `hades backend sync` never publishes, uploads, or otherwise includes
+organism artifacts in remote synchronization. It never triggers an organism
+build. Organism artifacts never enter remote sync; Gnothi revisions remain
+local-only, regardless of backend capabilities or graph scopes.
 
 The existing service-gated graph search and traversal tools accept only
 `scope=project` and fall back to the local synced project code-graph cache when

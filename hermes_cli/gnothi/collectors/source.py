@@ -4,6 +4,7 @@ import hashlib
 import gzip
 import json
 import os
+import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -66,22 +67,33 @@ def _probe_source(context: CollectorContext) -> str:
 
 def _binding_for_workspace(root: Path) -> backend_db.WorkspaceBinding | None:
     resolved = root.resolve()
-    # Connecting through the backend helper initializes its SQLite schema. A
-    # Gnothi collection is observational, so an unconfigured backend must
-    # remain absent rather than being materialized just to look for a binding.
-    if not backend_db.hades_backend_db_path().is_file():
+    database = backend_db.hades_backend_db_path()
+    if not database.is_file():
         return None
-    with backend_db.connect_closing() as conn:
-        agent = backend_db.get_default_agent(conn)
-        if agent is None:
-            return None
-        candidates = [
-            binding
-            for binding in backend_db.list_workspace_bindings(conn, status="linked")
-            if binding.agent_id == agent.agent_id
-            and binding.project_id == agent.project_id
-            and Path(binding.repo_root).resolve() == resolved
-        ]
+    try:
+        # The normal helper enables WAL and runs migrations.  Collection must
+        # only inspect an already-configured backend database.
+        connection = sqlite3.connect(
+            f"{database.absolute().as_uri()}?mode=ro&immutable=1", uri=True
+        )
+        try:
+            connection.row_factory = sqlite3.Row
+            agent = backend_db.get_default_agent(connection)
+            if agent is None:
+                return None
+            candidates = [
+                binding
+                for binding in backend_db.list_workspace_bindings(
+                    connection, status="linked"
+                )
+                if binding.agent_id == agent.agent_id
+                and binding.project_id == agent.project_id
+                and Path(binding.repo_root).resolve() == resolved
+            ]
+        finally:
+            connection.close()
+    except sqlite3.Error:
+        return None
     return min(candidates, key=lambda item: item.backend_workspace_binding_id) if candidates else None
 
 

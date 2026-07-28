@@ -96,6 +96,12 @@ def _validate_authorization_id(value: object) -> None:
         raise EvolutionContractError("invalid_authorization_id")
 
 
+def transition_authorization_kind(request: TransitionRequest) -> GrantKind | None:
+    """Return the authorization kind required by an already-valid transition."""
+    policy = _TRANSITION_POLICY[(request.prior_state, request.next_state)]
+    return policy.authorization_kind
+
+
 def validate_transition(request: TransitionRequest) -> None:
     """Reject any lifecycle transition outside the closed v1 policy."""
 

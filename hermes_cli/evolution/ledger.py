@@ -26,7 +26,11 @@ from .contract import (
     content_digest,
     require_digest,
 )
-from .state_machine import TransitionRequest, validate_transition
+from .state_machine import (
+    TransitionRequest,
+    transition_authorization_kind,
+    validate_transition,
+)
 
 
 SCHEMA_VERSION = 6
@@ -2533,6 +2537,20 @@ class EvolutionLedger:
             request.attempt_id, limit=256, code="invalid_event"
         )
         with self.transaction() as connection:
+            required_kind = transition_authorization_kind(request)
+            if required_kind is not None:
+                grant = connection.execute(
+                    """
+                    SELECT 1
+                    FROM authorization_grants
+                    WHERE grant_id = ? AND attempt_id = ? AND grant_kind = ?
+                    """,
+                    (request.authorization_id, attempt_id, required_kind),
+                ).fetchone()
+                if grant is None:
+                    raise EvolutionLedgerError(
+                        "transition_authorization_grant_mismatch"
+                    )
             updated = connection.execute(
                 """
                 UPDATE attempts
