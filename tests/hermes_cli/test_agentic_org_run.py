@@ -361,7 +361,7 @@ def test_materialize_rolls_back_all_rows_when_task_creation_fails(
         assert fired_hooks == []
 
 
-def test_caller_owned_materialization_rollback_emits_no_lifecycle_hook(
+def test_caller_owned_materialization_is_rejected_without_rows_or_hooks(
     tmp_path,
     monkeypatch,
 ):
@@ -374,14 +374,56 @@ def test_caller_owned_materialization_rollback_emits_no_lifecycle_hook(
     )
     with kb.connect(tmp_path / "kanban.db") as conn:
         conn.execute("BEGIN IMMEDIATE")
-        materialize_org_run(
-            conn, plan, _validation(plan), board="default"
-        )
-        conn.rollback()
+        with pytest.raises(ValueError, match="existing transaction"):
+            materialize_org_run(
+                conn, plan, _validation(plan), board="default"
+            )
 
         assert _counts(conn) == (0, 0, 0, 0)
         assert conn.execute("SELECT COUNT(*) FROM task_events").fetchone()[0] == 0
         assert fired_hooks == []
+        assert conn.in_transaction is True
+        conn.rollback()
+
+
+def test_owned_materialization_commits_before_emitting_exactly_one_hook(
+    tmp_path,
+    monkeypatch,
+):
+    plan = _plan()
+    observed_hooks: list[dict] = []
+
+    with kb.connect(tmp_path / "kanban.db") as conn:
+        def observe_hook(event, task_id, **fields):
+            task = kb.get_task(conn, task_id)
+            observed_hooks.append({
+                "event": event,
+                "task_id": task_id,
+                "fields": fields,
+                "in_transaction": conn.in_transaction,
+                "task_status": task.status if task is not None else None,
+                "counts": _counts(conn),
+            })
+
+        monkeypatch.setattr(kb, "_fire_kanban_lifecycle_hook", observe_hook)
+        topology = materialize_org_run(
+            conn, plan, _validation(plan), board="default"
+        )
+
+        assert conn.in_transaction is False
+        assert len(observed_hooks) == 1
+        hook = observed_hooks[0]
+        assert hook["event"] == "kanban_task_completed"
+        assert hook["task_id"] == topology.anchor_id
+        assert hook["fields"]["board"] == "default"
+        assert hook["fields"]["assignee"] == "orchestrator"
+        assert isinstance(hook["fields"]["run_id"], int)
+        assert hook["fields"]["summary"] == (
+            "Local OrgRun plan accepted for materialization."
+        )
+        assert hook["in_transaction"] is False
+        assert hook["task_status"] == "done"
+        assert hook["counts"] == (6, 1, 1, 6)
 
 
 def _legacy_payload(*, run_id: str = "legacy-run-001") -> dict:

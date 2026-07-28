@@ -203,8 +203,11 @@ def materialize_org_run(
     board: str | None,
     activate: bool = True,
 ) -> OrgRunTopology:
-    """Materialize a simplified OrgRun DAG in one SQLite transaction."""
-    caller_owned_transaction = conn.in_transaction
+    """Materialize a simplified OrgRun DAG in one owned SQLite transaction."""
+    if conn.in_transaction:
+        raise ValueError(
+            "materialize_org_run cannot run inside an existing transaction"
+        )
     with kb.write_txn(conn):
         existing = get_org_run(conn, plan.run_id)
         if existing is not None:
@@ -506,15 +509,14 @@ def materialize_org_run(
             review_id=review_id,
             finalization_id=finalization_id,
         )
-    if not caller_owned_transaction:
-        kb._fire_kanban_lifecycle_hook(
-            "kanban_task_completed",
-            anchor_id,
-            board=board if board is not None else kb.get_current_board(),
-            assignee=_profile(validation, "orchestrator"),
-            run_id=anchor_run_id,
-            summary=anchor_summary,
-        )
+    kb._fire_kanban_lifecycle_hook(
+        "kanban_task_completed",
+        anchor_id,
+        board=board if board is not None else kb.get_current_board(),
+        assignee=_profile(validation, "orchestrator"),
+        run_id=anchor_run_id,
+        summary=anchor_summary,
+    )
     return topology
 
 
