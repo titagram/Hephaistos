@@ -1943,6 +1943,224 @@ def _legacy_contract(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
+def _prefix_adoption_dependencies(
+    run_id: str,
+    raw_nodes: list[dict[str, Any]],
+) -> dict[str, tuple[str, ...]]:
+    """Reconstruct the dependency tuples sealed by the pre-fix adopter."""
+    by_kind: dict[str, list[str]] = {}
+    executions: dict[str, str] = {}
+    reviews: dict[str, str] = {}
+    ready_nodes: list[str] = []
+    complete_nodes: list[str] = []
+    for raw in raw_nodes:
+        node_id = raw["node_id"]
+        node_kind = raw["node_kind"]
+        by_kind.setdefault(node_kind, []).append(node_id)
+        logical_task_id = _logical_task_id(run_id, node_id, node_kind)
+        if node_kind == "execution" and logical_task_id is not None:
+            executions[logical_task_id] = node_id
+        elif node_kind == "task_review" and logical_task_id is not None:
+            reviews[logical_task_id] = node_id
+        elif node_kind == "legacy_gate" and node_id.endswith(":ready"):
+            ready_nodes.append(node_id)
+        elif node_kind == "legacy_gate" and node_id.endswith(":complete"):
+            complete_nodes.append(node_id)
+
+    singleton = {
+        kind: values[0]
+        for kind, values in by_kind.items()
+        if len(values) == 1
+    }
+    if (
+        set(executions) != set(reviews)
+        or len(ready_nodes) != len(executions)
+        or len(complete_nodes) != len(executions)
+        or not {"anchor", "integration", "global_review", "finalization"}
+        <= set(singleton)
+    ):
+        raise ValueError(f"OrgRun {run_id} has incomplete stored topology")
+
+    dependencies: dict[str, tuple[str, ...]] = {}
+    for raw in raw_nodes:
+        node_id = raw["node_id"]
+        node_kind = raw["node_kind"]
+        logical_task_id = _logical_task_id(run_id, node_id, node_kind)
+        if node_kind in {"anchor", "execution"}:
+            dependencies[node_id] = ()
+        elif node_kind == "task_review" and logical_task_id is not None:
+            dependencies[node_id] = (executions[logical_task_id],)
+        elif node_kind == "legacy_gate" and node_id.endswith(":ready"):
+            task_id = node_id[len(f"org-run:{run_id}:"):-len(":ready")]
+            dependencies[node_id] = (reviews[task_id],)
+        elif node_kind == "legacy_gate" and node_id.endswith(":complete"):
+            dependencies[node_id] = (singleton["global_review"],)
+        elif node_kind == "integration":
+            dependencies[node_id] = tuple(sorted(ready_nodes))
+        elif node_kind == "global_review":
+            dependencies[node_id] = (singleton["integration"],)
+        elif node_kind == "finalization":
+            dependencies[node_id] = tuple(sorted(complete_nodes))
+        else:
+            raise ValueError(f"OrgRun {run_id} has incomplete stored topology")
+    return dependencies
+
+
+def _upgrade_prefix_adoption_snapshot(
+    conn: sqlite3.Connection,
+    run_id: str,
+) -> bool:
+    """Explicitly upgrade the exact pre-fix adoption snapshot, if present."""
+    run = get_org_run(conn, run_id)
+    if run is None:
+        return False
+    payload, verified_hash = _verified_plan_version(
+        conn,
+        run_id,
+        run.plan_version,
+    )
+    raw_nodes = payload.get("nodes")
+    if (
+        payload.get("schema") != "hades.legacy-org-run-adoption.v1"
+        or payload.get("run_id") != run_id
+        or verified_hash != run.plan_hash
+        or not isinstance(raw_nodes, list)
+        or not raw_nodes
+    ):
+        return False
+    prefix_keys = {"node_id", "task_id", "node_kind", "logical_role"}
+    if not all(
+        isinstance(raw, dict) and set(raw) == prefix_keys
+        for raw in raw_nodes
+    ):
+        return False
+
+    nodes = list_org_nodes(conn, run_id)
+    if len(nodes) != len(raw_nodes) or any(
+        node.state != "active" or node.plan_version != run.plan_version
+        for node in nodes
+    ):
+        raise ValueError(f"OrgRun {run_id} has incomplete stored topology")
+    raw_by_id = {raw["node_id"]: raw for raw in raw_nodes}
+    if len(raw_by_id) != len(raw_nodes):
+        raise ValueError(f"OrgRun {run_id} has incomplete stored topology")
+    dependencies = _prefix_adoption_dependencies(run_id, raw_nodes)
+    node_by_id = {node.node_id: node for node in nodes}
+    upgraded_nodes: list[dict[str, Any]] = []
+    live_contracts: dict[str, tuple[dict[str, Any], tuple[str, ...]]] = {}
+    for raw in raw_nodes:
+        node_id = raw["node_id"]
+        node = node_by_id.get(node_id)
+        if (
+            node is None
+            or raw["task_id"] != node.task_id
+            or raw["node_kind"] != node.node_kind
+            or raw["logical_role"] != node.logical_role
+        ):
+            raise ValueError(f"OrgRun {run_id} has incomplete stored topology")
+        row = conn.execute(
+            "SELECT idempotency_key, title, body, assignee, skills "
+            "FROM tasks WHERE id = ?",
+            (node.task_id,),
+        ).fetchone()
+        if row is None or row["idempotency_key"] != node.node_id:
+            raise ValueError(f"OrgRun {run_id} has incomplete stored topology")
+        try:
+            skills = _decoded_skills(row["skills"])
+        except ValueError:
+            _raise_managed_plan_drift(run_id, node_id, "skills")
+        old_contract = {
+            "title": row["title"],
+            "body": row["body"],
+            "skills": skills,
+        }
+        if node.contract_hash != _contract_hash(
+            node_kind=node.node_kind,
+            logical_role=node.logical_role,
+            task_contract=old_contract,
+            dependency_node_ids=dependencies[node_id],
+            plan_version=node.plan_version,
+            base_commit=run.base_commit,
+        ):
+            raise ValueError(f"OrgRun {run_id} has incomplete stored topology")
+        parent_task_ids = tuple(kb.parent_ids(conn, node.task_id))
+        if parent_task_ids:
+            placeholders = ",".join("?" for _ in parent_task_ids)
+            parent_rows = conn.execute(
+                f"SELECT id FROM tasks WHERE id IN ({placeholders})",
+                parent_task_ids,
+            ).fetchall()
+            if {
+                str(parent["id"]) for parent in parent_rows
+            } != set(parent_task_ids):
+                raise ValueError(
+                    f"OrgRun {run_id} has incomplete stored topology"
+                )
+        managed_parent_ids = {
+            node_by_id[parent_node_id].task_id
+            for parent_node_id in dependencies[node_id]
+        }
+        if not managed_parent_ids <= set(parent_task_ids):
+            raise ValueError(f"OrgRun {run_id} has incomplete stored topology")
+        task_contract = {
+            **old_contract,
+            "assignee": row["assignee"],
+        }
+        live_contracts[node_id] = (task_contract, parent_task_ids)
+        upgraded_nodes.append({
+            **raw,
+            "task_contract": task_contract,
+            "dependency_node_ids": list(dependencies[node_id]),
+            "parent_task_ids": list(parent_task_ids),
+        })
+
+    new_version = run.plan_version + 1
+    upgraded_payload = {
+        **payload,
+        "nodes": upgraded_nodes,
+    }
+    upgraded_json = _canonical_json(upgraded_payload)
+    upgraded_hash = hashlib.sha256(upgraded_json.encode("utf-8")).hexdigest()
+    insert_plan_version(
+        conn,
+        run_id=run_id,
+        plan_version=new_version,
+        plan_hash=upgraded_hash,
+        plan_json=upgraded_json,
+        reason="explicit compatibility upgrade of legacy adoption",
+    )
+    for node in nodes:
+        task_contract, parent_task_ids = live_contracts[node.node_id]
+        update_org_node_contract(
+            conn,
+            run_id=run_id,
+            node_id=node.node_id,
+            plan_version=new_version,
+            contract_hash=_contract_hash(
+                node_kind=node.node_kind,
+                logical_role=node.logical_role,
+                task_contract=task_contract,
+                dependency_node_ids=dependencies[node.node_id],
+                plan_version=new_version,
+                base_commit=run.base_commit,
+                parent_task_ids=parent_task_ids,
+            ),
+        )
+    update_org_run_plan(
+        conn,
+        run_id,
+        plan_version=new_version,
+        plan_hash=upgraded_hash,
+    )
+    kb._append_event(
+        conn,
+        run.anchor_task_id,
+        "legacy_adoption_upgraded",
+        {"from_plan_version": run.plan_version, "plan_version": new_version},
+    )
+    return True
+
+
 def adopt_legacy_org_run(
     conn: sqlite3.Connection,
     run_id: str,
@@ -1953,7 +2171,12 @@ def adopt_legacy_org_run(
     with kb.write_txn(conn):
         existing = get_org_run(conn, run_id)
         if existing is not None:
-            topology = load_org_run_topology(conn, run_id)
+            try:
+                topology = load_org_run_topology(conn, run_id)
+            except ValueError:
+                if not _upgrade_prefix_adoption_snapshot(conn, run_id):
+                    raise
+                topology = load_org_run_topology(conn, run_id)
             if topology is None:
                 raise ValueError(f"OrgRun {run_id} has incomplete stored topology")
             return topology

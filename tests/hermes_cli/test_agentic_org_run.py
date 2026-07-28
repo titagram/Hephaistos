@@ -7,6 +7,7 @@ import json
 
 import pytest
 
+from hermes_cli import agentic_org_run as org_run
 from hermes_cli import kanban_db as kb
 from hermes_cli.agentic_org_run import (
     adopt_legacy_org_run,
@@ -956,6 +957,66 @@ def _legacy_payload(*, run_id: str = "legacy-run-001") -> dict:
     }
 
 
+def _rewrite_as_prefix_adoption_snapshot(conn, run_id: str) -> None:
+    """Reproduce the exact incomplete adoption shape written before the fix."""
+    row = conn.execute(
+        "SELECT plan_json FROM kanban_org_plan_versions "
+        "WHERE run_id=? AND plan_version=1",
+        (run_id,),
+    ).fetchone()
+    payload = json.loads(row["plan_json"])
+    base_commit = payload["base_commit"]
+    prefix_nodes = []
+    for raw in payload["nodes"]:
+        node = next(
+            item for item in list_org_nodes(conn, run_id)
+            if item.node_id == raw["node_id"]
+        )
+        task = kb.get_task(conn, node.task_id)
+        old_contract = {
+            "title": task.title,
+            "body": task.body,
+            "skills": task.skills,
+        }
+        old_hash = org_run._contract_hash(
+            node_kind=node.node_kind,
+            logical_role=node.logical_role,
+            task_contract=old_contract,
+            dependency_node_ids=tuple(raw["dependency_node_ids"]),
+            plan_version=1,
+            base_commit=base_commit,
+        )
+        conn.execute(
+            "UPDATE kanban_org_nodes SET contract_hash=? "
+            "WHERE run_id=? AND node_id=?",
+            (old_hash, run_id, node.node_id),
+        )
+        prefix_nodes.append({
+            "node_id": node.node_id,
+            "task_id": node.task_id,
+            "node_kind": node.node_kind,
+            "logical_role": node.logical_role,
+        })
+    prefix_payload = {
+        "schema": "hades.legacy-org-run-adoption.v1",
+        "run_id": run_id,
+        "base_commit": base_commit,
+        "nodes": prefix_nodes,
+    }
+    plan_json = org_run._canonical_json(prefix_payload)
+    plan_hash = hashlib.sha256(plan_json.encode("utf-8")).hexdigest()
+    conn.execute(
+        "UPDATE kanban_org_plan_versions SET plan_hash=?, plan_json=? "
+        "WHERE run_id=? AND plan_version=1",
+        (plan_hash, plan_json, run_id),
+    )
+    conn.execute(
+        "UPDATE kanban_org_runs SET plan_hash=? WHERE run_id=?",
+        (plan_hash, run_id),
+    )
+    conn.commit()
+
+
 def test_adopt_legacy_org_run_records_provenance_without_recreating_cards_or_reading_binding(
     tmp_path, monkeypatch
 ):
@@ -1032,6 +1093,114 @@ def test_adopt_legacy_org_run_records_provenance_without_recreating_cards_or_rea
         assert adopt_legacy_org_run(
             conn, "legacy-run-001", board="default"
         ) == topology
+
+
+def test_explicit_adoption_upgrades_verified_prefix_snapshot(tmp_path):
+    """Breaks if an old adoption stays unusable or is silently trusted."""
+    with kb.connect(tmp_path / "kanban.db") as conn:
+        legacy_plan = parse_execution_portfolio(_legacy_payload())
+        create_org_run(
+            conn, legacy_plan, validate_execution_portfolio(legacy_plan)
+        )
+        topology = adopt_legacy_org_run(
+            conn, "legacy-run-001", board="default"
+        )
+        remediation_id = kb.create_task(
+            conn,
+            title="Audited local remediation gate",
+            board="default",
+        )
+        conn.execute(
+            "INSERT INTO task_links (parent_id, child_id) VALUES (?, ?)",
+            (remediation_id, topology.tasks["runtime"].execution_id),
+        )
+        conn.commit()
+        _rewrite_as_prefix_adoption_snapshot(conn, "legacy-run-001")
+        with pytest.raises(ValueError, match="incomplete stored topology"):
+            load_org_run_topology(conn, "legacy-run-001")
+
+        upgraded = adopt_legacy_org_run(
+            conn, "legacy-run-001", board="default"
+        )
+
+        assert upgraded == topology
+        run = get_org_run(conn, "legacy-run-001")
+        assert run.plan_version == 2
+        versions = conn.execute(
+            "SELECT plan_version, reason FROM kanban_org_plan_versions "
+            "WHERE run_id=? ORDER BY plan_version",
+            ("legacy-run-001",),
+        ).fetchall()
+        assert [(row["plan_version"], row["reason"]) for row in versions] == [
+            (1, "adopted legacy OrgRun cards"),
+            (2, "explicit compatibility upgrade of legacy adoption"),
+        ]
+        upgraded_payload = json.loads(
+            conn.execute(
+                "SELECT plan_json FROM kanban_org_plan_versions "
+                "WHERE run_id=? AND plan_version=2",
+                ("legacy-run-001",),
+            ).fetchone()["plan_json"]
+        )
+        assert all(
+            set(node) >= {
+                "task_contract",
+                "dependency_node_ids",
+                "parent_task_ids",
+            }
+            for node in upgraded_payload["nodes"]
+        )
+        upgraded_execution = next(
+            node for node in upgraded_payload["nodes"]
+            if node["task_id"] == topology.tasks["runtime"].execution_id
+        )
+        assert remediation_id in upgraded_execution["parent_task_ids"]
+        assert load_org_run_topology(conn, "legacy-run-001") == topology
+
+
+@pytest.mark.parametrize("tamper", ("logical_role", "idempotency_key", "title"))
+def test_explicit_adoption_refuses_unverified_prefix_snapshot(
+    tmp_path,
+    tamper,
+):
+    """Breaks if compatibility upgrade blesses identity or contract drift."""
+    with kb.connect(tmp_path / "kanban.db") as conn:
+        legacy_plan = parse_execution_portfolio(_legacy_payload())
+        create_org_run(
+            conn, legacy_plan, validate_execution_portfolio(legacy_plan)
+        )
+        topology = adopt_legacy_org_run(
+            conn, "legacy-run-001", board="default"
+        )
+        _rewrite_as_prefix_adoption_snapshot(conn, "legacy-run-001")
+        execution_id = topology.tasks["runtime"].execution_id
+        if tamper == "logical_role":
+            conn.execute(
+                "UPDATE kanban_org_nodes SET logical_role='reviewer' "
+                "WHERE run_id=? AND task_id=?",
+                ("legacy-run-001", execution_id),
+            )
+        elif tamper == "idempotency_key":
+            conn.execute(
+                "UPDATE tasks SET idempotency_key='org-run:other:task' "
+                "WHERE id=?",
+                (execution_id,),
+            )
+        else:
+            conn.execute(
+                "UPDATE tasks SET title='drifted after adoption' WHERE id=?",
+                (execution_id,),
+            )
+        conn.commit()
+
+        with pytest.raises(ValueError, match="incomplete stored topology"):
+            adopt_legacy_org_run(conn, "legacy-run-001", board="default")
+
+        assert conn.execute(
+            "SELECT COUNT(*) FROM kanban_org_plan_versions "
+            "WHERE run_id=? AND plan_version=2",
+            ("legacy-run-001",),
+        ).fetchone()[0] == 0
 
 
 def test_adoption_rejects_malformed_raw_skills(tmp_path):
