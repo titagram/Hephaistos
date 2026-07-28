@@ -85,6 +85,7 @@ def test_telos_store_save_get(tmp_path: Path, monkeypatch):
     monkeypatch.setattr("hermes_cli.evolution.ledger._open_file_descriptors", lambda: None)
 
     org_root = tmp_path / "organism"
+    org_root.mkdir(mode=0o700)
     store = TelosStore(org_root)
     t_a = create_sample_telos()
     store.save_revision(t_a)
@@ -110,12 +111,140 @@ def test_telos_store_get_missing_revision(tmp_path: Path, monkeypatch):
         store.get_revision("f" * 64)
 
 
+def test_public_mutation_handle_cannot_bypass_host_approval(
+    tmp_path: Path,
+) -> None:
+    """A store caller cannot obtain a pointer-mutating handle."""
+    root = tmp_path / "organism"
+    root.mkdir(mode=0o700)
+    store = TelosStore(root)
+
+    with pytest.raises(AttributeError):
+        store.open_mutation()
+
+    assert not (root / "telos" / "active.json").exists()
+
+
+def test_internal_pointer_publication_rejects_an_untrusted_capability(
+    tmp_path: Path,
+) -> None:
+    """Even direct internal invocation needs the host-owned capability."""
+    root = tmp_path / "organism"
+    root.mkdir(mode=0o700)
+    store = TelosStore(root)
+
+    with pytest.raises(TelosStoreError, match="host_approval_required"):
+        telos_store_module._publish_host_approved_transition(
+            store,
+            capability=object(),
+            organism_id="00000000-0000-0000-0000-000000000000",
+            digest="a" * 64,
+            grant_id="untrusted",
+            action="activate",
+            now="2026-07-28T00:00:00.000000Z",
+        )
+
+    assert not (root / "telos" / "active.json").exists()
+
+
+def test_store_constructor_does_not_follow_a_root_swap_into_an_external_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Binding a store must not create Telos paths after a root replacement."""
+    root = tmp_path / "organism"
+    root.mkdir(mode=0o700)
+    external = tmp_path / "external"
+    external.mkdir(mode=0o700)
+    retained_root = tmp_path / "retained-organism"
+    swapped = False
+    original_mkdir = Path.mkdir
+
+    def racing_mkdir(self, *args, **kwargs):
+        nonlocal swapped
+        if self == root / "telos" and not swapped:
+            swapped = True
+            root.rename(retained_root)
+            os.symlink(external, root, target_is_directory=True)
+        return original_mkdir(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", racing_mkdir)
+
+    store = TelosStore(root)
+
+    assert store.organism_root == root
+    assert not swapped
+    assert not (external / "telos").exists()
+
+
+def test_mutation_initialization_refuses_a_root_swap_before_descriptor_anchoring(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A root replacement before anchoring cannot create Telos paths elsewhere."""
+    root = tmp_path / "organism"
+    root.mkdir(mode=0o700)
+    external = tmp_path / "external"
+    external.mkdir(mode=0o700)
+    retained_root = tmp_path / "retained-organism"
+    swapped = False
+    original_open_directory = telos_store_module._TelosMutation._open_directory
+
+    def racing_open_directory(self, parent_descriptor, path, name):
+        nonlocal swapped
+        if parent_descriptor is None and not swapped:
+            swapped = True
+            root.rename(retained_root)
+            os.symlink(external, root, target_is_directory=True)
+        return original_open_directory(self, parent_descriptor, path, name)
+
+    monkeypatch.setattr(
+        telos_store_module._TelosMutation,
+        "_open_directory",
+        racing_open_directory,
+    )
+
+    with pytest.raises(TelosStoreError, match="telos_unsafe_path"):
+        TelosStore(root).initialize_for_mutation()
+
+    assert swapped
+    assert not (external / "telos").exists()
+
+
+def test_unsupported_anchoring_primitives_fail_before_telos_filesystem_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mutation initialization fails before creating or chmodding Telos paths."""
+    root = tmp_path / "organism"
+    root.mkdir(mode=0o700)
+    calls: list[str] = []
+
+    def forbidden_mkdir(*args, **kwargs):
+        calls.append("mkdir")
+        raise AssertionError("Telos mutation occurred before primitive check")
+
+    def forbidden_chmod(*args, **kwargs):
+        calls.append("chmod")
+        raise AssertionError("Telos mutation occurred before primitive check")
+
+    monkeypatch.setattr(telos_store_module.os, "supports_dir_fd", frozenset())
+    monkeypatch.setattr(Path, "mkdir", forbidden_mkdir)
+    monkeypatch.setattr(telos_store_module.os, "chmod", forbidden_chmod)
+
+    store = TelosStore(root)
+    with pytest.raises(TelosStoreError, match="telos_atomic_anchoring_unavailable"):
+        store.initialize_for_mutation()
+
+    assert calls == []
+    assert not (root / "telos").exists()
+
+
 def test_save_revision_telos_directory_swap_cannot_redirect_revision_write(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A revision write must be descriptor-anchored rather than path-following."""
     root = tmp_path / "organism"
+    root.mkdir(mode=0o700)
     store = TelosStore(root)
+    store.initialize_for_mutation()
     revision = create_sample_telos()
     target = root / "telos" / "revisions" / f"{revision.canonical_digest}.json"
     external_telos = tmp_path / "external-telos"

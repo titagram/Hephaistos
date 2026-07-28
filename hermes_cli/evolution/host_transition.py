@@ -3,7 +3,7 @@
 Owned by ``hermes_cli/evolution``.  Not a model command or core tool.
 Called by the Classic CLI host flow and the gateway-owned
 ``TelosCoordinator``.  No assert as authorization.  No env flag,
-global registry, importable capability token, receipt, clarify,
+global registry, caller-supplied authority token, receipt, clarify,
 or raw SQL as authority.
 """
 
@@ -22,6 +22,11 @@ if TYPE_CHECKING:
     from .telos_store import TelosStore
 
 logger = logging.getLogger("evolution.host_transition")
+
+# Held only by this host-side service.  It is not serialisable, persisted, or
+# available to browser/CLI command inputs; telos_store verifies identity before
+# any pointer write.
+_TELOS_POINTER_CAPABILITY = object()
 
 
 def _utcnow() -> str:
@@ -63,7 +68,7 @@ def perform_telos_transition(
         TelosApprovalError,
         compute_context_digest,
     )
-    from .telos_store import TelosStoreError
+    from .telos_store import TelosStoreError, _publish_host_approved_transition
 
     broker = SqliteTelosApprovalBroker()
 
@@ -260,29 +265,27 @@ def perform_telos_transition(
             message="chain verification fields mismatch",
         )
 
-    # ── Atomically publish active/lkg pointer through retained descriptors ──
+    # ── Atomically publish active/lkg pointer through the host-only bridge ──
     # The request was validated above without mutating authority records.  The
-    # descriptor pass repeats the revision proof immediately before the first
-    # Telos write, so a telos/revisions replacement cannot redirect it.
+    # bridge repeats revision proof immediately before the first Telos write,
+    # and accepts only this in-memory host-transition capability.
     try:
-        with store.open_mutation() as mutation:
-            anchored_revision = mutation.revision(telos_digest)
-            if (
-                anchored_revision.canonical_digest != telos_digest
-                or anchored_revision.organism_id != organism_id
-            ):
-                return TelosTransitionResult(
-                    status="rejected",
-                    request_id=request_id,
-                    message="revision changed before publication",
-                )
-            mutation.transition(
-                digest=telos_digest,
-                grant_id=grant_id,
-                action=action,
-                now=_utcnow(),
-            )
+        _publish_host_approved_transition(
+            store,
+            capability=_TELOS_POINTER_CAPABILITY,
+            organism_id=organism_id,
+            digest=telos_digest,
+            grant_id=grant_id,
+            action=action,
+            now=_utcnow(),
+        )
     except TelosStoreError as exc:
+        if str(exc) == "telos_revision_changed":
+            return TelosTransitionResult(
+                status="rejected",
+                request_id=request_id,
+                message="revision changed before publication",
+            )
         logger.warning("Telos pointer publication failed safely: %s", exc)
         return TelosTransitionResult(
             status="rejected",

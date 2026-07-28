@@ -43,7 +43,7 @@ from .proposal_service import ProposalError, _propose_under_lock
 from .reconcile import _evaluate_open_ledger, read_evolution_snapshot
 from .suggestions import SuggestionRecord, SuggestionRepository
 from .telos_contract import telos_revision_from_dict, validate_telos_revision
-from .telos_store import TelosStore
+from .telos_store import TelosStore, TelosStoreError
 
 
 SnapshotState = Literal["missing", "ready", "partial", "stale", "blocked", "corrupt"]
@@ -660,9 +660,9 @@ class EvolutionDashboardService:
         def current_parent(identity: OrganismIdentity) -> None:
             if revision.organism_id != identity.organism_id:
                 raise EvolutionDashboardConflict("organism_changed")
-            # This preflight intentionally binds to existing paths only.  In
-            # particular it must not instantiate TelosStore(), whose legacy
-            # constructor creates a missing Telos hierarchy.
+            # This preflight performs only reads.  TelosStore construction is
+            # non-mutating; Telos directory creation happens later inside the
+            # anchored revision-write transaction.
             store = TelosStore.from_verified_read_root(self.root)
             if revision.parent_digest != store.get_active_digest():
                 raise EvolutionDashboardConflict("telos_active_changed")
@@ -674,10 +674,14 @@ class EvolutionDashboardService:
         ) as identity:
             try:
                 store = TelosStore.from_verified_read_root(self.root)
-                with store.open_mutation() as mutation:
-                    if revision.parent_digest != mutation.active_digest():
-                        raise EvolutionDashboardConflict("telos_active_changed")
-                    mutation.save_revision(revision)
+                store.save_revision(
+                    revision,
+                    expected_parent_digest=revision.parent_digest,
+                )
+            except TelosStoreError as exc:
+                if str(exc) == "telos_active_changed":
+                    raise EvolutionDashboardConflict("telos_active_changed") from None
+                raise EvolutionDashboardError("telos_unavailable") from None
             except EvolutionDashboardConflict:
                 raise
             except Exception:

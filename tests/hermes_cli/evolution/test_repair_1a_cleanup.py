@@ -457,6 +457,7 @@ def test_save_and_get_revision_still_work(tmp_path: Path) -> None:
     )
 
     organism = tmp_path / "organism"
+    organism.mkdir(mode=0o700)
     store = TelosStore(organism)
 
     rev = TelosRevision(

@@ -8,7 +8,8 @@ import stat
 from pathlib import Path
 from typing import Any, Callable
 
-from .organism_home import ensure_organism_directories
+from hermes_constants import get_organism_home
+
 from .telos_contract import TelosRevision, telos_revision_from_dict, validate_telos_revision
 
 
@@ -18,6 +19,7 @@ class TelosStoreError(Exception):
 
 _JsonReader = Callable[[Path], dict[str, Any] | None]
 _MAX_TELOS_FILE_BYTES = 1024 * 1024
+_NO_PARENT_CONDITION = object()
 
 
 def _same_inode(left: os.stat_result, right: os.stat_result) -> bool:
@@ -70,10 +72,10 @@ def _require_atomic_anchoring() -> None:
         os.name == "posix"
         and hasattr(os, "O_DIRECTORY")
         and hasattr(os, "O_NOFOLLOW")
-        and os.open in supported
-        and os.stat in supported
-        and os.rename in supported
-        and os.link in supported
+        and all(
+            primitive in supported
+            for primitive in (os.open, os.stat, os.rename, os.link, os.mkdir, os.unlink)
+        )
         and all(hasattr(os, name) for name in ("fchmod", "fsync", "fstat"))
     ):
         raise TelosStoreError("telos_atomic_anchoring_unavailable")
@@ -88,12 +90,26 @@ def _write_all(descriptor: int, data: bytes) -> None:
         view = view[written:]
 
 
+def _require_host_transition_capability(capability: object) -> None:
+    """Accept only the non-serialisable capability held by host_transition.
+
+    Pointer publication is intentionally not a ``TelosStore`` method.  The
+    capability is created in the host-transition service and never crosses a
+    browser, CLI-command, or persisted-data boundary.
+    """
+    from .host_transition import _TELOS_POINTER_CAPABILITY
+
+    if capability is not _TELOS_POINTER_CAPABILITY:
+        raise TelosStoreError("host_approval_required")
+
+
 class _TelosMutation:
     """Retained descriptor set for one Telos mutation, not an authority API."""
 
-    def __init__(self, store: "TelosStore") -> None:
+    def __init__(self, store: "TelosStore", *, create_directories: bool) -> None:
         _require_atomic_anchoring()
         self.store = store
+        self.create_directories = create_directories
         self.root_descriptor: int | None = None
         self.telos_descriptor: int | None = None
         self.revisions_descriptor: int | None = None
@@ -115,9 +131,20 @@ class _TelosMutation:
             else:
                 if name is None:
                     raise TelosStoreError("telos_unsafe_path")
-                linked = os.stat(
-                    name, dir_fd=parent_descriptor, follow_symlinks=False
-                )
+                try:
+                    linked = os.stat(
+                        name, dir_fd=parent_descriptor, follow_symlinks=False
+                    )
+                except FileNotFoundError:
+                    if not self.create_directories:
+                        raise TelosStoreError("telos_unsafe_path") from None
+                    try:
+                        os.mkdir(name, 0o700, dir_fd=parent_descriptor)
+                    except FileExistsError:
+                        pass
+                    linked = os.stat(
+                        name, dir_fd=parent_descriptor, follow_symlinks=False
+                    )
                 _validate_directory(linked)
                 descriptor = os.open(
                     name,
@@ -350,7 +377,14 @@ class _TelosMutation:
                 except OSError:
                     pass
 
-    def _replace_telos_document(self, name: str, document: dict[str, Any]) -> None:
+    def _replace_telos_document(
+        self,
+        name: str,
+        document: dict[str, Any],
+        *,
+        capability: object,
+    ) -> None:
+        _require_host_transition_capability(capability)
         telos_descriptor = self._descriptor("telos_descriptor")
         data = json.dumps(document, sort_keys=True).encode("utf-8")
         temporary_name: str | None = None
@@ -402,7 +436,16 @@ class _TelosMutation:
                 except OSError:
                     pass
 
-    def transition(self, *, digest: str, grant_id: str, action: str, now: str) -> None:
+    def _publish_host_authorized_transition(
+        self,
+        *,
+        capability: object,
+        digest: str,
+        grant_id: str,
+        action: str,
+        now: str,
+    ) -> None:
+        _require_host_transition_capability(capability)
         telos_descriptor = self._descriptor("telos_descriptor")
         if action == "activate":
             current_data = self._read_named("active.json", directory=telos_descriptor)
@@ -415,11 +458,14 @@ class _TelosMutation:
                 if not isinstance(previous_digest, str):
                     raise TelosStoreError("telos_active_pointer_invalid")
                 self._replace_telos_document(
-                    "last-known-good.json", {"digest": previous_digest}
+                    "last-known-good.json",
+                    {"digest": previous_digest},
+                    capability=capability,
                 )
             self._replace_telos_document(
                 "active.json",
                 {"digest": digest, "activated_at": now, "grant_id": grant_id},
+                capability=capability,
             )
         elif action == "rollback":
             self._replace_telos_document(
@@ -430,6 +476,7 @@ class _TelosMutation:
                     "grant_id": grant_id,
                     "rollback": True,
                 },
+                capability=capability,
             )
         else:
             raise TelosStoreError("telos_invalid_transition")
@@ -437,7 +484,7 @@ class _TelosMutation:
 
 class TelosStore:
     def __init__(self, organism_root: Path | None = None) -> None:
-        self.organism_root = ensure_organism_directories(organism_root)
+        self.organism_root = Path(organism_root or get_organism_home())
         self.telos_dir = self.organism_root / "telos"
         self.revisions_dir = self.telos_dir / "revisions"
         self.active_pointer = self.telos_dir / "active.json"
@@ -459,14 +506,30 @@ class TelosStore:
         store.lkg_pointer = store.telos_dir / "last-known-good.json"
         return store
 
-    def open_mutation(self) -> _TelosMutation:
-        """Open retained descriptors for a caller that already owns authority."""
-        return _TelosMutation(self)
+    def initialize_for_mutation(self) -> None:
+        """Securely create missing Telos directories for a forthcoming write.
 
-    def save_revision(self, revision: TelosRevision) -> Path:
+        The organism root must already exist.  This method first verifies the
+        required descriptor primitives, then creates only descriptor-relative
+        children beneath the retained root descriptor.
+        """
+        with _TelosMutation(self, create_directories=True):
+            pass
+
+    def save_revision(
+        self,
+        revision: TelosRevision,
+        *,
+        expected_parent_digest: str | None | object = _NO_PARENT_CONDITION,
+    ) -> Path:
         validate_telos_revision(revision)
         digest = revision.canonical_digest
-        with self.open_mutation() as mutation:
+        with _TelosMutation(self, create_directories=True) as mutation:
+            if (
+                expected_parent_digest is not _NO_PARENT_CONDITION
+                and mutation.active_digest() != expected_parent_digest
+            ):
+                raise TelosStoreError("telos_active_changed")
             mutation.save_revision(revision)
         return self.telos_dir / "revisions" / f"{digest}.json"
 
@@ -521,3 +584,37 @@ class TelosStore:
     ) -> None:
         """Public rollback — always fails closed for model callers."""
         raise TelosStoreError("host_approval_not_implemented")
+
+
+def _publish_host_approved_transition(
+    store: TelosStore,
+    *,
+    capability: object,
+    organism_id: str,
+    digest: str,
+    grant_id: str,
+    action: str,
+    now: str,
+) -> None:
+    """Publish a pointer only after host_transition proved live approval.
+
+    This module-private bridge has no caller-provided grant authority: it
+    accepts only the in-memory capability owned by ``host_transition``.  The
+    bridge repeats revision proof under retained descriptors immediately before
+    pointer publication, so a path replacement cannot redirect the write.
+    """
+    _require_host_transition_capability(capability)
+    with _TelosMutation(store, create_directories=True) as mutation:
+        revision = mutation.revision(digest)
+        if (
+            revision.canonical_digest != digest
+            or revision.organism_id != organism_id
+        ):
+            raise TelosStoreError("telos_revision_changed")
+        mutation._publish_host_authorized_transition(
+            capability=capability,
+            digest=digest,
+            grant_id=grant_id,
+            action=action,
+            now=now,
+        )
