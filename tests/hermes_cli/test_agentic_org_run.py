@@ -294,6 +294,41 @@ def test_exact_replay_rejects_missing_required_review_provenance(
             materialize_org_run(conn, plan, validation, board="default")
 
 
+@pytest.mark.parametrize(
+    ("field", "corrupt_value"),
+    [
+        ("node_kind", "execution"),
+        ("logical_role", "leaf"),
+        ("task_id", None),
+    ],
+)
+def test_exact_replay_rejects_mutated_review_provenance_fields(
+    tmp_path,
+    field,
+    corrupt_value,
+):
+    plan = _plan()
+    validation = _validation(plan)
+    with kb.connect(tmp_path / "kanban.db") as conn:
+        materialize_org_run(conn, plan, validation, board="default")
+        if field == "task_id":
+            corrupt_value = kb.create_task(
+                conn,
+                title="Unrelated card",
+                assignee="default",
+                idempotency_key="unrelated-review-provenance",
+            )
+        conn.execute(
+            f"UPDATE kanban_org_nodes SET {field}=? "
+            "WHERE run_id=? AND node_kind='task_review'",
+            (corrupt_value, plan.run_id),
+        )
+        conn.commit()
+
+        with pytest.raises(ValueError, match="incomplete stored topology"):
+            materialize_org_run(conn, plan, validation, board="default")
+
+
 def test_materialize_rolls_back_all_rows_when_task_creation_fails(
     tmp_path, monkeypatch
 ):
@@ -320,6 +355,29 @@ def test_materialize_rolls_back_all_rows_when_task_creation_fails(
             materialize_org_run(
                 conn, plan, _validation(plan), board="default"
             )
+
+        assert _counts(conn) == (0, 0, 0, 0)
+        assert conn.execute("SELECT COUNT(*) FROM task_events").fetchone()[0] == 0
+        assert fired_hooks == []
+
+
+def test_caller_owned_materialization_rollback_emits_no_lifecycle_hook(
+    tmp_path,
+    monkeypatch,
+):
+    plan = _plan()
+    fired_hooks: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        kb,
+        "_fire_kanban_lifecycle_hook",
+        lambda event, task_id, **_fields: fired_hooks.append((event, task_id)),
+    )
+    with kb.connect(tmp_path / "kanban.db") as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        materialize_org_run(
+            conn, plan, _validation(plan), board="default"
+        )
+        conn.rollback()
 
         assert _counts(conn) == (0, 0, 0, 0)
         assert conn.execute("SELECT COUNT(*) FROM task_events").fetchone()[0] == 0
@@ -635,6 +693,47 @@ def test_dispatch_never_applies_default_assignee_to_unassigned_managed_task(
         assert not any(
             event.kind == "assigned" for event in kb.list_events(conn, task_id)
         )
+
+
+def test_dispatch_capability_blocks_an_unassigned_managed_review(
+    tmp_path,
+    monkeypatch,
+):
+    plan = _plan()
+    with kb.connect(tmp_path / "kanban.db") as conn:
+        topology = materialize_org_run(
+            conn, plan, _validation(plan), board="default"
+        )
+        review_id = topology.tasks["runtime"].review_id
+        assert review_id is not None
+        conn.execute(
+            "UPDATE tasks SET status='blocked' WHERE id<>?",
+            (review_id,),
+        )
+        conn.execute(
+            "UPDATE tasks SET status='review', assignee=NULL WHERE id=?",
+            (review_id,),
+        )
+        conn.commit()
+        monkeypatch.setattr(
+            "hermes_cli.profiles.profile_exists",
+            lambda _profile: True,
+        )
+        spawned: list[str] = []
+
+        result = kb.dispatch_once(
+            conn,
+            spawn_fn=lambda task, _workspace: spawned.append(task.id),
+            default_assignee="reviewer",
+            board="default",
+        )
+
+        review = kb.get_task(conn, review_id)
+        assert review.status == "blocked"
+        assert review.assignee is None
+        assert review.block_kind == "capability"
+        assert review_id not in result.skipped_unassigned
+        assert spawned == []
 
 
 def test_dispatch_pins_validated_role_route_through_spawn(

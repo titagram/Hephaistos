@@ -8378,9 +8378,6 @@ def _dispatch_once_locked(
     for row in review_rows:
         if max_spawn is not None and running_count + spawned >= max_spawn:
             break
-        if not row["assignee"]:
-            result.skipped_unassigned.append(row["id"])
-            continue
         try:
             from hermes_cli.profiles import profile_exists
         except Exception:
@@ -8404,6 +8401,9 @@ def _dispatch_once_locked(
                         kind="capability",
                     )
                 continue
+        if not row["assignee"]:
+            result.skipped_unassigned.append(row["id"])
+            continue
         if (
             not managed_org_run_task
             and profile_exists is not None

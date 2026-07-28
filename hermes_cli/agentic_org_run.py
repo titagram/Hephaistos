@@ -17,6 +17,7 @@ from hermes_cli.implementation_plan import (
     ImplementationTask,
     PlanValidation,
     canonical_plan_json,
+    parse_implementation_plan,
 )
 from hermes_cli.org_run_store import (
     get_org_run,
@@ -203,6 +204,7 @@ def materialize_org_run(
     activate: bool = True,
 ) -> OrgRunTopology:
     """Materialize a simplified OrgRun DAG in one SQLite transaction."""
+    caller_owned_transaction = conn.in_transaction
     with kb.write_txn(conn):
         existing = get_org_run(conn, plan.run_id)
         if existing is not None:
@@ -504,14 +506,15 @@ def materialize_org_run(
             review_id=review_id,
             finalization_id=finalization_id,
         )
-    kb._fire_kanban_lifecycle_hook(
-        "kanban_task_completed",
-        anchor_id,
-        board=board if board is not None else kb.get_current_board(),
-        assignee=_profile(validation, "orchestrator"),
-        run_id=anchor_run_id,
-        summary=anchor_summary,
-    )
+    if not caller_owned_transaction:
+        kb._fire_kanban_lifecycle_hook(
+            "kanban_task_completed",
+            anchor_id,
+            board=board if board is not None else kb.get_current_board(),
+            assignee=_profile(validation, "orchestrator"),
+            run_id=anchor_run_id,
+            summary=anchor_summary,
+        )
     return topology
 
 
@@ -553,29 +556,60 @@ def _validate_stored_node_provenance(
             f"OrgRun {run_id} has incomplete stored topology"
         ) from exc
 
-    expected_node_ids: set[str]
-    expected_records: set[tuple[str, str, str, str]] | None = None
+    expected_records: set[tuple[str, str, str, str]]
     if plan_payload.get("schema") == IMPLEMENTATION_PLAN_SCHEMA:
-        expected_node_ids = {f"org-run:{run_id}:anchor"}
-        tasks = plan_payload.get("tasks")
-        if not isinstance(tasks, list) or not tasks:
+        try:
+            plan = parse_implementation_plan(plan_payload)
+        except ValueError as exc:
+            raise ValueError(
+                f"OrgRun {run_id} has incomplete stored topology"
+            ) from exc
+        if plan.run_id != run_id:
             raise ValueError(f"OrgRun {run_id} has incomplete stored topology")
-        for task in tasks:
-            if not isinstance(task, dict) or not task.get("id"):
-                raise ValueError(
-                    f"OrgRun {run_id} has incomplete stored topology"
+        expected_specs = [
+            (f"org-run:{run_id}:anchor", "anchor", "orchestrator"),
+            *(
+                (
+                    _task_node_key(run_id, task.id),
+                    "execution",
+                    task.role,
                 )
-            task_key = _task_node_key(run_id, str(task["id"]))
-            expected_node_ids.add(task_key)
-            if bool(task.get("independent_review")) or task.get("risk") == "high":
-                expected_node_ids.add(f"{task_key}:review")
-        expected_node_ids.add(f"org-run:{run_id}:integration")
-        if bool(plan_payload.get("independent_review")) or any(
-            isinstance(task, dict) and task.get("risk") == "high"
-            for task in tasks
-        ):
-            expected_node_ids.add(f"org-run:{run_id}:review")
-        expected_node_ids.add(f"org-run:{run_id}:finalize")
+                for task in plan.tasks
+            ),
+            *(
+                (
+                    f"{_task_node_key(run_id, task.id)}:review",
+                    "task_review",
+                    "reviewer",
+                )
+                for task in plan.tasks
+                if _review_required(task)
+            ),
+            (f"org-run:{run_id}:integration", "integration", "orchestrator"),
+            *(
+                [(f"org-run:{run_id}:review", "global_review", "reviewer")]
+                if _global_review_required(plan)
+                else []
+            ),
+            (f"org-run:{run_id}:finalize", "finalization", "orchestrator"),
+        ]
+        expected_node_ids = {node_id for node_id, _, _ in expected_specs}
+        placeholders = ",".join("?" for _ in expected_node_ids)
+        task_rows = conn.execute(
+            f"SELECT id, idempotency_key FROM tasks "
+            f"WHERE idempotency_key IN ({placeholders})",
+            tuple(sorted(expected_node_ids)),
+        ).fetchall()
+        task_ids = {
+            str(row["idempotency_key"]): str(row["id"])
+            for row in task_rows
+        }
+        if set(task_ids) != expected_node_ids:
+            raise ValueError(f"OrgRun {run_id} has incomplete stored topology")
+        expected_records = {
+            (node_id, task_ids[node_id], node_kind, logical_role)
+            for node_id, node_kind, logical_role in expected_specs
+        }
     elif plan_payload.get("schema") == "hades.legacy-org-run-adoption.v1":
         raw_nodes = plan_payload.get("nodes")
         if not isinstance(raw_nodes, list) or not raw_nodes:
@@ -594,20 +628,15 @@ def _validate_stored_node_provenance(
             raise ValueError(
                 f"OrgRun {run_id} has incomplete stored topology"
             ) from exc
-        expected_node_ids = {record[0] for record in expected_records}
     else:
         raise ValueError(f"OrgRun {run_id} has incomplete stored topology")
 
-    actual_node_ids = {node.node_id for node in nodes}
-    if actual_node_ids != expected_node_ids:
+    actual_records = {
+        (node.node_id, node.task_id, node.node_kind, node.logical_role)
+        for node in nodes
+    }
+    if actual_records != expected_records:
         raise ValueError(f"OrgRun {run_id} has incomplete stored topology")
-    if expected_records is not None:
-        actual_records = {
-            (node.node_id, node.task_id, node.node_kind, node.logical_role)
-            for node in nodes
-        }
-        if actual_records != expected_records:
-            raise ValueError(f"OrgRun {run_id} has incomplete stored topology")
 
 
 def load_org_run_topology(
