@@ -245,6 +245,8 @@ def project_org_run_completion(
     if not final_runs:
         return None
     final_run = final_runs[-1]
+    for node in nodes:
+        project_task_completion(conn, node.task_id, board=board)
     critical_node_kinds = {"integration", "task_review", "global_review", "finalization"}
     critical_task_ids = [
         node.task_id for node in non_anchor if node.node_kind in critical_node_kinds

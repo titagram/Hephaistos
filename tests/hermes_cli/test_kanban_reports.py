@@ -19,7 +19,7 @@ from hermes_cli.kanban_reports import (
     project_org_run_completion,
     project_task_completion,
 )
-from hermes_cli.org_run_store import get_org_run
+from hermes_cli.org_run_store import get_org_run, list_org_nodes
 
 
 def _plan(*, run_id: str = "reports-run-001") -> ImplementationPlan:
@@ -186,6 +186,32 @@ def test_projection_skips_nonterminal_tasks_and_org_run_until_all_gates_finish(t
             task_report["task_id"] for task_report in payload["task_reports"]
         }
         assert report.report_markdown.startswith(f"# Development report: {plan.run_id}\n")
+
+
+def test_final_projection_backfills_the_completed_anchor_task_report(tmp_path):
+    """Breaks if materialization's terminal anchor run never gains a task report."""
+    plan = _plan(run_id="reports-run-anchor")
+    with kb.connect(tmp_path / "kanban.db") as conn:
+        topology = materialize_org_run(
+            conn, plan, _validation(plan), board="default"
+        )
+        _complete(
+            conn,
+            topology.tasks["implementation"].execution_id,
+            summary="implementation done",
+        )
+        _complete(conn, topology.integration_id, summary="integration done")
+        _complete(conn, topology.finalization_id, summary="final evidence done")
+
+        active_task_ids = {
+            node.task_id
+            for node in list_org_nodes(conn, plan.run_id)
+            if node.state == "active"
+        }
+        task_reports = list_reports(conn, report_type="task")
+
+        assert {report.subject_id for report in task_reports} == active_task_ids
+        assert len(task_reports) == len(active_task_ids)
 
 
 def test_org_run_projection_is_version_isolated_and_after_task_returns_all_new_records(tmp_path):
