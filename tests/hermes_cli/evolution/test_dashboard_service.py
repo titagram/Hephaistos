@@ -451,6 +451,180 @@ def test_snapshot_coherent_state_is_public_stable_and_digest_ignores_observed_at
     assert identity.organism_id not in json.dumps(first)
 
 
+def test_snapshot_overview_summarizes_governed_state_from_one_lifecycle_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Dropping any overview relation must make this bounded public view fail."""
+    root = tmp_path / "organism"
+    identity, ledger, attempts = _seed_mutation_governance_state(root)
+    coverage = _current_coverage()
+    coverage["capabilities"] = {
+        "status": "stale",
+        "fingerprint": "sha256:capabilities-stale",
+    }
+    _publish_gnothi(root, identity, coverage=coverage)
+
+    from hermes_cli.evolution.authorization import (
+        create_authorization_request,
+        issue_grant,
+    )
+
+    scope = {
+        "source_classes": ["documentation", "paper"],
+        "domains": ["example.com", "research.example"],
+        "operations": ["search", "retrieve"],
+        "duration": 60,
+    }
+    pending = create_authorization_request(
+        ledger,
+        attempt_id=attempts[0],
+        kind="research",
+        subject_digest="a" * 64,
+        scope=scope,
+        ttl_seconds=120,
+    )
+    decided = create_authorization_request(
+        ledger,
+        attempt_id=attempts[1],
+        kind="research",
+        subject_digest="b" * 64,
+        scope=scope,
+        ttl_seconds=120,
+    )
+    issue_grant(
+        ledger,
+        request_id=decided.request_id,
+        approved_by="local-operator",
+        confirmation_digest=content_digest(
+            decided.canonical_payload(),
+            domain="hades-evolution-authorization-request-v1",
+        ),
+    )
+
+    original_snapshot_read = dashboard_module.read_evolution_snapshot
+    snapshot_reads = 0
+
+    def one_lifecycle_snapshot(query, evolution_root):
+        nonlocal snapshot_reads
+        snapshot_reads += 1
+        return original_snapshot_read(query, evolution_root)
+
+    monkeypatch.setattr(
+        dashboard_module, "read_evolution_snapshot", one_lifecycle_snapshot
+    )
+    result = EvolutionDashboardService(root).snapshot()
+
+    assert snapshot_reads == 1
+    assert result["generations"]["state"] == "ready"
+    assert result["gnothi"]["revision_id"] == "rev-dashboard-contract"
+    assert len(result["gnothi"]["revision_digest"]) == 64
+    assert result["gnothi"]["coverage"]["drifted_domains"] == ["capabilities"]
+    assert "capabilities" in result["gnothi"]["coverage"]["unknown_domains"]
+    collector_status = {
+        item["name"]: item["status"]
+        for item in result["gnothi"]["coverage"]["collector_status"]
+    }
+    assert collector_status["capabilities"] == "stale"
+    assert result["telos"]["active_digest_prefix"] is not None
+    assert result["telos"]["revision_summary"]["desired_trait_count"] == 1
+
+    pipeline = result["pipeline"]
+    assert pipeline["suggestions"]["total"] == 3
+    assert pipeline["suggestions"]["by_state"] == {
+        "eligible": 2,
+        "observing": 1,
+    }
+    assert pipeline["suggestions"]["truncated"] is False
+    assert pipeline["blueprints"]["total"] == 2
+    assert pipeline["blueprints"]["by_state"] == {"draft": 2}
+    assert pipeline["blueprints"]["truncated"] is False
+    assert pipeline["lifecycle"] == {
+        "pending_approval_count": 1,
+        "decision_count": 1,
+    }
+    assert pending.request_id not in json.dumps(result)
+    assert identity.organism_id not in json.dumps(result)
+    ledger.connection.close()
+
+
+def test_observer_toggle_returns_a_refreshed_digest_bound_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Returning only the requested boolean leaves the caller with a stale view."""
+    import hermes_cli.evolution.global_config as global_config
+
+    root = tmp_path / "organism"
+    ensure_global_lifecycle_initialized(root)
+    identity = probe_organism_identity(root)
+    assert identity is not None
+    settings_root = tmp_path / "settings"
+    monkeypatch.setattr(
+        global_config.hermes_constants,
+        "get_default_hermes_root",
+        lambda: settings_root,
+    )
+    service = EvolutionDashboardService(root)
+
+    absent_config = service.snapshot()
+    assert absent_config["observer"]["enabled"] is False
+    assert not settings_root.exists()
+
+    global_config.save_global_config({"enabled": True, "observer": {"enabled": True}})
+    before_pause = service.snapshot()
+    paused = service.set_observer_enabled(
+        organism_id=identity.organism_id,
+        expected_snapshot_digest=before_pause["snapshot_digest"],
+        enabled=False,
+    )
+
+    assert paused["snapshot"]["observer"]["enabled"] is False
+    assert paused["snapshot"]["snapshot_digest"] != before_pause["snapshot_digest"]
+
+    resumed = service.set_observer_enabled(
+        organism_id=identity.organism_id,
+        expected_snapshot_digest=paused["snapshot"]["snapshot_digest"],
+        enabled=True,
+    )
+
+    assert resumed["snapshot"]["observer"]["enabled"] is True
+    assert resumed["snapshot"]["snapshot_digest"] != paused["snapshot"]["snapshot_digest"]
+
+
+def test_snapshot_reports_a_stable_observer_degraded_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An open breaker is degraded state, not an opaque boolean-only failure."""
+    import hermes_cli.evolution.global_config as global_config
+
+    root = tmp_path / "organism"
+    identity, ledger, _ = _seed_mutation_governance_state(root)
+    _publish_gnothi(root, identity, coverage=_current_coverage())
+    settings_root = tmp_path / "settings"
+    monkeypatch.setattr(
+        global_config.hermes_constants,
+        "get_default_hermes_root",
+        lambda: settings_root,
+    )
+    global_config.save_global_config({"enabled": True, "observer": {"enabled": True}})
+
+    service = EvolutionDashboardService(root)
+    healthy = service.snapshot()
+    (root / "observer_state.json").write_text(
+        '{"consecutive_errors": 5, "circuit_open": true}', encoding="utf-8"
+    )
+    degraded = service.snapshot()
+
+    assert healthy["observer"]["state"] == "ready"
+    assert degraded["observer"] == {
+        "state": "degraded",
+        "enabled": True,
+        "circuit_open": True,
+        "degraded_reason": "circuit_open",
+    }
+    assert degraded["snapshot_digest"] != healthy["snapshot_digest"]
+    ledger.connection.close()
+
+
 def test_snapshot_rejects_telos_directory_symlink(tmp_path: Path) -> None:
     """A substituted Telos parent cannot make external data appear ready."""
     root = tmp_path / "organism"
@@ -516,10 +690,9 @@ def test_snapshot_reads_valid_telos_without_posix_openat_flags(
 
     result = service.snapshot()
 
-    assert result["telos"] == {
-        "state": "ready",
-        "active_digest_prefix": digest[:12],
-    }
+    assert result["telos"]["state"] == "ready"
+    assert result["telos"]["active_digest_prefix"] == digest[:12]
+    assert result["telos"]["revision_summary"]["desired_trait_count"] == 1
     assert "telos_pointer_invalid" not in result["diagnostics"]
 
 
@@ -1594,6 +1767,44 @@ def test_rebuild_and_scan_reject_stale_snapshots_before_job_submission(
         )
 
     assert _tree_bytes(root) == before
+
+
+def test_paused_observer_scan_is_rejected_before_a_job_can_process_events(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A paused Observer must not enqueue work that can ingest evidence."""
+    import hermes_cli.evolution.global_config as global_config
+    from hermes_cli.evolution.dashboard_jobs import EvolutionJobConflict
+
+    root = tmp_path / "organism"
+    ensure_global_lifecycle_initialized(root)
+    identity = probe_organism_identity(root)
+    assert identity is not None
+    settings_root = tmp_path / "settings"
+    monkeypatch.setattr(
+        global_config.hermes_constants,
+        "get_default_hermes_root",
+        lambda: settings_root,
+    )
+    global_config.save_global_config({"enabled": True, "observer": {"enabled": False}})
+
+    class Jobs:
+        calls = 0
+
+        def submit_observer_scan(self):
+            self.calls += 1
+            return SimpleNamespace(job_id="must-not-exist")
+
+    jobs = Jobs()
+    service = EvolutionDashboardService(root, job_manager=jobs)
+
+    with pytest.raises(EvolutionJobConflict, match="observer_paused"):
+        service.submit_observer_scan(
+            organism_id=identity.organism_id,
+            expected_snapshot_digest=service.snapshot()["snapshot_digest"],
+        )
+
+    assert jobs.calls == 0
 
 
 def test_rebuild_uses_fixed_manager_and_rejects_unknown_or_excess_collectors(

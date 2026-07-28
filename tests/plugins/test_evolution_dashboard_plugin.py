@@ -177,6 +177,19 @@ def test_server_owned_root_reuses_one_job_manager_for_submission_and_polling(
     """Dropping the production manager after submission must fail this poll contract."""
     initialized = production_client.post("/api/plugins/evolution/initialize")
     assert initialized.status_code == 200, initialized.text
+    if path == "observer-scan":
+        # Observer scans are an opt-in collection capability.  The production
+        # root begins with the globally-disabled default, so enable it before
+        # deriving the digest-bound mutation context for this submission path.
+        from hermes_cli.evolution.global_config import (
+            load_global_config,
+            save_global_config,
+        )
+
+        autopoiesis = load_global_config()["autopoiesis"]
+        autopoiesis["enabled"] = True
+        autopoiesis.setdefault("observer", {})["enabled"] = True
+        save_global_config(autopoiesis)
     context = _mutation_context(production_client)
 
     submitted = production_client.post(
@@ -190,6 +203,18 @@ def test_server_owned_root_reuses_one_job_manager_for_submission_and_polling(
     polled = production_client.get(f"/api/plugins/evolution/jobs/{job_id}")
     assert polled.status_code == 200, polled.text
     assert polled.json()["job_id"] == job_id
+
+
+def test_paused_observer_scan_returns_a_stable_conflict_response(client):
+    """The public API must reject scans before a disabled Observer can enqueue work."""
+    assert client.post("/api/plugins/evolution/initialize").status_code == 200
+    response = client.post(
+        "/api/plugins/evolution/jobs/observer-scan",
+        json=_mutation_context(client),
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {"code": "observer_paused"}
 
 
 def test_job_conflicts_return_a_stable_conflict_response(client, plugin, monkeypatch):

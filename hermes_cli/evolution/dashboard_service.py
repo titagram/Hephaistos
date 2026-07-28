@@ -71,6 +71,7 @@ _MAX_TELOS_DIRECTORY_ENTRIES = _MAX_REVISIONS + 1
 _MAX_DASHBOARD_LIFECYCLE_EVENTS = 256
 _MAX_DASHBOARD_EVOLUTION_DIRECTORY_MEMBERS = 64
 _MAX_REBUILD_COLLECTORS = len(COLLECTOR_ORDER)
+_MAX_OVERVIEW_STATE_BUCKETS = 16
 
 # Build, canary, promotion, and stable are visible contractual stages only.
 # They deliberately remain unavailable until a real local runtime owns them.
@@ -397,6 +398,7 @@ class EvolutionDashboardService:
     def snapshot(self) -> EvolutionSnapshot:
         """Return one bounded view without creating or repairing local state."""
         diagnostics: set[str] = set()
+        observer_enabled = self._observer_collection_enabled()
         try:
             identity = probe_organism_identity(self.root)
         except Exception:
@@ -406,9 +408,9 @@ class EvolutionDashboardService:
                 organism=None,
                 gnothi=self._missing_gnothi(),
                 telos=self._missing_telos(),
-                observer={"state": "not_ready", "circuit_open": False},
+                observer=self._not_ready_observer(observer_enabled),
                 generations=self._missing_generations(),
-                pipeline={"state": "not_ready"},
+                pipeline=self._empty_overview_pipeline("not_ready"),
                 diagnostics=diagnostics,
             )
 
@@ -418,9 +420,9 @@ class EvolutionDashboardService:
                 organism=None,
                 gnothi=self._missing_gnothi(),
                 telos=self._missing_telos(),
-                observer={"state": "not_ready", "circuit_open": False},
+                observer=self._not_ready_observer(observer_enabled),
                 generations=self._missing_generations(),
-                pipeline={"state": "not_ready"},
+                pipeline=self._empty_overview_pipeline("not_ready"),
                 diagnostics=diagnostics,
             )
 
@@ -430,9 +432,10 @@ class EvolutionDashboardService:
         }
         gnothi = self._probe_gnothi(diagnostics)
         telos = self._probe_telos(identity, diagnostics)
-        generations = self._probe_generations(diagnostics)
-        observer = self._probe_observer(generations, telos, diagnostics)
-        pipeline = {"state": self._pipeline_state(generations)}
+        generations, pipeline = self._probe_lifecycle_overview(diagnostics)
+        observer = self._probe_observer(
+            generations, telos, diagnostics, enabled=observer_enabled
+        )
 
         state = self._state_from_components(gnothi, telos, observer, generations)
         return self._finalize(
@@ -583,7 +586,7 @@ class EvolutionDashboardService:
                 raise
             except Exception:
                 raise EvolutionDashboardError("evolution_unavailable") from None
-        return {"enabled": enabled}
+        return {"enabled": enabled, "snapshot": self.snapshot()}
 
     @staticmethod
     def _validated_collectors(collectors: list[str]) -> list[str]:
@@ -638,6 +641,8 @@ class EvolutionDashboardService:
             organism_id=organism_id,
             expected_snapshot_digest=expected_snapshot_digest,
         ):
+            if not self._observer_collection_enabled():
+                raise EvolutionJobConflict("observer_paused")
             try:
                 return self._jobs().submit_observer_scan()
             except EvolutionJobConflict:
@@ -1237,6 +1242,119 @@ class EvolutionDashboardService:
             return "blocked"
 
     @staticmethod
+    def _state_count_summary(
+        connection: Any,
+        *,
+        table: str,
+        allowed_states: frozenset[str],
+    ) -> dict[str, Any]:
+        """Count one small public state projection without materializing rows."""
+        total = int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+        rows = connection.execute(
+            f"""
+            SELECT state, COUNT(*) AS count
+            FROM {table}
+            GROUP BY state
+            ORDER BY state ASC
+            LIMIT ?
+            """,
+            (_MAX_OVERVIEW_STATE_BUCKETS + 1,),
+        ).fetchall()
+        counts: dict[str, int] = {}
+        for row in rows[:_MAX_OVERVIEW_STATE_BUCKETS]:
+            raw_state = row["state"]
+            state = raw_state if raw_state in allowed_states else "invalid"
+            counts[state] = counts.get(state, 0) + int(row["count"])
+        return {
+            "total": total,
+            "by_state": counts,
+            "truncated": len(rows) > _MAX_OVERVIEW_STATE_BUCKETS,
+        }
+
+    def _lifecycle_overview(self, ledger: Any) -> dict[str, Any]:
+        """Return the compact durable counts that belong to one ledger view."""
+        connection = ledger.connection
+        suggestions = self._state_count_summary(
+            connection,
+            table="opportunity_suggestions",
+            allowed_states=frozenset(
+                {
+                    "accepted",
+                    "addressed",
+                    "dismissed",
+                    "draft",
+                    "eligible",
+                    "observing",
+                    "superseded",
+                    "surfaced",
+                }
+            ),
+        )
+        blueprints = self._state_count_summary(
+            connection,
+            table="blueprints",
+            allowed_states=frozenset(
+                {
+                    "active",
+                    "blueprint_ready",
+                    "build_approved",
+                    "build_failed",
+                    "building",
+                    "canary_failed",
+                    "canary_running",
+                    "draft",
+                    "promotion_ready",
+                    "quarantined",
+                    "rejected",
+                    "research_authorized",
+                    "research_expired",
+                    "retired",
+                    "rolled_back",
+                    "stable",
+                }
+            ),
+        )
+        pending_approval_count = int(
+            connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM authorization_requests AS request
+                LEFT JOIN authorization_decisions AS decision
+                  ON decision.request_id = request.request_id
+                WHERE decision.request_id IS NULL
+                """
+            ).fetchone()[0]
+        )
+        decision_count = int(
+            connection.execute("SELECT COUNT(*) FROM authorization_decisions").fetchone()[0]
+        )
+        return {
+            "state": "ready",
+            "suggestions": suggestions,
+            "blueprints": blueprints,
+            # Deliberately excludes process-local dashboard confirmations.  The
+            # snapshot digest binds those confirmations, so only durable ledger
+            # decisions may appear in this public projection.
+            "lifecycle": {
+                "pending_approval_count": pending_approval_count,
+                "decision_count": decision_count,
+            },
+        }
+
+    @staticmethod
+    def _empty_overview_pipeline(state: str) -> dict[str, Any]:
+        total: int | None = 0 if state in {"missing", "not_ready"} else None
+        return {
+            "state": state,
+            "suggestions": {"total": total, "by_state": {}, "truncated": False},
+            "blueprints": {"total": total, "by_state": {}, "truncated": False},
+            "lifecycle": {
+                "pending_approval_count": total,
+                "decision_count": total,
+            },
+        }
+
+    @staticmethod
     def _pipeline_stages() -> list[dict[str, Any]]:
         return [
             {"id": stage_id, "available": available}
@@ -1694,6 +1812,10 @@ class EvolutionDashboardService:
                 "total_domains": 0,
                 "unknown_domains": [],
                 "truncated": False,
+                "drifted_domains": [],
+                "drift_truncated": False,
+                "collector_status": [],
+                "collector_status_truncated": False,
             },
         }
 
@@ -1709,6 +1831,30 @@ class EvolutionDashboardService:
             "last_known_good_generation_prefix": None,
             "overlay_enabled": False,
         }
+
+    @staticmethod
+    def _not_ready_observer(enabled: bool) -> dict[str, Any]:
+        return {
+            "state": "not_ready",
+            "enabled": enabled,
+            "circuit_open": False,
+            "degraded_reason": None,
+        }
+
+    @staticmethod
+    def _observer_collection_enabled() -> bool:
+        """Read the effective Observer gate without creating configuration."""
+        try:
+            config = load_global_config()
+            autopoiesis = config.get("autopoiesis")
+            if not isinstance(autopoiesis, dict) or not bool(
+                autopoiesis.get("enabled", False)
+            ):
+                return False
+            observer = autopoiesis.get("observer")
+            return not isinstance(observer, dict) or bool(observer.get("enabled", True))
+        except Exception:
+            return False
 
     def _root_is_directory(self) -> bool:
         try:
@@ -1771,13 +1917,26 @@ class EvolutionDashboardService:
         for name in names:
             row = rows.get(name)
             status = row.get("status") if isinstance(row, dict) else "missing"
-            statuses[name] = status if isinstance(status, str) else "missing"
+            statuses[name] = (
+                status
+                if status in {"current", "missing", "partial", "stale", "unknown"}
+                else "unknown"
+            )
         unknown = sorted(name for name, status in statuses.items() if status != "current")
+        drifted = sorted(name for name, status in statuses.items() if status == "stale")
+        collector_status = [
+            {"name": name, "status": statuses[name]}
+            for name in sorted(statuses)[:_MAX_UNKNOWN_DOMAINS]
+        ]
         return {
             "current_domains": sum(status == "current" for status in statuses.values()),
             "total_domains": len(statuses),
             "unknown_domains": unknown[:_MAX_UNKNOWN_DOMAINS],
             "truncated": len(unknown) > _MAX_UNKNOWN_DOMAINS,
+            "drifted_domains": drifted[:_MAX_UNKNOWN_DOMAINS],
+            "drift_truncated": len(drifted) > _MAX_UNKNOWN_DOMAINS,
+            "collector_status": collector_status,
+            "collector_status_truncated": len(statuses) > _MAX_UNKNOWN_DOMAINS,
         }
 
     @staticmethod
@@ -1814,14 +1973,29 @@ class EvolutionDashboardService:
                 or parsed.organism_id != identity.organism_id
             ):
                 raise _PublicReadError("mismatched_revision")
-            return {"state": "ready", "active_digest_prefix": digest[:12]}
+            return {
+                "state": "ready",
+                "active_digest_prefix": digest[:12],
+                "revision_summary": {
+                    "parent_digest_prefix": _prefix(parsed.parent_digest, 12),
+                    "purpose": self._public_text(parsed.purpose, identity, limit=256),
+                    "desired_trait_count": len(parsed.desired_traits),
+                    "capability_direction_count": len(parsed.capability_directions),
+                    "priority_count": len(parsed.priorities),
+                    "prohibition_count": len(parsed.prohibitions),
+                    "success_indicator_count": len(parsed.success_indicators),
+                },
+            }
         except _PublicReadError:
             diagnostics.add("telos_pointer_invalid")
         except Exception:
             diagnostics.add("telos_pointer_invalid")
         return {"state": "corrupt", "active_digest_prefix": None}
 
-    def _probe_generations(self, diagnostics: set[str]) -> dict[str, Any]:
+    def _probe_lifecycle_overview(
+        self, diagnostics: set[str]
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Read generations and compact lifecycle counts from one snapshot DB."""
         evolution_root = self.root / "evolution"
         state_kind = evolution_state_kind(
             evolution_root,
@@ -1829,15 +2003,15 @@ class EvolutionDashboardService:
         )
         if state_kind == "uninitialized":
             diagnostics.add("lifecycle_unavailable")
-            return self._missing_generations()
+            return self._missing_generations(), self._empty_overview_pipeline("not_ready")
         if state_kind != "existing":
             diagnostics.add("lifecycle_unavailable")
             result = self._missing_generations()
             result["state"] = "blocked"
-            return result
+            return result, self._empty_overview_pipeline("blocked")
         if not _regular_file_exists(evolution_root / "evolution.db"):
             diagnostics.add("lifecycle_unavailable")
-            return self._missing_generations()
+            return self._missing_generations(), self._empty_overview_pipeline("not_ready")
 
         def query(ledger: Any) -> tuple[str, Any]:
             chain_state = self._bounded_lifecycle_chain_state(ledger)
@@ -1845,25 +2019,28 @@ class EvolutionDashboardService:
                 return "event_chain_invalid", None
             if chain_state != "ready":
                 return "lifecycle_unavailable", None
-            return "ok", _evaluate_open_ledger(evolution_root, ledger, repair=False)
+            reconciliation = _evaluate_open_ledger(evolution_root, ledger, repair=False)
+            return "ok", (reconciliation, self._lifecycle_overview(ledger))
 
         try:
-            outcome, reconciliation = read_evolution_snapshot(query, evolution_root)
+            outcome, data = read_evolution_snapshot(query, evolution_root)
         except Exception:
             diagnostics.add("lifecycle_unavailable")
             result = self._missing_generations()
             result["state"] = "blocked"
-            return result
+            return result, self._empty_overview_pipeline("blocked")
         if outcome == "event_chain_invalid":
             diagnostics.add("event_chain_invalid")
             result = self._missing_generations()
             result["state"] = "corrupt"
-            return result
+            return result, self._empty_overview_pipeline("corrupt")
         if outcome == "lifecycle_unavailable":
             diagnostics.add("lifecycle_unavailable")
             result = self._missing_generations()
             result["state"] = "blocked"
-            return result
+            return result, self._empty_overview_pipeline("blocked")
+
+        reconciliation, pipeline = data
 
         if reconciliation.status == "coherent":
             state: SnapshotState = "ready"
@@ -1872,7 +2049,7 @@ class EvolutionDashboardService:
         else:
             state = "blocked"
             diagnostics.add("lifecycle_unavailable")
-        return {
+        generations = {
             "state": state,
             "active_generation_prefix": _prefix(
                 None if reconciliation.active is None else reconciliation.active.generation_id,
@@ -1886,34 +2063,59 @@ class EvolutionDashboardService:
             ),
             "overlay_enabled": bool(reconciliation.overlay_enabled),
         }
+        if state != "ready":
+            return generations, self._empty_overview_pipeline(str(state))
+        return generations, pipeline
 
     def _probe_observer(
         self,
         generations: dict[str, Any],
         telos: dict[str, Any],
         diagnostics: set[str],
+        *,
+        enabled: bool,
     ) -> dict[str, Any]:
         if generations["state"] != "ready" or telos["state"] != "ready":
-            return {"state": "not_ready", "circuit_open": False}
+            return self._not_ready_observer(enabled)
+        if not enabled:
+            return {
+                "state": "paused",
+                "enabled": False,
+                "circuit_open": False,
+                "degraded_reason": None,
+            }
         try:
-            state = _read_regular_json(self.root / "observer_state.json")
+            state = _read_regular_json(self.root / "observer_state.json", root=self.root)
         except _PublicReadError:
             diagnostics.add("observer_state_invalid")
-            return {"state": "degraded", "circuit_open": True}
+            return {
+                "state": "degraded",
+                "enabled": True,
+                "circuit_open": True,
+                "degraded_reason": "observer_state_invalid",
+            }
         if state is None:
-            return {"state": "ready", "circuit_open": False}
+            return {
+                "state": "ready",
+                "enabled": True,
+                "circuit_open": False,
+                "degraded_reason": None,
+            }
         circuit_open = state.get("circuit_open")
         if not isinstance(circuit_open, bool):
             diagnostics.add("observer_state_invalid")
-            return {"state": "degraded", "circuit_open": True}
+            return {
+                "state": "degraded",
+                "enabled": True,
+                "circuit_open": True,
+                "degraded_reason": "observer_state_invalid",
+            }
         return {
             "state": "degraded" if circuit_open else "ready",
+            "enabled": True,
             "circuit_open": circuit_open,
+            "degraded_reason": "circuit_open" if circuit_open else None,
         }
-
-    @staticmethod
-    def _pipeline_state(generations: dict[str, Any]) -> str:
-        return "ready" if generations["state"] == "ready" else "not_ready"
 
     @staticmethod
     def _state_from_components(
