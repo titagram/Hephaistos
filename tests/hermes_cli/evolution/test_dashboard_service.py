@@ -647,6 +647,44 @@ def test_revision_diff_preserves_raw_owner_class_and_redacts_embedded_paths(
     assert r"C:\Users\secret" not in json.dumps(result)
 
 
+def test_revision_diff_redacts_network_paths_without_consuming_public_context(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "organism"
+    identity = create_organism_identity(root)
+    first = _graph_artifact(identity, revision_id="rev-network-1", available=True)
+    second = _graph_artifact(identity, revision_id="rev-network-2", available=True)
+    add_node(
+        second,
+        node_id="capability:network-path",
+        kind="capability",
+        label=r'Open "\\server\share\secret\plugin.py:42:7"',
+        owner_class="third-party",
+        owner_id="private-owner",
+        state={"available": True},
+        evidence_refs=["[//server/share/private/trace.log:4], https://example.test/docs"],
+    )
+    store = OrganismRevisionStore(root / "gnothi_seauton")
+    store.publish(first)
+    store.publish(second)
+
+    result = EvolutionDashboardService(root).revision_diff(
+        "rev-network-1", "rev-network-2"
+    )
+
+    assert result["added_capabilities"] == [
+        {
+            "id": "capability:network-path",
+            "kind": "capability",
+            "label": 'Open "[ABSOLUTE_PATH]:42:7"',
+            "owner_class": "third-party",
+            "generation_scope": "stable",
+            "state": {"available": True},
+            "evidence_refs": ["[[ABSOLUTE_PATH]:4], https://example.test/docs"],
+        }
+    ]
+
+
 def test_graph_and_revision_reads_leave_an_absent_root_absent(tmp_path: Path) -> None:
     root = tmp_path / "organism"
     service = EvolutionDashboardService(root)

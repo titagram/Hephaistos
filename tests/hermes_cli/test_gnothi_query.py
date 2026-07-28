@@ -300,6 +300,29 @@ def test_subgraph_traverses_both_dependency_directions_and_sanitizes_public_rows
     assert [node["id"] for node in by_label["nodes"]] == ["capability:beta"]
 
 
+def test_subgraph_redacts_network_paths_without_consuming_evidence_context(
+    tmp_path: Path,
+) -> None:
+    store = OrganismRevisionStore(root=tmp_path)
+    artifact = _graph_artifact()
+    artifact["nodes"][0]["evidence_refs"] = [
+        r'Open "\\server\share\secret\plugin.py:42:7" and https://example.test/docs'
+    ]
+    store.publish(artifact)
+
+    result = OrganismQuery(store).subgraph(
+        root_id="capability:alpha",
+        depth=0,
+        limit=20,
+        kinds=frozenset(),
+        search="",
+    )
+
+    assert result["nodes"][0]["evidence_refs"] == [
+        'Open "[ABSOLUTE_PATH]:42:7" and https://example.test/docs'
+    ]
+
+
 def test_subgraph_uses_the_supplied_immutable_artifact(tmp_path: Path) -> None:
     store = OrganismRevisionStore(root=tmp_path)
     first = _graph_artifact("rev-graph-first")
