@@ -7,7 +7,11 @@ import json
 import pytest
 
 from hermes_cli import kanban_db as kb
-from hermes_cli.agentic_org_run import materialize_org_run
+from hermes_cli.agentic_org_run import adopt_legacy_org_run, materialize_org_run
+from hermes_cli.hierarchical_execution import (
+    parse_execution_portfolio,
+    validate_execution_portfolio,
+)
 from hermes_cli.implementation_plan import (
     IMPLEMENTATION_PLAN_SCHEMA,
     ImplementationPlan,
@@ -15,6 +19,7 @@ from hermes_cli.implementation_plan import (
     PlanValidation,
     canonical_plan_json,
 )
+from hermes_cli.kanban_portfolio import create_org_run
 from hermes_cli.kanban_reports import (
     get_report,
     list_reports,
@@ -267,6 +272,27 @@ def test_run_filter_selects_reports_through_org_node_ownership(tmp_path):
         assert reports[0].report_type == "task"
 
 
+def test_run_filter_excludes_unrelated_task_report_on_subject_collision(tmp_path):
+    """Breaks if run_id matches arbitrary task report subjects directly."""
+    with kb.connect(tmp_path / "kanban.db") as conn:
+        unrelated_id = kb.create_task(
+            conn,
+            title="Unrelated task whose id will collide with a run",
+            board="default",
+        )
+        _complete(conn, unrelated_id, summary="unrelated complete")
+        unrelated_report = project_task_completion(
+            conn, unrelated_id, board="default"
+        )
+        assert unrelated_report is not None
+        plan = _plan(run_id=unrelated_id)
+        materialize_org_run(
+            conn, plan, _validation(plan), board="default"
+        )
+
+        assert list_reports(conn, run_id=plan.run_id) == []
+
+
 def test_actual_cancellation_projects_one_canonical_redacted_report(tmp_path):
     """Breaks if cancellation is unreported, duplicated, or leaks plan text."""
     plan = replace(
@@ -358,3 +384,46 @@ def test_final_projection_rejects_live_contract_or_dag_drift(tmp_path):
             report_type="org_run_final",
             run_id=plan.run_id,
         ) == []
+
+
+def test_final_projection_rejects_adopted_live_contract_drift(tmp_path):
+    """Breaks if adopted final projection trusts terminal statuses alone."""
+    payload = {
+        "schema": "hades.execution-portfolio.v1",
+        "org_run_id": "legacy-report-run",
+        "project_id": "proj-legacy-report-run",
+        "repository_id": "repo-1",
+        "workspace_binding_id": "binding-unused",
+        "base_commit": "b" * 40,
+        "tasks": [
+            {
+                "remote_task_id": "runtime",
+                "work_item_id": "work-legacy-report-run",
+                "title": "Legacy runtime",
+                "body": "Implement the bounded change.",
+                "assignee": "default",
+                "priority": 10,
+                "risk": "high",
+                "depends_on": [],
+                "write_scope": ["hermes_cli/legacy.py"],
+            }
+        ],
+    }
+    with kb.connect(tmp_path / "kanban.db") as conn:
+        legacy_plan = parse_execution_portfolio(payload)
+        create_org_run(
+            conn, legacy_plan, validate_execution_portfolio(legacy_plan)
+        )
+        topology = adopt_legacy_org_run(
+            conn, "legacy-report-run", board="default"
+        )
+        conn.execute(
+            "UPDATE tasks SET title='tampered' WHERE id=?",
+            (topology.finalization_id,),
+        )
+        conn.commit()
+
+        with pytest.raises(ValueError, match="managed plan drift"):
+            project_org_run_completion(
+                conn, "legacy-report-run", board="default"
+            )

@@ -150,9 +150,11 @@ def list_reports(
         params.append(subject_id)
     if run_id is not None:
         clauses.append(
-            "(subject_id = ? OR subject_id IN ("
+            "((report_type IN ('org_run_final', 'org_run_cancelled') "
+            "AND subject_id = ?) OR (report_type = 'task' "
+            "AND subject_id IN ("
             "SELECT task_id FROM kanban_org_nodes WHERE run_id = ?"
-            "))"
+            ")))"
         )
         params.extend((run_id, run_id))
     where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
