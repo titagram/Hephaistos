@@ -66,6 +66,7 @@ export function EvolutionShell(): React.ReactElement {
         {view === "overview" ? (
           <OverviewView
             snapshot={store.snapshot}
+            activeJob={store.activeJob}
             onRefresh={store.refresh}
             onTrackJob={store.trackJob}
             onNavigate={setView}

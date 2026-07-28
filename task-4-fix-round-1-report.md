@@ -58,3 +58,19 @@ Implemented contracts:
   public whitelist.
 - Foreign queued/running overlays remain non-mutating with persisted
   `finished_at` unchanged and stable `process_interrupted` reasoning.
+
+## Control center follow-up
+
+The dashboard now threads the store-owned active job to `OverviewView`.
+Queued or running observer scans disable **Run observer scan** and reject its
+handler, while the observer pause control remains enabled. Terminal jobs
+re-enable scanning. The render/interaction regression test was red before the
+guard and then passed with the minimal change.
+
+```text
+npm test -- src/plugins/evolution-plugin.test.ts src/plugins/evolution-graph.test.ts src/plugins/evolution-overview-view.test.ts
+# 21 passed
+
+npm run check:evolution
+# typecheck, dashboard bundle rebuild, and JavaScript syntax check passed
+```

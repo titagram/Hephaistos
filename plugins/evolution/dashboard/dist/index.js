@@ -324,7 +324,7 @@
     const suggestion = pipeline?.suggestions.find((item) => item.state === "eligible") ?? null;
     return suggestion === null ? null : suggestion.summary;
   }
-  function OverviewView({ snapshot, onRefresh, onTrackJob, onNavigate }) {
+  function OverviewView({ snapshot, activeJob, onRefresh, onTrackJob, onNavigate }) {
     const { useCallback, useEffect, useState } = SDK.hooks;
     const [pipeline, setPipeline] = useState(null);
     const [audit, setAudit] = useState(null);
@@ -372,8 +372,9 @@
         setMutating(false);
       }
     }, [mutating, onRefresh, resolveConflict]);
+    const observerScanActive = activeJob?.kind === "observer_scan" && isActiveJobState(activeJob.state);
     const runScan = useCallback(async () => {
-      if (mutating || snapshot === null || !snapshot.observer.enabled) return;
+      if (mutating || observerScanActive || snapshot === null || !snapshot.observer.enabled) return;
       setMutating(true);
       setActionError(null);
       try {
@@ -390,7 +391,7 @@
       } finally {
         setMutating(false);
       }
-    }, [mutating, onRefresh, onTrackJob, resolveConflict, snapshot]);
+    }, [mutating, observerScanActive, onRefresh, onTrackJob, resolveConflict, snapshot]);
     const initialize = useCallback(async () => {
       if (mutating) return;
       setMutating(true);
@@ -411,7 +412,7 @@
       if (primary?.action === "scan") void runScan();
       if (primary?.action === "resume") void mutateObserver(true);
     };
-    return /* @__PURE__ */ React.createElement("section", { className: "evo-overview", "aria-label": "Evolution readiness overview" }, /* @__PURE__ */ React.createElement(ReadinessSummary, { snapshot, onNavigate }), snapshot?.state === "corrupt" ? /* @__PURE__ */ React.createElement("section", { className: "evo-diagnostics", "aria-labelledby": "evo-diagnostics-heading" }, /* @__PURE__ */ React.createElement("h2", { id: "evo-diagnostics-heading" }, "Local diagnostics"), /* @__PURE__ */ React.createElement("p", null, "Mutations are unavailable while local diagnostics report corruption."), snapshot.diagnostics.length > 0 ? /* @__PURE__ */ React.createElement("ul", null, snapshot.diagnostics.map((diagnostic) => /* @__PURE__ */ React.createElement("li", { key: diagnostic }, diagnostic))) : null) : null, primary !== null ? /* @__PURE__ */ React.createElement("section", { className: "evo-overview__actions", "aria-label": "Evolution actions" }, /* @__PURE__ */ React.createElement("button", { className: "evo-action--primary", type: "button", onClick: runPrimary, disabled: mutating }, mutating ? "Working\u2026" : primary.label), observer !== null && observer.action !== primary.action ? /* @__PURE__ */ React.createElement("button", { type: "button", onClick: () => void mutateObserver(observer.action === "resume"), disabled: mutating }, observer.label) : null, snapshot !== null && !snapshot.observer.enabled ? /* @__PURE__ */ React.createElement("p", null, "Observer scans are unavailable while the observer is paused.") : null) : null, actionError !== null ? /* @__PURE__ */ React.createElement("p", { role: "alert" }, actionError) : null, /* @__PURE__ */ React.createElement("section", { className: "evo-pipeline-summary", "aria-labelledby": "evo-pipeline-heading" }, /* @__PURE__ */ React.createElement("h2", { id: "evo-pipeline-heading" }, "Pipeline"), loadingDetails ? /* @__PURE__ */ React.createElement("p", { role: "status" }, "Loading bounded pipeline data\u2026") : null, detailsError !== null ? /* @__PURE__ */ React.createElement("p", { role: "status" }, detailsError) : null, !loadingDetails && detailsError === null ? /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("p", null, eligibleSuggestion(pipeline) === null ? "No eligible suggestion is available." : `Eligible suggestion: ${eligibleSuggestion(pipeline)}`), /* @__PURE__ */ React.createElement("p", null, "Durable pending decisions: ", snapshot?.pipeline.lifecycle.pending_approval_count ?? "unavailable")) : null), /* @__PURE__ */ React.createElement(AuditTimeline, { audit, loading: loadingDetails, error: detailsError }));
+    return /* @__PURE__ */ React.createElement("section", { className: "evo-overview", "aria-label": "Evolution readiness overview" }, /* @__PURE__ */ React.createElement(ReadinessSummary, { snapshot, onNavigate }), snapshot?.state === "corrupt" ? /* @__PURE__ */ React.createElement("section", { className: "evo-diagnostics", "aria-labelledby": "evo-diagnostics-heading" }, /* @__PURE__ */ React.createElement("h2", { id: "evo-diagnostics-heading" }, "Local diagnostics"), /* @__PURE__ */ React.createElement("p", null, "Mutations are unavailable while local diagnostics report corruption."), snapshot.diagnostics.length > 0 ? /* @__PURE__ */ React.createElement("ul", null, snapshot.diagnostics.map((diagnostic) => /* @__PURE__ */ React.createElement("li", { key: diagnostic }, diagnostic))) : null) : null, primary !== null ? /* @__PURE__ */ React.createElement("section", { className: "evo-overview__actions", "aria-label": "Evolution actions" }, /* @__PURE__ */ React.createElement("button", { className: "evo-action--primary", type: "button", onClick: runPrimary, disabled: mutating || primary.action === "scan" && observerScanActive }, mutating ? "Working\u2026" : primary.label), observer !== null && observer.action !== primary.action ? /* @__PURE__ */ React.createElement("button", { type: "button", onClick: () => void mutateObserver(observer.action === "resume"), disabled: mutating }, observer.label) : null, snapshot !== null && !snapshot.observer.enabled ? /* @__PURE__ */ React.createElement("p", null, "Observer scans are unavailable while the observer is paused.") : null) : null, actionError !== null ? /* @__PURE__ */ React.createElement("p", { role: "alert" }, actionError) : null, /* @__PURE__ */ React.createElement("section", { className: "evo-pipeline-summary", "aria-labelledby": "evo-pipeline-heading" }, /* @__PURE__ */ React.createElement("h2", { id: "evo-pipeline-heading" }, "Pipeline"), loadingDetails ? /* @__PURE__ */ React.createElement("p", { role: "status" }, "Loading bounded pipeline data\u2026") : null, detailsError !== null ? /* @__PURE__ */ React.createElement("p", { role: "status" }, detailsError) : null, !loadingDetails && detailsError === null ? /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("p", null, eligibleSuggestion(pipeline) === null ? "No eligible suggestion is available." : `Eligible suggestion: ${eligibleSuggestion(pipeline)}`), /* @__PURE__ */ React.createElement("p", null, "Durable pending decisions: ", snapshot?.pipeline.lifecycle.pending_approval_count ?? "unavailable")) : null), /* @__PURE__ */ React.createElement(AuditTimeline, { audit, loading: loadingDetails, error: detailsError }));
   }
 
   // ../plugins/evolution/dashboard/src/graph-model.ts
@@ -31325,6 +31326,7 @@
       OverviewView,
       {
         snapshot: store.snapshot,
+        activeJob: store.activeJob,
         onRefresh: store.refresh,
         onTrackJob: store.trackJob,
         onNavigate: setView

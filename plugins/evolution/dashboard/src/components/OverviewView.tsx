@@ -1,7 +1,7 @@
 import { evolutionApi } from "../api";
 import { React, SDK } from "../sdk";
 import type { AuditResponse, EvolutionJob, EvolutionSnapshot, EvolutionView, PipelineResponse } from "../types";
-import { observerControl, overviewPrimaryAction } from "../view-model";
+import { isActiveJobState, observerControl, overviewPrimaryAction } from "../view-model";
 import { AuditTimeline } from "./AuditTimeline";
 import { ReadinessSummary } from "./ReadinessSummary";
 
@@ -12,6 +12,7 @@ const CONFLICT_MESSAGE = "The organism changed elsewhere. Refresh manually befor
 
 export interface OverviewViewProps {
   snapshot: EvolutionSnapshot | null;
+  activeJob: EvolutionJob | null;
   onRefresh(): Promise<void>;
   onTrackJob(job: EvolutionJob): void;
   onNavigate(view: EvolutionView): void;
@@ -31,7 +32,7 @@ function eligibleSuggestion(pipeline: PipelineResponse | null): string | null {
   return suggestion === null ? null : suggestion.summary;
 }
 
-export function OverviewView({ snapshot, onRefresh, onTrackJob, onNavigate }: OverviewViewProps): React.ReactElement {
+export function OverviewView({ snapshot, activeJob, onRefresh, onTrackJob, onNavigate }: OverviewViewProps): React.ReactElement {
   const { useCallback, useEffect, useState } = SDK.hooks;
   const [pipeline, setPipeline] = useState<PipelineResponse | null>(null);
   const [audit, setAudit] = useState<AuditResponse | null>(null);
@@ -82,8 +83,10 @@ export function OverviewView({ snapshot, onRefresh, onTrackJob, onNavigate }: Ov
     }
   }, [mutating, onRefresh, resolveConflict]);
 
+  const observerScanActive = activeJob?.kind === "observer_scan" && isActiveJobState(activeJob.state);
+
   const runScan = useCallback(async () => {
-    if (mutating || snapshot === null || !snapshot.observer.enabled) return;
+    if (mutating || observerScanActive || snapshot === null || !snapshot.observer.enabled) return;
     setMutating(true);
     setActionError(null);
     try {
@@ -100,7 +103,7 @@ export function OverviewView({ snapshot, onRefresh, onTrackJob, onNavigate }: Ov
     } finally {
       setMutating(false);
     }
-  }, [mutating, onRefresh, onTrackJob, resolveConflict, snapshot]);
+  }, [mutating, observerScanActive, onRefresh, onTrackJob, resolveConflict, snapshot]);
 
   const initialize = useCallback(async () => {
     if (mutating) return;
@@ -136,7 +139,7 @@ export function OverviewView({ snapshot, onRefresh, onTrackJob, onNavigate }: Ov
       ) : null}
       {primary !== null ? (
         <section className="evo-overview__actions" aria-label="Evolution actions">
-          <button className="evo-action--primary" type="button" onClick={runPrimary} disabled={mutating}>
+          <button className="evo-action--primary" type="button" onClick={runPrimary} disabled={mutating || (primary.action === "scan" && observerScanActive)}>
             {mutating ? "Working…" : primary.label}
           </button>
           {observer !== null && observer.action !== primary.action ? (
