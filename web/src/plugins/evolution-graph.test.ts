@@ -231,4 +231,42 @@ describe("Evolution organism graph model", () => {
     cleanup?.();
     expect(cytoscapeMock.core.destroy).toHaveBeenCalledTimes(1);
   });
+
+  it("gives the interactive canvas a responsive nonzero minimum height before host CSS loads", async () => {
+    const container = {} as HTMLDivElement;
+    let refIndex = 0;
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: {
+        __HERMES_PLUGIN_SDK__: {
+          React: {
+            createElement: (type: unknown, props: Record<string, unknown> | null, ...children: unknown[]) => ({ type, props, children }),
+          },
+          hooks: {
+            useCallback: <T,>(callback: T) => callback,
+            useEffect: (effect: () => void | (() => void)) => { effect(); },
+            useMemo: <T,>(factory: () => T) => factory(),
+            useRef: <T,>() => {
+              const values = [{ current: container }, { current: null }];
+              return values[refIndex++] as { current: T };
+            },
+          },
+          fetchJSON: vi.fn(),
+          components: {
+            Badge: () => null, Button: () => null, Checkbox: () => null, Input: () => null,
+            Label: () => null, Select: () => null, SelectOption: () => null, Separator: () => null,
+          },
+          utils: { cn: () => "", timeAgo: () => "", isoTimeAgo: () => "" },
+        },
+      },
+    });
+
+    const { OrganismGraph } = await import("../../../plugins/evolution/dashboard/src/components/OrganismGraph");
+    const data = graph();
+    const tree = OrganismGraph({ nodes: data.nodes, edges: data.edges, selectedId: null, onSelect: vi.fn(), onOpenInspector: vi.fn() }) as unknown as { props: { children: unknown[] } };
+    const canvas = ((tree.props.children[1] as { props: Record<string, unknown> }).props);
+
+    expect(canvas.className).toBe("evo-organism-graph__canvas");
+    expect(canvas.style).toMatchObject({ minHeight: "20rem", width: "100%" });
+  });
 });

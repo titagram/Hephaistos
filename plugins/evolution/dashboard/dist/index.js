@@ -312,7 +312,7 @@
     return primary[0] ?? fallback[0] ?? selectedId;
   }
   function truncationNotice(graph) {
-    return graph.truncated ? "This is a bounded graph view and is not complete. Select a node to expand its local neighborhood." : null;
+    return graph.truncated ? "This bounded graph view is not complete. Select a node, then choose Expand selected neighborhood to request its depth-2 local graph." : null;
   }
 
   // ../plugins/evolution/dashboard/src/components/NodeInspector.tsx
@@ -17780,7 +17780,7 @@
     transform: function transform2(node, position3) {
       return position3;
     }
-    // transform a given node position. Useful for changing flow direction in discrete layouts
+    // transform a given node position. Useful for changing flow direction in discrete layouts 
   };
   function CircleLayout(options2) {
     this.options = extend({}, defaults$6, options2);
@@ -18824,7 +18824,7 @@
     transform: function transform4(node, position3) {
       return position3;
     }
-    // transform a given node position. Useful for changing flow direction in discrete layouts
+    // transform a given node position. Useful for changing flow direction in discrete layouts 
   };
   function GridLayout(options2) {
     this.options = extend({}, defaults$3, options2);
@@ -19117,7 +19117,7 @@
     transform: function transform6(node, position3) {
       return position3;
     }
-    // transform a given node position. Useful for changing flow direction in discrete layouts
+    // transform a given node position. Useful for changing flow direction in discrete layouts 
   };
   function RandomLayout(options2) {
     this.options = extend({}, defaults2, options2);
@@ -30839,7 +30839,8 @@
         tabIndex: 0,
         "aria-label": "Interactive organism graph",
         "aria-describedby": "evo-organism-graph-keyboard-help",
-        onKeyDown: handleKeyDown
+        onKeyDown: handleKeyDown,
+        style: { minHeight: "20rem", width: "100%" }
       }
     ), /* @__PURE__ */ React.createElement("p", { id: "evo-organism-graph-keyboard-help", className: "evo-organism-graph__keyboard-help" }, "Use arrow keys to move between related nodes. Enter opens details. + and \u2212 zoom. 0 fits the graph. Escape clears selection."));
   }
@@ -30960,6 +30961,9 @@
 
   // ../plugins/evolution/dashboard/src/components/OrganismView.tsx
   var FILTER_KINDS = ["capability", "runtime", "invariant", "skill", "plugin", "provider"];
+  var GRAPH_NEIGHBORHOOD_DEPTH = 2;
+  var GRAPH_RESPONSE_LIMIT = 200;
+  var API_FILTER_KINDS = /* @__PURE__ */ new Set(["capability", "runtime"]);
   function errorMessage(error3) {
     return error3 instanceof Error ? error3.message : "The requested local organism data is unavailable.";
   }
@@ -30977,12 +30981,18 @@
     const [kinds, setKinds] = useState(/* @__PURE__ */ new Set());
     const [surface, setSurface] = useState("graph");
     const [selectedId, setSelectedId] = useState(null);
+    const [graphRootId, setGraphRootId] = useState(null);
     const [dialog, setDialog] = useState(null);
     const [mutationContext, setMutationContext] = useState(null);
     const [actionError, setActionError] = useState(null);
     const [initializing, setInitializing] = useState(false);
     const gnothiIsUnsafe = snapshot?.gnothi.state === "blocked" || snapshot?.gnothi.state === "corrupt";
     const hasSafeGraph = snapshot !== null && snapshot.state !== "missing" && snapshot.state !== "blocked" && snapshot.state !== "corrupt" && !gnothiIsUnsafe && snapshot.gnothi.revision_id !== null;
+    const expectedRevision = snapshot?.gnothi.revision_id ?? void 0;
+    const requestedKinds = useMemo(
+      () => [...kinds].filter((kind) => API_FILTER_KINDS.has(kind)).sort(),
+      [kinds]
+    );
     useEffect(() => {
       if (!hasSafeGraph || snapshot === null) {
         setGraph(null);
@@ -30991,7 +31001,14 @@
       let current = true;
       setGraphLoading(true);
       setGraphError(null);
-      void evolutionApi.graph({ expectedRevision: snapshot.gnothi.revision_id ?? void 0 }).then((next) => {
+      void evolutionApi.graph({
+        rootId: graphRootId ?? void 0,
+        depth: graphRootId === null ? void 0 : GRAPH_NEIGHBORHOOD_DEPTH,
+        limit: GRAPH_RESPONSE_LIMIT,
+        kinds: requestedKinds,
+        search: search === "" ? void 0 : search,
+        expectedRevision
+      }).then((next) => {
         if (!current) return;
         setGraph(next);
       }).catch((nextError) => {
@@ -31003,7 +31020,7 @@
       return () => {
         current = false;
       };
-    }, [hasSafeGraph, snapshot]);
+    }, [expectedRevision, graphRootId, hasSafeGraph, requestedKinds, search]);
     const toggleKind = useCallback((kind) => {
       setKinds((previous) => {
         const next = new Set(previous);
@@ -31021,7 +31038,12 @@
     const resetFilters = useCallback(() => {
       setSearch("");
       setKinds(/* @__PURE__ */ new Set());
+      setGraphRootId(null);
+      setSelectedId(null);
     }, []);
+    const expandSelectedNeighborhood = useCallback(() => {
+      if (selectedId !== null) setGraphRootId(selectedId);
+    }, [selectedId]);
     const openRebuild = useCallback(async () => {
       setActionError(null);
       try {
@@ -31067,7 +31089,7 @@
     const stateWarning = stateNotice(snapshot);
     const incompleteNotice = graph === null ? null : truncationNotice(graph);
     const filtered = presentation?.graph ?? filterGraph({ nodes: [], edges: [] }, filters);
-    return /* @__PURE__ */ React.createElement("section", { className: "evo-organism" }, /* @__PURE__ */ React.createElement("header", { className: "evo-organism__header" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("h2", null, "Organism"), /* @__PURE__ */ React.createElement("p", null, "Revision ", snapshot.gnothi.revision_id ?? "unavailable", " \xB7 ", snapshot.gnothi.node_count ?? 0, " nodes \xB7 ", snapshot.gnothi.edge_count ?? 0, " edges")), /* @__PURE__ */ React.createElement("div", { className: "evo-organism__actions" }, /* @__PURE__ */ React.createElement("button", { type: "button", onClick: () => void openRebuild() }, "Rebuild organism"), /* @__PURE__ */ React.createElement("button", { type: "button", onClick: () => setDialog("compare") }, "Compare revisions"))), stateWarning !== null ? /* @__PURE__ */ React.createElement("p", { className: `evo-organism__notice evo-organism__notice--${snapshot.state}` }, stateWarning) : null, graphError !== null ? /* @__PURE__ */ React.createElement("p", { className: "evo-organism__notice", role: "status" }, "The last valid graph remains visible. ", graphError) : null, incompleteNotice !== null ? /* @__PURE__ */ React.createElement("p", { className: "evo-organism__notice evo-organism__notice--truncated" }, incompleteNotice) : null, actionError !== null ? /* @__PURE__ */ React.createElement("p", { role: "alert" }, actionError) : null, /* @__PURE__ */ React.createElement("section", { className: "evo-organism__filters", "aria-label": "Organism graph filters" }, /* @__PURE__ */ React.createElement("label", null, "Search stable ID or label", /* @__PURE__ */ React.createElement("input", { value: search, onChange: (event3) => setSearch(event3.target.value), placeholder: "Filter graph" })), /* @__PURE__ */ React.createElement("fieldset", null, /* @__PURE__ */ React.createElement("legend", null, "Node kinds"), FILTER_KINDS.map((kind) => /* @__PURE__ */ React.createElement("label", { key: kind }, /* @__PURE__ */ React.createElement("input", { type: "checkbox", checked: kinds.has(kind), onChange: () => toggleKind(kind) }), kind))), /* @__PURE__ */ React.createElement("button", { type: "button", onClick: resetFilters }, "Reset filters"), /* @__PURE__ */ React.createElement("div", { className: "evo-organism__surface-toggle", "aria-label": "Organism presentation" }, /* @__PURE__ */ React.createElement("button", { type: "button", "aria-pressed": surface === "graph", onClick: () => setSurface("graph") }, "Graph"), /* @__PURE__ */ React.createElement("button", { type: "button", "aria-pressed": surface === "list", onClick: () => setSurface("list") }, "List"))), /* @__PURE__ */ React.createElement("section", { className: "evo-organism__legend", "aria-label": "Relationship legend" }, /* @__PURE__ */ React.createElement("p", null, "Provides: solid arrow \xB7 Requires: dotted arrow \xB7 Depends on: dashed arrow"), /* @__PURE__ */ React.createElement("p", null, "Health states: healthy, degraded, stale, missing, unknown")), graphLoading && graph === null ? /* @__PURE__ */ React.createElement("p", { role: "status" }, "Loading the current immutable graph revision\u2026") : null, presentation !== null ? /* @__PURE__ */ React.createElement("div", { className: "evo-organism__surface" }, /* @__PURE__ */ React.createElement("div", { className: "evo-organism__visualization" }, surface === "graph" ? /* @__PURE__ */ React.createElement(
+    return /* @__PURE__ */ React.createElement("section", { className: "evo-organism" }, /* @__PURE__ */ React.createElement("header", { className: "evo-organism__header" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("h2", null, "Organism"), /* @__PURE__ */ React.createElement("p", null, "Revision ", snapshot.gnothi.revision_id ?? "unavailable", " \xB7 ", snapshot.gnothi.node_count ?? 0, " nodes \xB7 ", snapshot.gnothi.edge_count ?? 0, " edges")), /* @__PURE__ */ React.createElement("div", { className: "evo-organism__actions" }, /* @__PURE__ */ React.createElement("button", { type: "button", onClick: () => void openRebuild() }, "Rebuild organism"), /* @__PURE__ */ React.createElement("button", { type: "button", onClick: () => setDialog("compare") }, "Compare revisions"))), stateWarning !== null ? /* @__PURE__ */ React.createElement("p", { className: `evo-organism__notice evo-organism__notice--${snapshot.state}` }, stateWarning) : null, graphError !== null ? /* @__PURE__ */ React.createElement("p", { className: "evo-organism__notice", role: "status" }, "The last valid graph remains visible. ", graphError) : null, incompleteNotice !== null ? /* @__PURE__ */ React.createElement("p", { className: "evo-organism__notice evo-organism__notice--truncated" }, incompleteNotice) : null, actionError !== null ? /* @__PURE__ */ React.createElement("p", { role: "alert" }, actionError) : null, /* @__PURE__ */ React.createElement("section", { className: "evo-organism__filters", "aria-label": "Organism graph filters" }, /* @__PURE__ */ React.createElement("label", null, "Search stable ID or label", /* @__PURE__ */ React.createElement("input", { value: search, onChange: (event3) => setSearch(event3.target.value), placeholder: "Filter graph" })), /* @__PURE__ */ React.createElement("fieldset", null, /* @__PURE__ */ React.createElement("legend", null, "Node kinds"), FILTER_KINDS.map((kind) => /* @__PURE__ */ React.createElement("label", { key: kind }, /* @__PURE__ */ React.createElement("input", { type: "checkbox", checked: kinds.has(kind), onChange: () => toggleKind(kind) }), kind))), /* @__PURE__ */ React.createElement("button", { type: "button", onClick: resetFilters }, "Reset filters and graph"), /* @__PURE__ */ React.createElement("div", { className: "evo-organism__surface-toggle", "aria-label": "Organism presentation" }, /* @__PURE__ */ React.createElement("button", { type: "button", "aria-pressed": surface === "graph", onClick: () => setSurface("graph") }, "Graph"), /* @__PURE__ */ React.createElement("button", { type: "button", "aria-pressed": surface === "list", onClick: () => setSurface("list") }, "List"))), /* @__PURE__ */ React.createElement("section", { className: "evo-organism__legend", "aria-label": "Relationship legend" }, /* @__PURE__ */ React.createElement("p", null, "Provides: solid arrow \xB7 Requires: dotted arrow \xB7 Depends on: dashed arrow"), /* @__PURE__ */ React.createElement("p", null, "Health states: healthy, degraded, stale, missing, unknown")), graphLoading && graph === null ? /* @__PURE__ */ React.createElement("p", { role: "status" }, "Loading the current immutable graph revision\u2026") : null, graph?.truncated && selectedNode !== null ? /* @__PURE__ */ React.createElement("button", { type: "button", onClick: expandSelectedNeighborhood, disabled: graphRootId === selectedNode.id }, graphRootId === selectedNode.id ? "Showing selected neighborhood" : "Expand selected neighborhood") : null, presentation !== null ? /* @__PURE__ */ React.createElement("div", { className: "evo-organism__surface" }, /* @__PURE__ */ React.createElement("div", { className: "evo-organism__visualization" }, surface === "graph" ? /* @__PURE__ */ React.createElement(
       OrganismGraph,
       {
         nodes: presentation.graph.nodes,
@@ -31151,7 +31173,7 @@ cytoscape/dist/cytoscape.esm.mjs:
   *)
   (*!
   Event object based on jQuery events, MIT license
-
+  
   https://jquery.org/license/
   https://tldrlegal.com/license/mit-license
   https://github.com/jquery/jquery/blob/master/src/event.js

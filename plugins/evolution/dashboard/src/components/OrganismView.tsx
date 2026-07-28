@@ -10,6 +10,9 @@ import { RevisionDialog, type RevisionDialogMode } from "./RevisionDialog";
 void React;
 
 const FILTER_KINDS = ["capability", "runtime", "invariant", "skill", "plugin", "provider"] as const;
+const GRAPH_NEIGHBORHOOD_DEPTH = 2;
+const GRAPH_RESPONSE_LIMIT = 200;
+const API_FILTER_KINDS = new Set(["capability", "runtime"]);
 
 type OrganismSurface = "graph" | "list";
 
@@ -38,6 +41,7 @@ export function OrganismView({ snapshot, onRefresh, onTrackJob }: OrganismViewPr
   const [kinds, setKinds] = useState<Set<string>>(new Set());
   const [surface, setSurface] = useState<OrganismSurface>("graph");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [graphRootId, setGraphRootId] = useState<string | null>(null);
   const [dialog, setDialog] = useState<RevisionDialogMode | null>(null);
   const [mutationContext, setMutationContext] = useState<MutationContext | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -51,6 +55,12 @@ export function OrganismView({ snapshot, onRefresh, onTrackJob }: OrganismViewPr
     && !gnothiIsUnsafe
     && snapshot.gnothi.revision_id !== null;
 
+  const expectedRevision = snapshot?.gnothi.revision_id ?? undefined;
+  const requestedKinds = useMemo(
+    () => [...kinds].filter(kind => API_FILTER_KINDS.has(kind)).sort(),
+    [kinds],
+  );
+
   useEffect(() => {
     if (!hasSafeGraph || snapshot === null) {
       setGraph(null);
@@ -59,7 +69,14 @@ export function OrganismView({ snapshot, onRefresh, onTrackJob }: OrganismViewPr
     let current = true;
     setGraphLoading(true);
     setGraphError(null);
-    void evolutionApi.graph({ expectedRevision: snapshot.gnothi.revision_id ?? undefined }).then(next => {
+    void evolutionApi.graph({
+      rootId: graphRootId ?? undefined,
+      depth: graphRootId === null ? undefined : GRAPH_NEIGHBORHOOD_DEPTH,
+      limit: GRAPH_RESPONSE_LIMIT,
+      kinds: requestedKinds,
+      search: search === "" ? undefined : search,
+      expectedRevision,
+    }).then(next => {
       if (!current) return;
       setGraph(next);
     }).catch(nextError => {
@@ -69,7 +86,7 @@ export function OrganismView({ snapshot, onRefresh, onTrackJob }: OrganismViewPr
       if (current) setGraphLoading(false);
     });
     return () => { current = false; };
-  }, [hasSafeGraph, snapshot]);
+  }, [expectedRevision, graphRootId, hasSafeGraph, requestedKinds, search]);
 
   const toggleKind = useCallback((kind: string) => {
     setKinds(previous => {
@@ -90,7 +107,13 @@ export function OrganismView({ snapshot, onRefresh, onTrackJob }: OrganismViewPr
   const resetFilters = useCallback(() => {
     setSearch("");
     setKinds(new Set());
+    setGraphRootId(null);
+    setSelectedId(null);
   }, []);
+
+  const expandSelectedNeighborhood = useCallback(() => {
+    if (selectedId !== null) setGraphRootId(selectedId);
+  }, [selectedId]);
 
   const openRebuild = useCallback(async () => {
     setActionError(null);
@@ -193,7 +216,7 @@ export function OrganismView({ snapshot, onRefresh, onTrackJob }: OrganismViewPr
             </label>
           ))}
         </fieldset>
-        <button type="button" onClick={resetFilters}>Reset filters</button>
+        <button type="button" onClick={resetFilters}>Reset filters and graph</button>
         <div className="evo-organism__surface-toggle" aria-label="Organism presentation">
           <button type="button" aria-pressed={surface === "graph"} onClick={() => setSurface("graph")}>Graph</button>
           <button type="button" aria-pressed={surface === "list"} onClick={() => setSurface("list")}>List</button>
@@ -204,6 +227,11 @@ export function OrganismView({ snapshot, onRefresh, onTrackJob }: OrganismViewPr
         <p>Health states: healthy, degraded, stale, missing, unknown</p>
       </section>
       {graphLoading && graph === null ? <p role="status">Loading the current immutable graph revision…</p> : null}
+      {graph?.truncated && selectedNode !== null ? (
+        <button type="button" onClick={expandSelectedNeighborhood} disabled={graphRootId === selectedNode.id}>
+          {graphRootId === selectedNode.id ? "Showing selected neighborhood" : "Expand selected neighborhood"}
+        </button>
+      ) : null}
       {presentation !== null ? (
         <div className="evo-organism__surface">
           <div className="evo-organism__visualization">

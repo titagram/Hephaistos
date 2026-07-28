@@ -174,6 +174,7 @@ export function OrganismGraph({
         aria-label="Interactive organism graph"
         aria-describedby="evo-organism-graph-keyboard-help"
         onKeyDown={handleKeyDown}
+        style={{ minHeight: "20rem", width: "100%" }}
       />
       <p id="evo-organism-graph-keyboard-help" className="evo-organism-graph__keyboard-help">
         Use arrow keys to move between related nodes. Enter opens details. + and − zoom. 0 fits the graph. Escape clears selection.

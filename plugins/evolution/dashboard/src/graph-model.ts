@@ -123,6 +123,6 @@ export function neighborId(
 
 export function truncationNotice(graph: Pick<GraphResponse, "truncated">): string | null {
   return graph.truncated
-    ? "This is a bounded graph view and is not complete. Select a node to expand its local neighborhood."
+    ? "This bounded graph view is not complete. Select a node, then choose Expand selected neighborhood to request its depth-2 local graph."
     : null;
 }
