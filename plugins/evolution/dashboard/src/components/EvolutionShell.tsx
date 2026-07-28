@@ -2,6 +2,7 @@ import { React, SDK } from "../sdk";
 import { useEvolutionSnapshot } from "../state";
 import type { EvolutionView } from "../types";
 import { initialView, organismFacet } from "../view-model";
+import { OrganismView } from "./OrganismView";
 import { StatusRail } from "./StatusRail";
 
 void React;
@@ -59,7 +60,11 @@ export function EvolutionShell(): React.ReactElement {
       ) : null}
       <StatusRail snapshot={store.snapshot} loading={store.loading} />
       <section className="evo-shell__content" aria-label={`${VIEWS.find(item => item.id === view)?.label ?? "Evolution"} view`}>
-        <p>{VIEWS.find(item => item.id === view)?.label} view will appear here.</p>
+        {view === "organism" ? (
+          <OrganismView snapshot={store.snapshot} onRefresh={store.refresh} onTrackJob={store.trackJob} />
+        ) : (
+          <p>{VIEWS.find(item => item.id === view)?.label} view will appear here.</p>
+        )}
       </section>
     </main>
   );
