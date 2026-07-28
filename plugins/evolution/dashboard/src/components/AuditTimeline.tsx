@@ -1,5 +1,6 @@
 import { React } from "../sdk";
 import type { AuditResponse } from "../types";
+import { ExpandableText } from "./ExpandableText";
 
 void React;
 
@@ -20,7 +21,7 @@ export function AuditTimeline({ audit, loading, error }: AuditTimelineProps): Re
         <ol>
           {audit.events.map(event => (
             <li key={event.event_id}>
-              <time dateTime={event.created_at}>{event.created_at}</time> · {event.summary}
+              <time dateTime={event.created_at}>{event.created_at}</time> · <ExpandableText text={event.summary} label="audit summary" />
             </li>
           ))}
         </ol>

@@ -1,8 +1,9 @@
 import { evolutionApi } from "../api";
-import { fixedPipelineStages, publicResearchBrief, sortedAuditEvents } from "../pipeline-model";
+import { fixedPipelineStages, publicResearchBrief } from "../pipeline-model";
 import { React, SDK } from "../sdk";
 import type { AuditResponse, EvolutionSnapshot, PipelineBlueprint, PipelineResponse, PipelineSuggestion } from "../types";
 import { BlueprintInspector } from "./BlueprintInspector";
+import { ExpandableText } from "./ExpandableText";
 import { PipelineStages } from "./PipelineStages";
 import { SuggestionInspector } from "./SuggestionInspector";
 
@@ -11,6 +12,7 @@ void React;
 const PIPELINE_LIMIT = 50;
 const AUDIT_LIMIT = 100;
 const CONFLICT_MESSAGE = "The organism changed elsewhere. Refresh manually before continuing.";
+const RESEARCH_HANDOFF_DELAY_MS = 750;
 
 export interface PipelineViewProps {
   snapshot: EvolutionSnapshot | null;
@@ -41,8 +43,23 @@ async function writeResearchBrief(text: string): Promise<void> {
   await navigator.clipboard.writeText(text);
 }
 
+export function scheduleResearchHandoff(
+  navigate: (destination: string) => void,
+  destination: string,
+  delay = RESEARCH_HANDOFF_DELAY_MS,
+): () => void {
+  let cancelled = false;
+  const timer = window.setTimeout(() => {
+    if (!cancelled) navigate(destination);
+  }, delay);
+  return () => {
+    cancelled = true;
+    window.clearTimeout(timer);
+  };
+}
+
 export function PipelineView({ snapshot, onRefresh }: PipelineViewProps): React.ReactElement {
-  const { useCallback, useEffect, useMemo, useState } = SDK.hooks;
+  const { useCallback, useEffect, useMemo, useRef, useState } = SDK.hooks;
   const [attemptId, setAttemptId] = useState<string | null>(null);
   const [pipeline, setPipeline] = useState<PipelineResponse | null>(null);
   const [audit, setAudit] = useState<AuditResponse | null>(null);
@@ -52,6 +69,9 @@ export function PipelineView({ snapshot, onRefresh }: PipelineViewProps): React.
   const [mutating, setMutating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  const cancelResearchHandoffRef = useRef<(() => void) | null>(null);
+
+  useEffect(() => () => cancelResearchHandoffRef.current?.(), []);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -115,7 +135,8 @@ export function PipelineView({ snapshot, onRefresh }: PipelineViewProps): React.
       const brief = publicResearchBrief(candidate);
       await writeResearchBrief(brief.text);
       setToast(brief.toast);
-      window.location.assign(brief.destination);
+      cancelResearchHandoffRef.current?.();
+      cancelResearchHandoffRef.current = scheduleResearchHandoff(destination => window.location.assign(destination), brief.destination);
     } catch (nextError) {
       setError(errorMessage(nextError));
     }
@@ -158,11 +179,11 @@ export function PipelineView({ snapshot, onRefresh }: PipelineViewProps): React.
           )}
           {pipeline.blueprints_truncated ? <p>Blueprints are capped to this bounded local view.</p> : null}
         </section>
-        <BlueprintInspector blueprint={blueprint} auditEvents={sortedAuditEvents(audit?.events ?? [])} />
+        <BlueprintInspector blueprint={blueprint} auditEvents={audit?.events ?? []} />
       </div>
       <section aria-labelledby="evo-pipeline-audit-heading">
         <h3 id="evo-pipeline-audit-heading">Append-only audit history</h3>
-        {audit === null || audit.events.length === 0 ? <p>No durable audit events are available.</p> : <ol>{sortedAuditEvents(audit.events).map(event => <li key={event.event_id}>#{event.sequence} · {event.summary}</li>)}</ol>}
+        {audit === null || audit.events.length === 0 ? <p>No durable audit events are available.</p> : <ol>{audit.events.map(event => <li key={event.event_id}>#{event.sequence} · <ExpandableText text={event.summary} label="audit summary" /></li>)}</ol>}
         {audit?.truncated ? <p>Only a bounded append-only audit prefix is displayed.</p> : null}
       </section>
     </section>

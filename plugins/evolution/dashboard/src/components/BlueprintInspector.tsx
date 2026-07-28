@@ -1,6 +1,6 @@
 import { React, SDK } from "../sdk";
-import { sortedAuditEvents } from "../pipeline-model";
 import type { AuditEvent, PipelineBlueprint } from "../types";
+import { ExpandableText } from "./ExpandableText";
 
 void React;
 
@@ -20,7 +20,7 @@ export function BlueprintInspector({ blueprint, auditEvents }: BlueprintInspecto
   const hypothesis = expanded || blueprint.capability_hypothesis.length <= HYPOTHESIS_LIMIT
     ? blueprint.capability_hypothesis
     : `${blueprint.capability_hypothesis.slice(0, HYPOTHESIS_LIMIT)}…`;
-  const history = sortedAuditEvents(auditEvents.filter(event => event.attempt_id === blueprint.attempt_id));
+  const history = auditEvents.filter(event => event.attempt_id === blueprint.attempt_id);
   return (
     <aside className="evo-pipeline-inspector" aria-labelledby="evo-blueprint-inspector-heading">
       <h2 id="evo-blueprint-inspector-heading">Immutable blueprint</h2>
@@ -39,7 +39,7 @@ export function BlueprintInspector({ blueprint, auditEvents }: BlueprintInspecto
       </section>
       <section aria-labelledby="evo-blueprint-auth-heading">
         <h3 id="evo-blueprint-auth-heading">Authorization history</h3>
-        {history.length === 0 ? <p>No durable authorization history is recorded for this attempt.</p> : <ol>{history.map(event => <li key={event.event_id}>#{event.sequence} · {event.summary}</li>)}</ol>}
+        {history.length === 0 ? <p>No durable authorization history is recorded for this attempt.</p> : <ol>{history.map(event => <li key={event.event_id}>#{event.sequence} · <ExpandableText text={event.summary} label="authorization summary" /></li>)}</ol>}
       </section>
     </aside>
   );
