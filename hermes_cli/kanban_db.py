@@ -5013,14 +5013,16 @@ def complete_task(
                 set_org_run_state,
             )
             rows = conn.execute(
-                "SELECT DISTINCT run_id, node_kind FROM kanban_org_nodes WHERE task_id = ?",
+                "SELECT DISTINCT n.run_id FROM kanban_org_nodes AS n "
+                "JOIN kanban_org_runs AS r ON r.run_id = n.run_id "
+                "WHERE n.task_id = ? AND n.node_kind = 'finalization' "
+                "AND n.state = 'active' AND n.plan_version = r.plan_version",
                 (task_id,),
             ).fetchall()
             for row in rows:
-                if row["node_kind"] == "finalization":
+                state = refresh_org_run_state(conn, str(row["run_id"]))
+                if state not in {"blocked", "cancelled"}:
                     set_org_run_state(conn, str(row["run_id"]), "reviewing")
-                else:
-                    refresh_org_run_state(conn, str(row["run_id"]))
         except Exception:
             pass
     _fire_kanban_lifecycle_hook(

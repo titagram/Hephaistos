@@ -32,17 +32,19 @@ def _safe_text(value: Any) -> str:
     return text[:_MAX_TEXT] + f"… [truncated, {len(text) - _MAX_TEXT} chars omitted]"
 
 
-def _safe_value(value: Any) -> Any:
+def _safe_value(value: Any, *, depth: int = 0) -> Any:
     """Keep report evidence bounded, ordered, and safe for local persistence."""
+    if depth >= _MAX_ITEMS:
+        return "[nested structured evidence truncated]"
     if isinstance(value, str):
         return _safe_text(value)
     if isinstance(value, dict):
         return {
-            _safe_text(key): _safe_value(value[key])
-            for key in sorted(value, key=lambda item: str(item))
+            _safe_text(key): _safe_value(value[key], depth=depth + 1)
+            for key in sorted(value, key=lambda item: str(item))[:_MAX_ITEMS]
         }
     if isinstance(value, (list, tuple)):
-        return [_safe_value(item) for item in value[:_MAX_ITEMS]]
+        return [_safe_value(item, depth=depth + 1) for item in value[:_MAX_ITEMS]]
     if value is None or isinstance(value, (bool, int, float)):
         return value
     return _safe_text(value)

@@ -593,6 +593,32 @@ def test_final_report_projection_failure_keeps_completed_org_run_in_review(tmp_p
         )
 
 
+def test_final_report_projection_failure_preserves_a_blocked_active_gate(tmp_path, monkeypatch):
+    """A finalization retry cannot overwrite the canonical blocked state."""
+    plan = _plan(risk="low", task_review=False, global_review=False)
+    with kb.connect(tmp_path / "kanban.db") as conn:
+        topology = materialize_org_run(
+            conn, plan, _validation(plan), board="default"
+        )
+        execution_id = topology.tasks["runtime"].execution_id
+        for task_id in (execution_id, topology.integration_id):
+            assert kb.claim_task(conn, task_id, claimer="blocked-projection-failure")
+            assert kb.complete_task(conn, task_id, summary="complete")
+
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='blocked' WHERE id = ?", (execution_id,))
+            kb._append_event(conn, execution_id, "blocked", {"reason": "manual gate"})
+        assert refresh_org_run_state(conn, plan.run_id) == "blocked"
+        monkeypatch.setattr(
+            "hermes_cli.kanban_reports.project_after_task_completion",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("projection failed")),
+        )
+        assert kb.claim_task(conn, topology.finalization_id, claimer="blocked-projection-failure")
+        assert kb.complete_task(conn, topology.finalization_id, summary="final complete")
+
+        assert get_org_run(conn, plan.run_id).state == "blocked"
+
+
 def _legacy_payload(*, run_id: str = "legacy-run-001") -> dict:
     return {
         "schema": "hades.execution-portfolio.v1",

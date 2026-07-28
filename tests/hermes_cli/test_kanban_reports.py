@@ -118,6 +118,41 @@ def test_terminal_task_projection_is_canonical_redacted_and_idempotent(tmp_path)
         assert "## Provenance\n" in first.report_markdown
 
 
+def test_task_projection_bounds_nested_structured_evidence(tmp_path):
+    """Breaks if nested maps can bypass the established report item cap."""
+    deep: dict[str, object] = {}
+    cursor = deep
+    for _ in range(20):
+        child: dict[str, object] = {}
+        cursor["child"] = child
+        cursor = child
+    cursor["never_persisted"] = "secret=supersecret123"
+    metadata = {
+        "review": {
+            **{f"finding-{index:02d}": {"nested": deep} for index in range(20)},
+        },
+    }
+    with kb.connect(tmp_path / "kanban.db") as conn:
+        task_id = kb.create_task(conn, title="Bound structured evidence")
+        _complete(conn, task_id, summary="bounded", metadata=metadata)
+
+        report = project_task_completion(conn, task_id, board="default")
+
+        assert report is not None
+        review = json.loads(report.report_json)["review"]
+        assert len(review) == 10
+
+        def assert_bounded(value, depth=0):
+            if isinstance(value, dict):
+                assert len(value) <= 10
+                assert depth < 10
+                for nested in value.values():
+                    assert_bounded(nested, depth + 1)
+
+        assert_bounded(review)
+        assert "supersecret123" not in report.report_json
+
+
 def test_projection_skips_nonterminal_tasks_and_org_run_until_all_gates_finish(tmp_path):
     """Breaks if a blocked card or incomplete OrgRun yields a final report."""
     plan = _plan()
