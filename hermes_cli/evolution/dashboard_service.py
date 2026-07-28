@@ -8,24 +8,36 @@ import math
 import os
 import re
 import stat
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal, TypedDict, cast
+from typing import Any, Iterator, Literal, TypedDict, cast
 
 from agent.redact import redact_sensitive_text
 from hermes_constants import get_organism_home
 from hermes_cli.gnothi.contract import validate_artifact
+from hermes_cli.gnothi.builder import COLLECTOR_ORDER
 from hermes_cli.gnothi.query import OrganismQuery
 from hermes_cli.gnothi.redaction import redact_value
 from hermes_cli.gnothi.store import OrganismRevisionStore
 
 from .bootstrap import evolution_state_kind
 from .blueprint_repository import BlueprintRepository
+from .contract import content_digest
+from .dashboard_jobs import EvolutionJob, EvolutionJobManager
+from .global_config import load_global_config, save_global_config
 from .ledger import EvolutionLedgerError, StoredEvent
-from .organism_identity import OrganismIdentity, probe_organism_identity
+from .lifecycle_global import ensure_global_lifecycle_initialized
+from .locking import LifecycleLockError, LifecycleLockTimeout, lifecycle_lock
+from .organism_identity import (
+    OrganismIdentity,
+    load_organism_identity,
+    probe_organism_identity,
+)
+from .proposal_service import ProposalError, _propose_under_lock
 from .reconcile import _evaluate_open_ledger, read_evolution_snapshot
 from .suggestions import SuggestionRecord, SuggestionRepository
-from .telos_contract import telos_revision_from_dict
+from .telos_contract import telos_revision_from_dict, validate_telos_revision
 from .telos_store import TelosStore
 
 
@@ -53,6 +65,7 @@ _MAX_AUDIT_EVENTS = 100
 _MAX_TELOS_DIRECTORY_ENTRIES = _MAX_REVISIONS + 1
 _MAX_DASHBOARD_LIFECYCLE_EVENTS = 256
 _MAX_DASHBOARD_EVOLUTION_DIRECTORY_MEMBERS = 64
+_MAX_REBUILD_COLLECTORS = len(COLLECTOR_ORDER)
 
 # Build, canary, promotion, and stable are visible contractual stages only.
 # They deliberately remain unavailable until a real local runtime owns them.
@@ -367,8 +380,14 @@ def _prefix(value: object, length: int) -> str | None:
 class EvolutionDashboardService:
     """Expose a coherent, read-only dashboard snapshot for one organism root."""
 
-    def __init__(self, root: Path | None = None) -> None:
+    def __init__(
+        self,
+        root: Path | None = None,
+        *,
+        job_manager: EvolutionJobManager | None = None,
+    ) -> None:
         self.root = Path(root) if root is not None else get_organism_home()
+        self._job_manager = job_manager
 
     def snapshot(self) -> EvolutionSnapshot:
         """Return one bounded view without creating or repairing local state."""
@@ -421,6 +440,273 @@ class EvolutionDashboardService:
             pipeline=pipeline,
             diagnostics=diagnostics,
         )
+
+    def initialize(self) -> dict[str, Any]:
+        """Create a new local organism only when no artifact exists yet.
+
+        This deliberately does not use an idempotent initializer as a mutation
+        API: a caller who observed an existing or malformed root must refresh
+        rather than silently receiving another operator's organism.
+        """
+        try:
+            identity = probe_organism_identity(self.root)
+        except Exception:
+            raise EvolutionDashboardError("organism_corrupt") from None
+        if identity is not None:
+            raise EvolutionDashboardConflict("organism_exists")
+        try:
+            if self.root.exists():
+                # A root with no verifiable identity may contain partial or
+                # hostile material.  Initialization must never repair it.
+                raise EvolutionDashboardError("organism_corrupt")
+        except OSError:
+            raise EvolutionDashboardError("organism_corrupt") from None
+
+        try:
+            ensure_global_lifecycle_initialized(self.root)
+            created = load_organism_identity(self.root)
+        except EvolutionDashboardError:
+            raise
+        except Exception:
+            raise EvolutionDashboardError("evolution_unavailable") from None
+        return {
+            "organism_id": created.organism_id,
+            "snapshot": self.snapshot(),
+        }
+
+    def mutation_context(self) -> dict[str, str]:
+        """Return the sole private field needed to bind a mutation request."""
+        try:
+            identity = probe_organism_identity(self.root)
+        except Exception:
+            raise EvolutionDashboardError("organism_corrupt") from None
+        if identity is None:
+            raise EvolutionDashboardError("organism_missing")
+        return {
+            "organism_id": identity.organism_id,
+            "expected_snapshot_digest": self.snapshot()["snapshot_digest"],
+        }
+
+    @contextmanager
+    def _validated_mutation(
+        self,
+        *,
+        organism_id: str,
+        expected_snapshot_digest: str,
+    ) -> Iterator[OrganismIdentity]:
+        """Hold the lifecycle lock through full optimistic-concurrency proof."""
+        if not isinstance(organism_id, str) or not isinstance(
+            expected_snapshot_digest, str
+        ):
+            raise EvolutionDashboardConflict("snapshot_changed")
+        # ``lifecycle_lock`` only accepts an already safe local lifecycle
+        # root.  Probe first without creating or repairing a missing root.
+        try:
+            preliminary = probe_organism_identity(self.root)
+        except Exception:
+            raise EvolutionDashboardError("organism_corrupt") from None
+        if preliminary is None:
+            raise EvolutionDashboardConflict("organism_changed")
+
+        try:
+            with lifecycle_lock(home=self.root, timeout_seconds=10):
+                try:
+                    identity = load_organism_identity(self.root)
+                except Exception:
+                    raise EvolutionDashboardError("organism_corrupt") from None
+                if identity.organism_id != organism_id:
+                    raise EvolutionDashboardConflict("organism_changed")
+                snapshot = self.snapshot()
+                # Corrupt identity/artifacts are never mutation targets.  A
+                # partial or blocked operational view can still need the
+                # governed repair actions exposed here (for example rebuild
+                # or saving an inert Telos draft), so its digest remains the
+                # concurrency boundary rather than a blanket denial.
+                if snapshot["state"] == "corrupt":
+                    raise EvolutionDashboardError("evolution_unavailable")
+                if snapshot["snapshot_digest"] != expected_snapshot_digest:
+                    raise EvolutionDashboardConflict("snapshot_changed")
+                yield identity
+        except (LifecycleLockTimeout, LifecycleLockError):
+            raise EvolutionDashboardError("evolution_unavailable") from None
+
+    def set_observer_enabled(
+        self,
+        *,
+        organism_id: str,
+        expected_snapshot_digest: str,
+        enabled: bool,
+    ) -> dict[str, Any]:
+        """Pause or resume Observer collection after the snapshot check."""
+        if type(enabled) is not bool:
+            raise ValueError("invalid observer state")
+        with self._validated_mutation(
+            organism_id=organism_id,
+            expected_snapshot_digest=expected_snapshot_digest,
+        ):
+            try:
+                config = load_global_config()
+                autopoiesis = config.get("autopoiesis")
+                if not isinstance(autopoiesis, dict):
+                    raise ValueError
+                observer = autopoiesis.get("observer")
+                if not isinstance(observer, dict):
+                    observer = {}
+                observer["enabled"] = enabled
+                autopoiesis["observer"] = observer
+                save_global_config(autopoiesis)
+            except EvolutionDashboardError:
+                raise
+            except Exception:
+                raise EvolutionDashboardError("evolution_unavailable") from None
+        return {"enabled": enabled}
+
+    @staticmethod
+    def _validated_collectors(collectors: list[str]) -> list[str]:
+        if (
+            not isinstance(collectors, list)
+            or len(collectors) > _MAX_REBUILD_COLLECTORS
+            or any(not isinstance(name, str) for name in collectors)
+            or len(set(collectors)) != len(collectors)
+            or any(name not in COLLECTOR_ORDER for name in collectors)
+        ):
+            raise ValueError("invalid collectors")
+        return [name for name in COLLECTOR_ORDER if name in collectors]
+
+    def _jobs(self) -> EvolutionJobManager:
+        if self._job_manager is None:
+            self._job_manager = EvolutionJobManager(self.root)
+        return self._job_manager
+
+    def submit_rebuild(
+        self,
+        *,
+        organism_id: str,
+        expected_snapshot_digest: str,
+        force: bool,
+        collectors: list[str],
+    ) -> EvolutionJob:
+        """Queue only the fixed local rebuild job after atomic validation."""
+        if type(force) is not bool:
+            raise ValueError("invalid rebuild force")
+        selected = self._validated_collectors(collectors)
+        with self._validated_mutation(
+            organism_id=organism_id,
+            expected_snapshot_digest=expected_snapshot_digest,
+        ):
+            try:
+                return self._jobs().submit_rebuild(
+                    force=force, collector_names=selected
+                )
+            except Exception:
+                raise EvolutionDashboardError("job_unavailable") from None
+
+    def submit_observer_scan(
+        self,
+        *,
+        organism_id: str,
+        expected_snapshot_digest: str,
+    ) -> EvolutionJob:
+        """Queue the one fixed local Observer scan after atomic validation."""
+        with self._validated_mutation(
+            organism_id=organism_id,
+            expected_snapshot_digest=expected_snapshot_digest,
+        ):
+            try:
+                return self._jobs().submit_observer_scan()
+            except Exception:
+                raise EvolutionDashboardError("job_unavailable") from None
+
+    def save_telos_draft(
+        self,
+        *,
+        organism_id: str,
+        expected_snapshot_digest: str,
+        document: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Save a validated inert Telos revision without changing its pointer."""
+        if not isinstance(document, dict):
+            raise EvolutionDashboardError("invalid_telos_draft")
+        try:
+            revision = telos_revision_from_dict(document)
+            validate_telos_revision(revision)
+        except Exception:
+            raise EvolutionDashboardError("invalid_telos_draft") from None
+
+        with self._validated_mutation(
+            organism_id=organism_id,
+            expected_snapshot_digest=expected_snapshot_digest,
+        ) as identity:
+            if revision.organism_id != identity.organism_id:
+                raise EvolutionDashboardConflict("organism_changed")
+            try:
+                store = TelosStore(self.root)
+                if revision.parent_digest != store.get_active_digest():
+                    raise EvolutionDashboardConflict("telos_active_changed")
+                store.save_revision(revision)
+            except EvolutionDashboardConflict:
+                raise
+            except Exception:
+                raise EvolutionDashboardError("telos_unavailable") from None
+        return {"digest": revision.canonical_digest, "state": "saved"}
+
+    @staticmethod
+    def _suggestion_digest(record: SuggestionRecord) -> str:
+        return content_digest(
+            record.to_dict(), domain="hermes-evolution-dashboard-suggestion-v1"
+        )
+
+    def create_blueprint(
+        self,
+        *,
+        organism_id: str,
+        expected_snapshot_digest: str,
+        suggestion_id: str,
+        expected_suggestion_digest: str,
+    ) -> dict[str, Any]:
+        """Create or retrieve the exact eligible suggestion's immutable blueprint."""
+        if not isinstance(suggestion_id, str) or not isinstance(
+            expected_suggestion_digest, str
+        ):
+            raise EvolutionDashboardConflict("suggestion_changed")
+        with self._validated_mutation(
+            organism_id=organism_id,
+            expected_snapshot_digest=expected_snapshot_digest,
+        ):
+            try:
+                repository = SuggestionRepository(
+                    self.root / "evolution" / "evolution.db"
+                )
+                suggestion = repository.get_suggestion_by_id(suggestion_id)
+            except Exception:
+                raise EvolutionDashboardError("suggestion_unavailable") from None
+            if (
+                suggestion is None
+                or suggestion.state != "eligible"
+                or self._suggestion_digest(suggestion) != expected_suggestion_digest
+            ):
+                raise EvolutionDashboardConflict("suggestion_changed")
+            try:
+                # ``propose_suggestion`` owns this same lifecycle lock in its
+                # public entry point.  The dashboard already holds it to bind
+                # the snapshot atomically, so call its shared under-lock
+                # implementation rather than deadlocking on a nested lease.
+                result = _propose_under_lock(
+                    root=self.root, suggestion_id=suggestion_id
+                )
+            except ProposalError as exc:
+                if exc.code in {"suggestion_not_eligible", "suggestion_telos_mismatch"}:
+                    raise EvolutionDashboardConflict("suggestion_changed") from None
+                raise EvolutionDashboardError("blueprint_unavailable") from None
+            except Exception:
+                raise EvolutionDashboardError("blueprint_unavailable") from None
+        draft = result.blueprint
+        return {
+            "status": result.status,
+            "blueprint_id": draft.blueprint_id,
+            "attempt_id": draft.attempt_id,
+            "canonical_digest": draft.canonical_digest,
+        }
 
     def graph(
         self,
@@ -1035,6 +1321,7 @@ class EvolutionDashboardService:
             "suggestion_id": self._public_text(
                 record.suggestion_id, identity, limit=64
             ),
+            "suggestion_digest": self._suggestion_digest(record),
             "state": self._public_text(record.state, identity, limit=64),
             "score": self._public_number(record.score),
             "telos_alignment": self._public_number(record.telos_alignment),

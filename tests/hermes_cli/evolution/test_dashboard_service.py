@@ -7,7 +7,7 @@ import json
 import os
 import stat
 import shutil
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,6 +16,7 @@ import pytest
 import hermes_cli.evolution.dashboard_service as dashboard_module
 from hermes_cli.evolution.dashboard_service import (
     EvolutionDashboardConflict,
+    EvolutionDashboardError,
     EvolutionDashboardService,
 )
 from hermes_cli.evolution.lifecycle_global import ensure_global_lifecycle_initialized
@@ -36,9 +37,10 @@ from hermes_cli.evolution.telos_contract import (
 from hermes_cli.evolution.telos_store import TelosStore
 from hermes_cli.evolution.observation_contract import ObservationEnvelope
 from hermes_cli.evolution.observer_policy import OpportunityScore
-from hermes_cli.evolution.suggestions import SuggestionRepository
+from hermes_cli.evolution.suggestions import SuggestionRecord, SuggestionRepository
 from hermes_cli.evolution.blueprint_contract import blueprint_document_from_suggestion
 from hermes_cli.evolution.blueprint_repository import BlueprintRepository
+from hermes_cli.evolution.contract import content_digest
 from hermes_cli.evolution.ledger import EvolutionLedger, LifecycleEvent
 from hermes_cli.gnothi.contract import add_edge, add_node, new_artifact
 from hermes_cli.gnothi.store import OrganismRevisionStore
@@ -328,6 +330,14 @@ def _seed_governance_state(
         )
     )
     return identity, ledger, (first.attempt_id, second.attempt_id)
+
+
+def _seed_mutation_governance_state(
+    root: Path,
+) -> tuple[OrganismIdentity, EvolutionLedger, tuple[str, str]]:
+    """Add the real baseline lifecycle proof required by write services."""
+    ensure_global_lifecycle_initialized(root)
+    return _seed_governance_state(root)
 
 
 def test_snapshot_missing_is_bounded_and_non_mutating(tmp_path: Path) -> None:
@@ -915,7 +925,7 @@ def test_telos_read_binds_active_and_history_to_the_local_organism(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "organism"
-    identity, ledger, _ = _seed_governance_state(root)
+    identity, ledger, _ = _seed_mutation_governance_state(root)
 
     result = EvolutionDashboardService(root).telos(history_limit=1)
 
@@ -963,6 +973,11 @@ def test_pipeline_counts_only_the_bounded_suggestions_and_resolves_blueprints(
     assert result["state"] == "ready"
     assert result["attempt_id"] == attempts[0]
     assert len(result["suggestions"]) == 1
+    assert result["suggestions"][0]["suggestion_digest"] == _suggestion_digest(
+        SuggestionRepository(root / "evolution" / "evolution.db").get_suggestion_by_id(
+            result["suggestions"][0]["suggestion_id"]
+        )
+    )
     assert sum(result["suggestion_counts"].values()) == len(result["suggestions"])
     assert result["suggestions_truncated"] is False
     assert len(result["blueprints"]) == 1
@@ -1308,3 +1323,274 @@ def test_governance_reads_reject_bad_bounds(tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="invalid audit bounds"):
             service.audit(after=after, limit=limit)
     assert not root.exists()
+
+
+def _tree_bytes(root: Path) -> dict[str, bytes]:
+    """Capture regular organism artifacts by relative path and exact bytes."""
+    if not root.exists():
+        return {}
+    return {
+        str(path.relative_to(root)): path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if (
+            path.is_file()
+            and not path.is_symlink()
+            # The kernel-lock diagnostic is intentionally refreshed when a
+            # lock is acquired; it is not organism or lifecycle state.
+            and path.name != ".lifecycle.lock"
+        )
+    }
+
+
+def _suggestion_digest(record: object) -> str:
+    """Independently derive the public optimistic-concurrency digest."""
+    assert isinstance(record, SuggestionRecord)
+    return content_digest(
+        record.to_dict(), domain="hermes-evolution-dashboard-suggestion-v1"
+    )
+
+
+def test_initialize_is_absence_only_and_preserves_existing_or_corrupt_bytes(
+    tmp_path: Path,
+) -> None:
+    """Replacing the absence gate would create or repair an existing organism."""
+    absent = tmp_path / "absent"
+    initialized = EvolutionDashboardService(absent).initialize()
+    assert initialized["organism_id"] == probe_organism_identity(absent).organism_id  # type: ignore[union-attr]
+    assert initialized["snapshot"]["organism"]["id_prefix"] == initialized["organism_id"][:8]
+
+    existing = tmp_path / "existing"
+    create_organism_identity(existing)
+    existing_before = _tree_bytes(existing)
+    with pytest.raises(EvolutionDashboardConflict, match="organism_exists"):
+        EvolutionDashboardService(existing).initialize()
+    assert _tree_bytes(existing) == existing_before
+
+    corrupt = tmp_path / "corrupt"
+    corrupt.mkdir()
+    (corrupt / "identity.json").write_text('{"organism_id":"secret"}', encoding="utf-8")
+    corrupt_before = _tree_bytes(corrupt)
+    with pytest.raises(EvolutionDashboardError, match="organism_corrupt"):
+        EvolutionDashboardService(corrupt).initialize()
+    assert _tree_bytes(corrupt) == corrupt_before
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_observer_toggle_rejects_stale_snapshot_without_writing(
+    tmp_path: Path, enabled: bool
+) -> None:
+    """Moving validation after config persistence would change paused/resumed state."""
+    root = tmp_path / "organism"
+    identity = ensure_global_lifecycle_initialized(root)
+    service = EvolutionDashboardService(root)
+    before = _tree_bytes(root)
+
+    with pytest.raises(EvolutionDashboardConflict, match="snapshot_changed"):
+        service.set_observer_enabled(
+            organism_id=probe_organism_identity(root).organism_id,  # type: ignore[union-attr]
+            expected_snapshot_digest="0" * 64,
+            enabled=enabled,
+        )
+
+    assert _tree_bytes(root) == before
+    assert identity.generation_id
+
+
+def test_mutation_context_returns_only_full_identity_and_current_digest(
+    tmp_path: Path,
+) -> None:
+    """Leaking lineage, paths, or private artifacts through this mutation-only shape is a bug."""
+    root = tmp_path / "organism"
+    ensure_global_lifecycle_initialized(root)
+    identity = probe_organism_identity(root)
+    assert identity is not None
+
+    context = EvolutionDashboardService(root).mutation_context()
+
+    assert context == {
+        "organism_id": identity.organism_id,
+        "expected_snapshot_digest": EvolutionDashboardService(root).snapshot()[
+            "snapshot_digest"
+        ],
+    }
+
+
+def test_full_organism_identity_mismatch_is_atomic(tmp_path: Path) -> None:
+    """Comparing only a public prefix would let a foreign organism mutate local state."""
+    root = tmp_path / "organism"
+    ensure_global_lifecycle_initialized(root)
+    service = EvolutionDashboardService(root)
+    before = _tree_bytes(root)
+
+    with pytest.raises(EvolutionDashboardConflict, match="organism_changed"):
+        service.set_observer_enabled(
+            organism_id="00000000-0000-4000-8000-000000000000",
+            expected_snapshot_digest=service.snapshot()["snapshot_digest"],
+            enabled=False,
+        )
+
+    assert _tree_bytes(root) == before
+
+
+def test_rebuild_and_scan_reject_stale_snapshots_before_job_submission(
+    tmp_path: Path,
+) -> None:
+    """Submitting first would persist an irreversible queued job for a stale view."""
+    root = tmp_path / "organism"
+    ensure_global_lifecycle_initialized(root)
+    service = EvolutionDashboardService(root)
+    identity = probe_organism_identity(root)
+    assert identity is not None
+    before = _tree_bytes(root)
+
+    with pytest.raises(EvolutionDashboardConflict, match="snapshot_changed"):
+        service.submit_rebuild(
+            organism_id=identity.organism_id,
+            expected_snapshot_digest="0" * 64,
+            force=False,
+            collectors=["source"],
+        )
+    with pytest.raises(EvolutionDashboardConflict, match="snapshot_changed"):
+        service.submit_observer_scan(
+            organism_id=identity.organism_id,
+            expected_snapshot_digest="0" * 64,
+        )
+
+    assert _tree_bytes(root) == before
+
+
+def test_rebuild_uses_fixed_manager_and_rejects_unknown_or_excess_collectors(
+    tmp_path: Path,
+) -> None:
+    """Forwarding browser job input or an unbounded collector list would widen execution scope."""
+    root = tmp_path / "organism"
+    ensure_global_lifecycle_initialized(root)
+    identity = probe_organism_identity(root)
+    assert identity is not None
+    expected = EvolutionDashboardService(root).snapshot()["snapshot_digest"]
+    sentinel = SimpleNamespace(job_id="job-1")
+
+    class FixedJobs:
+        def __init__(self) -> None:
+            self.calls: list[tuple[bool, list[str]]] = []
+
+        def submit_rebuild(self, *, force: bool, collector_names: list[str]):
+            self.calls.append((force, collector_names))
+            return sentinel
+
+    jobs = FixedJobs()
+    service = EvolutionDashboardService(root, job_manager=jobs)
+
+    assert service.submit_rebuild(
+        organism_id=identity.organism_id,
+        expected_snapshot_digest=expected,
+        force=True,
+        collectors=["contracts", "source"],
+    ) is sentinel
+    assert jobs.calls == [(True, ["source", "contracts"])]
+    for collectors in (["unknown"], ["source"] * 7):
+        with pytest.raises(ValueError, match="invalid collectors"):
+            service.submit_rebuild(
+                organism_id=identity.organism_id,
+                expected_snapshot_digest=expected,
+                force=False,
+                collectors=collectors,
+            )
+
+
+def test_telos_draft_validates_active_parent_and_document_before_any_write(
+    tmp_path: Path,
+) -> None:
+    """Saving before validating the active parent would leave an unauthorized inert revision."""
+    root = tmp_path / "organism"
+    identity, ledger, _ = _seed_governance_state(root)
+    service = EvolutionDashboardService(root)
+    expected = service.snapshot()["snapshot_digest"]
+    active = TelosStore(root).get_active_digest()
+    assert active is not None
+    before = _tree_bytes(root)
+
+    stale_parent = asdict(_dashboard_telos(identity, parent_digest="a" * 64))
+    with pytest.raises(EvolutionDashboardConflict, match="telos_active_changed"):
+        service.save_telos_draft(
+            organism_id=identity.organism_id,
+            expected_snapshot_digest=expected,
+            document=stale_parent,
+        )
+    assert _tree_bytes(root) == before
+
+    invalid = asdict(_dashboard_telos(identity, parent_digest=active))
+    invalid["schema_version"] = 2
+    with pytest.raises(EvolutionDashboardError, match="invalid_telos_draft"):
+        service.save_telos_draft(
+            organism_id=identity.organism_id,
+            expected_snapshot_digest=expected,
+            document=invalid,
+        )
+    assert _tree_bytes(root) == before
+    ledger.connection.close()
+
+
+def test_blueprint_creation_requires_current_suggestion_digest_and_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    """Dropping suggestion-state binding could draft a blueprint after eligibility changed."""
+    root = tmp_path / "organism"
+    identity, ledger, attempts = _seed_mutation_governance_state(root)
+    service = EvolutionDashboardService(root)
+    expected = service.snapshot()["snapshot_digest"]
+    repository = SuggestionRepository(root / "evolution" / "evolution.db")
+    suggestion = repository.get_suggestion_by_id(
+        next(
+            row["suggestion_id"]
+            for row in ledger.connection.execute(
+                "SELECT suggestion_id FROM blueprint_documents WHERE attempt_id = ?",
+                (attempts[0],),
+            )
+        )
+    )
+    assert suggestion is not None
+    ledger.connection.close()
+    before = _tree_bytes(root)
+
+    with pytest.raises(EvolutionDashboardConflict, match="suggestion_changed"):
+        service.create_blueprint(
+            organism_id=identity.organism_id,
+            expected_snapshot_digest=expected,
+            suggestion_id=suggestion.suggestion_id,
+            expected_suggestion_digest="0" * 64,
+        )
+    assert _tree_bytes(root) == before
+
+    result_one = service.create_blueprint(
+        organism_id=identity.organism_id,
+        expected_snapshot_digest=expected,
+        suggestion_id=suggestion.suggestion_id,
+        expected_suggestion_digest=_suggestion_digest(suggestion),
+    )
+    after_first = _tree_bytes(root)
+    result_two = service.create_blueprint(
+        organism_id=identity.organism_id,
+        expected_snapshot_digest=expected,
+        suggestion_id=suggestion.suggestion_id,
+        expected_suggestion_digest=_suggestion_digest(suggestion),
+    )
+    assert result_one == result_two
+    assert _tree_bytes(root) == after_first
+
+    repository.update_suggestion_state(
+        suggestion.suggestion_id, "observing", "test_state_change"
+    )
+    changed = repository.get_suggestion_by_id(suggestion.suggestion_id)
+    assert changed is not None
+    changed_before = _tree_bytes(root)
+    with pytest.raises(EvolutionDashboardConflict, match="suggestion_changed"):
+        service.create_blueprint(
+            organism_id=identity.organism_id,
+            expected_snapshot_digest=EvolutionDashboardService(root).snapshot()[
+                "snapshot_digest"
+            ],
+            suggestion_id=suggestion.suggestion_id,
+            expected_suggestion_digest=_suggestion_digest(changed),
+        )
+    assert _tree_bytes(root) == changed_before
