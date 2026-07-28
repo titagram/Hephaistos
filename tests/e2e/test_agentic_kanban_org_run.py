@@ -15,6 +15,12 @@ from hermes_cli.org_run_store import get_org_run, list_org_nodes
 
 BOARD = "offline-e2e"
 RUN_ID = "offline-org-run-001"
+FAKE_BACKEND_ENV = {
+    "HADES_BACKEND_URL": "https://offline-e2e-backend.invalid/private",
+    "HADES_BACKEND_AGENT_TOKEN_OFFLINE_E2E": "offline-e2e-agent-token-7d08a4",
+    "HADES_BACKEND_PROJECT_TOKEN_OFFLINE_E2E": "offline-e2e-project-token-e99162",
+    "HERMES_BACKEND_CREDENTIAL_OFFLINE_E2E": "offline-e2e-credential-3f814c",
+}
 
 
 def _git_repository(path: Path) -> str:
@@ -138,9 +144,19 @@ def test_offline_org_run_resumes_after_interrupt_and_projects_one_final_report(
     _configure_profiles(home)
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setenv("HERMES_KANBAN_BOARD", BOARD)
-    for key in tuple(os.environ):
-        if key.startswith(("HADES_BACKEND_", "HERMES_BACKEND_")):
-            monkeypatch.delenv(key)
+    for key, value in FAKE_BACKEND_ENV.items():
+        monkeypatch.setenv(key, value)
+
+    backend_attempts: list[tuple[tuple, dict]] = []
+
+    def forbidden_backend(*args, **kwargs):
+        backend_attempts.append((args, kwargs))
+        raise AssertionError("Agentic-Kanban attempted backend access")
+
+    monkeypatch.setattr(
+        "hermes_cli.hades_backend_client.HadesBackendClient",
+        forbidden_backend,
+    )
 
     kb.create_board(
         BOARD,
@@ -154,14 +170,6 @@ def test_offline_org_run_resumes_after_interrupt_and_projects_one_final_report(
     assert code == 0
     assert materialized["status"] == "materialized"
     assert materialized["run_id"] == RUN_ID
-
-    def forbidden_backend(*_args, **_kwargs):
-        raise AssertionError("Agentic-Kanban attempted backend access")
-
-    monkeypatch.setattr(
-        "hermes_cli.hades_backend_client.HadesBackendClient",
-        forbidden_backend,
-    )
 
     popen_calls: list[tuple[list[str], dict]] = []
 
@@ -262,21 +270,44 @@ def test_offline_org_run_resumes_after_interrupt_and_projects_one_final_report(
     assert shown["state"] == "completed"
     assert len(shown["report_ids"]) == 1
 
+    assert backend_attempts == []
     assert popen_calls
-    forbidden_argv = (
+    forbidden_fragments = (
         "hermes-agent",
         "hermes-review-engine",
         "--api-key",
-        "backend-token",
-        "project-token",
-        "lease-token",
-        "workspace-binding",
+        *(value.lower() for value in FAKE_BACKEND_ENV.values()),
     )
-    for argv, _kwargs in popen_calls:
+    for argv, kwargs in popen_calls:
         assert argv[:3] == [sys.executable, "-m", "hermes_cli.main"]
         lowered = [item.lower() for item in argv]
         assert not any(
             forbidden in item
             for item in lowered
-            for forbidden in forbidden_argv
+            for forbidden in forbidden_fragments
         )
+        worker_env = kwargs["env"]
+        assert not set(FAKE_BACKEND_ENV).intersection(worker_env)
+        assert not any(
+            secret.lower() in str(value).lower()
+            for value in worker_env.values()
+            for secret in FAKE_BACKEND_ENV.values()
+        )
+
+    serialized_outputs = json.dumps(
+        {
+            "materialized": materialized,
+            "shown": shown,
+            "task_reports": [
+                report.report_json for report in task_reports
+            ],
+            "final_reports": [
+                report.report_json for report in final_reports
+            ],
+        },
+        sort_keys=True,
+    ).lower()
+    assert not any(
+        secret.lower() in serialized_outputs
+        for secret in FAKE_BACKEND_ENV.values()
+    )
