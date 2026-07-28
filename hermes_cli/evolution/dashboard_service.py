@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import stat
@@ -19,9 +20,13 @@ from hermes_cli.gnothi.redaction import redact_value
 from hermes_cli.gnothi.store import OrganismRevisionStore
 
 from .bootstrap import evolution_state_kind
+from .blueprint_repository import BlueprintRepository
+from .ledger import StoredEvent
 from .organism_identity import OrganismIdentity, probe_organism_identity
 from .reconcile import _evaluate_open_ledger, read_evolution_snapshot
+from .suggestions import SuggestionRecord, SuggestionRepository
 from .telos_contract import telos_revision_from_dict
+from .telos_store import TelosStore
 
 
 SnapshotState = Literal["missing", "ready", "partial", "stale", "blocked", "corrupt"]
@@ -43,6 +48,21 @@ _MAX_PUBLIC_FILE_BYTES = 1024 * 1024
 _MAX_GRAPH_DEPTH = 4
 _MAX_GRAPH_LIMIT = 200
 _MAX_REVISIONS = 50
+_MAX_PIPELINE_ROWS = 50
+_MAX_AUDIT_EVENTS = 100
+_MAX_TELOS_DIRECTORY_ENTRIES = _MAX_REVISIONS + 1
+
+# Build, canary, promotion, and stable are visible contractual stages only.
+# They deliberately remain unavailable until a real local runtime owns them.
+PIPELINE_STAGES = (
+    ("suggestion", True),
+    ("research", True),
+    ("blueprint", True),
+    ("build", False),
+    ("canary", False),
+    ("promotion", False),
+    ("stable", False),
+)
 
 
 class PublicOrganism(TypedDict):
@@ -66,6 +86,10 @@ class EvolutionSnapshot(TypedDict):
 
 class _PublicReadError(RuntimeError):
     """A file cannot safely contribute to a public dashboard response."""
+
+
+class _PublicReadLimitError(RuntimeError):
+    """A dashboard read would exceed its fixed public resource budget."""
 
 
 class EvolutionDashboardError(RuntimeError):
@@ -520,6 +544,550 @@ class EvolutionDashboardService:
             "left_revision_id": self._public_text(left, identity, limit=128),
             "right_revision_id": self._public_text(right, identity, limit=128),
             **self._public_diff_result(result, identity),
+        }
+
+    def telos(self, *, history_limit: int = _MAX_REVISIONS) -> dict[str, Any]:
+        """Return the active local Telos and bounded, verified immutable history."""
+        if (
+            isinstance(history_limit, bool)
+            or not isinstance(history_limit, int)
+            or not 1 <= history_limit <= _MAX_REVISIONS
+        ):
+            raise ValueError("invalid telos history limit")
+
+        try:
+            identity = probe_organism_identity(self.root)
+        except Exception:
+            return self._empty_telos_read("corrupt")
+        if identity is None:
+            return self._empty_telos_read("missing")
+        if not self._root_is_directory():
+            return self._empty_telos_read("blocked")
+
+        telos_root = self.root / "telos"
+        revisions_root = telos_root / "revisions"
+        if not self._safe_directory(telos_root) or not self._safe_directory(
+            revisions_root
+        ):
+            return self._empty_telos_read("corrupt")
+
+        try:
+            store = TelosStore.from_verified_read_root(self.root)
+
+            def read_telos_json(path: Path) -> dict[str, Any] | None:
+                return _read_regular_json(path, root=self.root)
+
+            active_digest = store.get_active_digest(read_json=read_telos_json)
+            if active_digest is None:
+                return self._empty_telos_read("missing")
+            if _DIGEST.fullmatch(active_digest) is None:
+                raise _PublicReadError("invalid_digest")
+
+            active = store.get_revision(active_digest, read_json=read_telos_json)
+            if (
+                active.canonical_digest != active_digest
+                or active.organism_id != identity.organism_id
+            ):
+                raise _PublicReadError("invalid_active_revision")
+
+            revisions: list[tuple[str, Any]] = []
+            directory_entries = 0
+            for path in revisions_root.iterdir():
+                directory_entries += 1
+                if directory_entries > _MAX_TELOS_DIRECTORY_ENTRIES:
+                    # Do not parse or retain unbounded revision documents.  The
+                    # dashboard has no pagination for Telos history, so a
+                    # populated directory beyond this fixed budget is blocked.
+                    raise _PublicReadLimitError("too_many_telos_revisions")
+                if path.suffix != ".json":
+                    continue
+                digest = path.stem
+                if _DIGEST.fullmatch(digest) is None or not _regular_file_exists(path):
+                    raise _PublicReadError("invalid_revision_path")
+                revision = store.get_revision(digest, read_json=read_telos_json)
+                if (
+                    revision.canonical_digest != digest
+                    or revision.organism_id != identity.organism_id
+                ):
+                    raise _PublicReadError("invalid_revision")
+                if digest == active_digest and revision != active:
+                    raise _PublicReadError("active_revision_changed")
+                revisions.append((digest, revision))
+            if active_digest not in {digest for digest, _ in revisions}:
+                raise _PublicReadError("active_revision_not_listed")
+        except _PublicReadLimitError:
+            return self._empty_telos_read("blocked")
+        except Exception:
+            return self._empty_telos_read("corrupt")
+
+        revisions.sort(key=lambda item: item[0], reverse=True)
+        history = [
+            self._public_telos_revision(revision, identity)
+            for digest, revision in revisions
+            if digest != active_digest
+        ]
+        return {
+            "schema_version": 1,
+            "state": "ready",
+            "active_digest": active_digest,
+            "active_revision": self._public_telos_revision(active, identity),
+            "history": history[:history_limit],
+            "total_revisions": len(revisions),
+            "truncated": len(history) > history_limit,
+        }
+
+    def pipeline(
+        self, *, attempt_id: str | None = None, limit: int = _MAX_PIPELINE_ROWS
+    ) -> dict[str, Any]:
+        """Return bounded local Observer and blueprint state for one pipeline view."""
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= _MAX_PIPELINE_ROWS
+        ):
+            raise ValueError("invalid pipeline limit")
+        if attempt_id is not None and (
+            not isinstance(attempt_id, str) or not 1 <= len(attempt_id) <= 256
+        ):
+            raise ValueError("invalid attempt id")
+
+        identity, lifecycle_state = self._governance_read_preflight()
+        if identity is None:
+            return self._empty_pipeline("missing")
+        if lifecycle_state != "ready":
+            return self._empty_pipeline(lifecycle_state)
+
+        def query(ledger: Any) -> dict[str, Any]:
+            if ledger.verify_chain():
+                return self._empty_pipeline("corrupt")
+            try:
+                suggestion_repository = (
+                    SuggestionRepository.from_verified_read_connection(
+                        ledger.connection
+                    )
+                )
+                blueprint_repository = BlueprintRepository(ledger)
+                attempt_total = int(
+                    ledger.connection.execute(
+                        "SELECT COUNT(*) FROM attempts"
+                    ).fetchone()[0]
+                )
+                attempts = ledger.connection.execute(
+                    """
+                    SELECT attempt_id, source_kind, state, created_at
+                    FROM attempts
+                    ORDER BY created_at DESC, attempt_id DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+                if attempt_id is None:
+                    selected_attempt = (
+                        attempts[0]["attempt_id"] if attempts else None
+                    )
+                    blueprint_total = int(
+                        ledger.connection.execute(
+                            "SELECT COUNT(*) FROM blueprint_documents"
+                        ).fetchone()[0]
+                    )
+                    stored_blueprints = blueprint_repository.list(limit=limit)
+                    suggestion_total = suggestion_repository.count_suggestions()
+                    selected_suggestions = suggestion_repository.list_suggestions(
+                        limit=limit
+                    )
+                else:
+                    selected_row = ledger.connection.execute(
+                        """
+                        SELECT attempt_id, source_kind, state, created_at
+                        FROM attempts
+                        WHERE attempt_id = ?
+                        """,
+                        (attempt_id,),
+                    ).fetchone()
+                    if selected_row is None:
+                        return self._empty_pipeline("missing")
+                    attempts = [selected_row] + [
+                        row
+                        for row in attempts
+                        if row["attempt_id"] != attempt_id
+                    ][: limit - 1]
+                    selected_attempt = attempt_id
+                    blueprint_total = int(
+                        ledger.connection.execute(
+                            """
+                            SELECT COUNT(*) FROM blueprint_documents
+                            WHERE attempt_id = ?
+                            """,
+                            (attempt_id,),
+                        ).fetchone()[0]
+                    )
+                    blueprint_rows = ledger.connection.execute(
+                        """
+                        SELECT blueprint_id
+                        FROM blueprint_documents
+                        WHERE attempt_id = ?
+                        ORDER BY created_at DESC, blueprint_id DESC
+                        LIMIT ?
+                        """,
+                        (attempt_id, limit),
+                    ).fetchall()
+                    stored_blueprints = []
+                    for row in blueprint_rows:
+                        blueprint = blueprint_repository.get(row["blueprint_id"])
+                        if blueprint is None:
+                            raise RuntimeError("blueprint missing from snapshot")
+                        stored_blueprints.append(blueprint)
+                    suggestion_total = int(
+                        ledger.connection.execute(
+                            """
+                            SELECT COUNT(DISTINCT d.suggestion_id)
+                            FROM blueprint_documents d
+                            JOIN opportunity_suggestions s
+                              ON s.suggestion_id = d.suggestion_id
+                            WHERE d.attempt_id = ?
+                            """,
+                            (attempt_id,),
+                        ).fetchone()[0]
+                    )
+                    selected_suggestions = []
+                    seen_suggestion_ids: set[str] = set()
+                    for blueprint in stored_blueprints:
+                        suggestion_id = blueprint.document.suggestion_id
+                        if suggestion_id in seen_suggestion_ids:
+                            continue
+                        seen_suggestion_ids.add(suggestion_id)
+                        suggestion = suggestion_repository.get_suggestion_by_id(
+                            suggestion_id
+                        )
+                        if suggestion is None:
+                            raise RuntimeError("blueprint suggestion missing from snapshot")
+                        selected_suggestions.append(suggestion)
+            except Exception:
+                return self._empty_pipeline("blocked")
+
+            public_attempts = [
+                self._public_attempt(row, identity) for row in attempts
+            ]
+            public_suggestions = [
+                self._public_suggestion(record, identity)
+                for record in selected_suggestions[:limit]
+            ]
+            suggestion_counts: dict[str, int] = {}
+            for suggestion in public_suggestions:
+                state = suggestion["state"]
+                suggestion_counts[state] = suggestion_counts.get(state, 0) + 1
+            public_blueprints = [
+                self._public_blueprint(blueprint, identity)
+                for blueprint in stored_blueprints
+            ]
+            return {
+                "schema_version": 1,
+                "state": "ready",
+                "attempt_id": selected_attempt,
+                "attempts": public_attempts,
+                "total_attempts": attempt_total,
+                "attempts_truncated": attempt_total > len(public_attempts),
+                "suggestions": public_suggestions,
+                "suggestion_counts": suggestion_counts,
+                "total_suggestions": suggestion_total,
+                "suggestions_truncated": suggestion_total
+                > len(public_suggestions),
+                "blueprints": public_blueprints,
+                "total_blueprints": blueprint_total,
+                "blueprints_truncated": blueprint_total > len(public_blueprints),
+                "stages": self._pipeline_stages(),
+                "mutable_actions": [],
+            }
+
+        try:
+            return read_evolution_snapshot(query, self.root / "evolution")
+        except Exception:
+            return self._empty_pipeline("blocked")
+
+    def audit(
+        self, *, after: int = 0, limit: int = _MAX_AUDIT_EVENTS
+    ) -> dict[str, Any]:
+        """Return a bounded, sequence-ordered public lifecycle audit read."""
+        if (
+            isinstance(after, bool)
+            or not isinstance(after, int)
+            or after < 0
+            or isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= _MAX_AUDIT_EVENTS
+        ):
+            raise ValueError("invalid audit bounds")
+
+        identity, lifecycle_state = self._governance_read_preflight()
+        if identity is None:
+            return self._empty_audit("missing", after=after)
+        if lifecycle_state != "ready":
+            return self._empty_audit(lifecycle_state, after=after)
+
+        def query(ledger: Any) -> dict[str, Any]:
+            if ledger.verify_chain():
+                return self._empty_audit("corrupt", after=after)
+            try:
+                total_events = int(
+                    ledger.connection.execute(
+                        (
+                            "SELECT COUNT(*) FROM lifecycle_events "
+                            "WHERE event_sequence > ?"
+                        ),
+                        (after,),
+                    ).fetchone()[0]
+                )
+                events = ledger.history(after=after, limit=limit)
+            except Exception:
+                return self._empty_audit("blocked", after=after)
+            public_events = [
+                self._public_audit_event(event, identity) for event in events
+            ]
+            return {
+                "schema_version": 1,
+                "state": "ready",
+                "events": public_events,
+                "total_events": total_events,
+                "truncated": total_events > len(public_events),
+                "next_after": (
+                    public_events[-1]["sequence"] if public_events else after
+                ),
+                "mutable_actions": [],
+            }
+
+        try:
+            return read_evolution_snapshot(query, self.root / "evolution")
+        except Exception:
+            return self._empty_audit("blocked", after=after)
+
+    def _governance_read_preflight(
+        self,
+    ) -> tuple[OrganismIdentity | None, str]:
+        """Classify a local read before any constructor can initialize state."""
+        try:
+            identity = probe_organism_identity(self.root)
+        except Exception:
+            return None, "corrupt"
+        if identity is None:
+            return None, "missing"
+        if not self._root_is_directory():
+            return identity, "blocked"
+        evolution_root = self.root / "evolution"
+        state_kind = evolution_state_kind(evolution_root)
+        if state_kind == "uninitialized" or not _regular_file_exists(
+            evolution_root / "evolution.db"
+        ):
+            return identity, "not_ready"
+        if state_kind != "existing":
+            return identity, "blocked"
+        return identity, "ready"
+
+    @staticmethod
+    def _safe_directory(path: Path) -> bool:
+        try:
+            info = path.lstat()
+        except OSError:
+            return False
+        return not _is_link_or_reparse_point(info) and stat.S_ISDIR(info.st_mode)
+
+    @staticmethod
+    def _pipeline_stages() -> list[dict[str, Any]]:
+        return [
+            {"id": stage_id, "available": available}
+            for stage_id, available in PIPELINE_STAGES
+        ]
+
+    def _empty_telos_read(self, state: str) -> dict[str, Any]:
+        return {
+            "schema_version": 1,
+            "state": state,
+            "active_digest": None,
+            "active_revision": None,
+            "history": [],
+            "total_revisions": 0 if state == "missing" else None,
+            "truncated": False,
+        }
+
+    def _empty_pipeline(self, state: str) -> dict[str, Any]:
+        total: int | None = 0 if state in {"missing", "not_ready"} else None
+        return {
+            "schema_version": 1,
+            "state": state,
+            "attempt_id": None,
+            "attempts": [],
+            "total_attempts": total,
+            "attempts_truncated": False,
+            "suggestions": [],
+            "suggestion_counts": {},
+            "total_suggestions": total,
+            "suggestions_truncated": False,
+            "blueprints": [],
+            "total_blueprints": total,
+            "blueprints_truncated": False,
+            "stages": self._pipeline_stages(),
+            "mutable_actions": [],
+        }
+
+    def _empty_audit(self, state: str, *, after: int) -> dict[str, Any]:
+        return {
+            "schema_version": 1,
+            "state": state,
+            "events": [],
+            "total_events": 0 if state in {"missing", "not_ready"} else None,
+            "truncated": False,
+            "next_after": after,
+            "mutable_actions": [],
+        }
+
+    def _public_telos_item(
+        self, item: object, identity: OrganismIdentity
+    ) -> dict[str, Any]:
+        return {
+            "id": self._public_text(getattr(item, "id", None), identity, limit=64),
+            "statement": self._public_text(
+                getattr(item, "statement", None), identity, limit=500
+            ),
+            "tags": [
+                self._public_text(tag, identity, limit=128)
+                for tag in tuple(getattr(item, "tags", ()))[:16]
+                if isinstance(tag, str)
+            ],
+            "priority": (
+                getattr(item, "priority", 0)
+                if isinstance(getattr(item, "priority", None), int)
+                else 0
+            ),
+        }
+
+    def _public_telos_revision(
+        self, revision: object, identity: OrganismIdentity
+    ) -> dict[str, Any]:
+        fields = (
+            "desired_traits",
+            "capability_directions",
+            "priorities",
+            "tradeoffs",
+            "prohibitions",
+            "success_indicators",
+        )
+        result = {
+            "digest": self._public_text(
+                getattr(revision, "canonical_digest", None), identity, limit=64
+            ),
+            "parent_digest": self._public_text(
+                getattr(revision, "parent_digest", None), identity, limit=64
+            )
+            or None,
+            "purpose": self._public_text(
+                getattr(revision, "purpose", None), identity, limit=1000
+            ),
+            "proactivity_policy": self._public_telos_item(
+                getattr(revision, "proactivity_policy", None), identity
+            ),
+        }
+        for name in fields:
+            collection = getattr(revision, name, ())
+            result[name] = [
+                self._public_telos_item(item, identity)
+                for item in tuple(collection)[:32]
+            ]
+        return result
+
+    def _public_attempt(
+        self, row: Any, identity: OrganismIdentity
+    ) -> dict[str, Any]:
+        return {
+            "attempt_id": self._public_text(row["attempt_id"], identity, limit=256),
+            "source_kind": self._public_text(row["source_kind"], identity, limit=64),
+            "state": self._public_text(row["state"], identity, limit=64),
+            "created_at": self._public_text(row["created_at"], identity, limit=64),
+        }
+
+    @staticmethod
+    def _public_number(value: object) -> float:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return 0.0
+        numeric = float(value)
+        return numeric if math.isfinite(numeric) else 0.0
+
+    def _public_suggestion(
+        self, record: SuggestionRecord, identity: OrganismIdentity
+    ) -> dict[str, Any]:
+        return {
+            "suggestion_id": self._public_text(
+                record.suggestion_id, identity, limit=64
+            ),
+            "state": self._public_text(record.state, identity, limit=64),
+            "score": self._public_number(record.score),
+            "telos_alignment": self._public_number(record.telos_alignment),
+            "observation_count": max(0, int(record.observation_count)),
+            "distinct_session_count": max(0, int(record.distinct_session_count)),
+            "summary": self._public_text(record.summary_reason, identity, limit=512),
+            "created_at": self._public_text(record.created_at, identity, limit=64),
+            "updated_at": self._public_text(record.updated_at, identity, limit=64),
+        }
+
+    def _public_blueprint(
+        self, blueprint: object, identity: OrganismIdentity
+    ) -> dict[str, Any]:
+        document = getattr(blueprint, "document", None)
+        snapshot = getattr(document, "observer_snapshot", None)
+        component_classes = getattr(document, "proposed_component_classes", ())
+        return {
+            "blueprint_id": self._public_text(
+                getattr(blueprint, "blueprint_id", None), identity, limit=128
+            ),
+            "attempt_id": self._public_text(
+                getattr(blueprint, "attempt_id", None), identity, limit=256
+            ),
+            "canonical_digest": self._public_text(
+                getattr(blueprint, "canonical_digest", None), identity, limit=64
+            ),
+            "state": self._public_text(
+                getattr(blueprint, "state", None), identity, limit=64
+            ),
+            "created_at": self._public_text(
+                getattr(blueprint, "created_at", None), identity, limit=64
+            ),
+            "suggestion_id": self._public_text(
+                getattr(document, "suggestion_id", None), identity, limit=64
+            ),
+            "active_telos_digest": self._public_text(
+                getattr(document, "active_telos_digest", None), identity, limit=64
+            ),
+            "summary": self._public_text(
+                getattr(snapshot, "summary_reason", None), identity, limit=512
+            ),
+            "capability_hypothesis": self._public_text(
+                getattr(document, "capability_hypothesis", None), identity, limit=768
+            ),
+            "proposed_component_classes": [
+                self._public_text(item, identity, limit=64)
+                for item in tuple(component_classes)[:16]
+                if isinstance(item, str)
+            ],
+        }
+
+    def _public_audit_event(
+        self, event: StoredEvent, identity: OrganismIdentity
+    ) -> dict[str, Any]:
+        return {
+            "sequence": event.event_sequence,
+            "event_id": self._public_text(event.event_id, identity, limit=256),
+            "attempt_id": self._public_text(event.attempt_id, identity, limit=256)
+            or None,
+            "generation_id": self._public_text(event.generation_id, identity, limit=64)
+            or None,
+            "event_type": self._public_text(event.event_type, identity, limit=128),
+            "prior_state": self._public_text(event.prior_state, identity, limit=64)
+            or None,
+            "next_state": self._public_text(event.next_state, identity, limit=64)
+            or None,
+            "actor": self._public_text(event.actor, identity, limit=128),
+            "reason_code": self._public_text(event.reason_code, identity, limit=128),
+            "summary": self._public_text(event.reason_summary, identity, limit=512),
+            "created_at": self._public_text(event.created_at, identity, limit=64),
+            "event_digest": self._public_text(event.event_digest, identity, limit=64),
         }
 
     @staticmethod

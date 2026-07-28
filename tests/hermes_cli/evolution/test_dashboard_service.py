@@ -6,6 +6,7 @@ import copy
 import json
 import stat
 import shutil
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -31,6 +32,13 @@ from hermes_cli.evolution.telos_contract import (
     SuccessIndicator,
     TelosRevision,
 )
+from hermes_cli.evolution.telos_store import TelosStore
+from hermes_cli.evolution.observation_contract import ObservationEnvelope
+from hermes_cli.evolution.observer_policy import OpportunityScore
+from hermes_cli.evolution.suggestions import SuggestionRepository
+from hermes_cli.evolution.blueprint_contract import blueprint_document_from_suggestion
+from hermes_cli.evolution.blueprint_repository import BlueprintRepository
+from hermes_cli.evolution.ledger import EvolutionLedger, LifecycleEvent
 from hermes_cli.gnothi.contract import add_edge, add_node, new_artifact
 from hermes_cli.gnothi.store import OrganismRevisionStore
 
@@ -159,6 +167,166 @@ def _write_telos(root: Path, identity: OrganismIdentity) -> str:
     )
     (root / "active.json").write_text(json.dumps({"digest": digest}), encoding="utf-8")
     return digest
+
+
+def _dashboard_telos(
+    identity: OrganismIdentity, *, parent_digest: str | None
+) -> TelosRevision:
+    return TelosRevision(
+        schema_version=1,
+        organism_id=identity.organism_id,
+        parent_digest=parent_digest,
+        purpose="Assist the user while preserving privacy and quality.",
+        desired_traits=(
+            DesiredTrait(
+                "reliable", "Produce reliable results.", ("trait.reliable",), 5
+            ),
+        ),
+        capability_directions=(
+            CapabilityDirection(
+                "local", "Prefer local operations.", ("capability.local",), 4
+            ),
+        ),
+        priorities=(
+            Priority("safety", "Prioritize user safety.", ("priority.safety",), 5),
+        ),
+        tradeoffs=(),
+        prohibitions=(
+            Prohibition(
+                "no_leaks", "Do not disclose private data.", ("prohibition.privacy",), 5
+            ),
+        ),
+        proactivity_policy=ProactivityPolicy(
+            "bounded", "Offer bounded helpful suggestions.", ("proactivity.bounded",), 3
+        ),
+        success_indicators=(
+            SuccessIndicator(
+                "complete", "Complete requested tasks.", ("indicator.complete",), 4
+            ),
+        ),
+    )
+
+
+def _observation(
+    identity: OrganismIdentity,
+    *,
+    event_id: str,
+    capability: str,
+) -> ObservationEnvelope:
+    return ObservationEnvelope(
+        schema_version=1,
+        event_id=event_id,
+        organism_id=identity.organism_id,
+        occurred_at="2026-07-28T12:00:00.000000Z",
+        signal_type="capability_absence",
+        provenance="explicit_user",
+        source_profile_ref=f"profile_{event_id}",
+        source_project_ref="project",
+        source_session_ref=f"session_{event_id}",
+        generation_id="a" * 64,
+        gnothi_revision_digest=None,
+        telos_digest=None,
+        capability_key=capability,
+        operation_key="operate",
+        outcome_key="missing",
+        constraint_key="none",
+        severity="high",
+        task_impact="high",
+        retry_count=0,
+        latency_bucket=None,
+        explicit_user_intent=True,
+        recovered=False,
+        evidence_refs=(),
+        redaction_status="verified_redacted",
+    )
+
+
+def _score() -> OpportunityScore:
+    return OpportunityScore(
+        score=0.9,
+        user_intent=1.0,
+        telos_alignment=0.75,
+        impact=0.8,
+        recurrence=0.1,
+        confidence=0.95,
+        reuse=0.25,
+        risk=0.25,
+        expected_cost=0.25,
+    )
+
+
+def _seed_governance_state(
+    root: Path,
+) -> tuple[OrganismIdentity, EvolutionLedger, tuple[str, str]]:
+    """Build coherent local governance records through their public services."""
+    identity = create_organism_identity(root)
+    ledger = EvolutionLedger(root / "evolution" / "evolution.db")
+    telos_store = TelosStore(root)
+    grandparent = _dashboard_telos(identity, parent_digest=None)
+    parent = replace(grandparent, parent_digest=grandparent.canonical_digest)
+    active = replace(parent, parent_digest=parent.canonical_digest)
+    telos_store.save_revision(grandparent)
+    telos_store.save_revision(parent)
+    telos_store.save_revision(active)
+    (root / "telos" / "active.json").write_text(
+        json.dumps({"digest": active.canonical_digest}), encoding="utf-8"
+    )
+
+    repository = SuggestionRepository(root / "evolution" / "evolution.db")
+    safe_first = repository.upsert_suggestion(
+        opportunity_key="b" * 64,
+        initial_state="eligible",
+        active_telos_digest=active.canonical_digest,
+        score=_score(),
+        envelopes=(_observation(identity, event_id="event-alpha", capability="alpha"),),
+        summary_reason="Recurring local capability gap",
+    )
+    safe_second = repository.upsert_suggestion(
+        opportunity_key="c" * 64,
+        initial_state="eligible",
+        active_telos_digest=active.canonical_digest,
+        score=_score(),
+        envelopes=(_observation(identity, event_id="event-beta", capability="beta"),),
+        summary_reason="Recurring local reliability gap",
+    )
+    repository.upsert_suggestion(
+        opportunity_key="d" * 64,
+        initial_state="observing",
+        active_telos_digest=active.canonical_digest,
+        score=_score(),
+        envelopes=(
+            _observation(identity, event_id="event-private", capability="private"),
+        ),
+        summary_reason="Observed at /private/dashboard-secret",
+    )
+    blueprints = BlueprintRepository(ledger)
+    first = blueprints.create_or_get(
+        blueprint_document_from_suggestion(
+            safe_first, active_telos_digest=active.canonical_digest
+        )
+    )
+    second = blueprints.create_or_get(
+        blueprint_document_from_suggestion(
+            safe_second, active_telos_digest=active.canonical_digest
+        )
+    )
+    ledger.append_event(
+        LifecycleEvent(
+            event_id="dashboard-audit-event",
+            attempt_id=None,
+            generation_id=None,
+            event_type="dashboard_observed",
+            prior_state="draft",
+            next_state="draft",
+            actor="operator",
+            input_digests=(active.canonical_digest,),
+            authorization_id=None,
+            reason_code="dashboard_observed",
+            reason_summary="Observed /private/dashboard-secret safely",
+            created_at="2026-07-28T12:01:00.000000Z",
+        )
+    )
+    return identity, ledger, (first.attempt_id, second.attempt_id)
 
 
 def test_snapshot_missing_is_bounded_and_non_mutating(tmp_path: Path) -> None:
@@ -739,4 +907,285 @@ def test_graph_and_revision_reads_leave_an_absent_root_absent(tmp_path: Path) ->
         "total_revisions": 0,
         "truncated": False,
     }
+    assert not root.exists()
+
+
+def test_telos_read_binds_active_and_history_to_the_local_organism(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "organism"
+    identity, ledger, _ = _seed_governance_state(root)
+
+    result = EvolutionDashboardService(root).telos(history_limit=1)
+
+    assert result["state"] == "ready"
+    assert result["active_digest"] == result["active_revision"]["digest"]
+    assert len(result["history"]) == 1
+    assert result["total_revisions"] == 3
+    assert result["truncated"] is True
+    for revision in [result["active_revision"], *result["history"]]:
+        document = json.loads(
+            (root / "telos" / "revisions" / f"{revision['digest']}.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert document["organism_id"] == identity.organism_id
+    ledger.connection.close()
+
+
+def test_telos_read_does_not_repair_or_repermission_a_partial_organism(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "organism"
+    _, ledger, _ = _seed_governance_state(root)
+    shutil.rmtree(root / "archives")
+    root.chmod(0o750)
+
+    result = EvolutionDashboardService(root).telos()
+
+    assert result["state"] == "ready"
+    assert not (root / "archives").exists()
+    assert stat.S_IMODE(root.stat().st_mode) == 0o750
+    ledger.connection.close()
+
+
+def test_pipeline_counts_only_the_bounded_suggestions_and_resolves_blueprints(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "organism"
+    _, ledger, attempts = _seed_governance_state(root)
+
+    result = EvolutionDashboardService(root).pipeline(
+        attempt_id=attempts[0], limit=1
+    )
+
+    assert result["state"] == "ready"
+    assert result["attempt_id"] == attempts[0]
+    assert len(result["suggestions"]) == 1
+    assert sum(result["suggestion_counts"].values()) == len(result["suggestions"])
+    assert result["suggestions_truncated"] is False
+    assert len(result["blueprints"]) == 1
+    assert result["blueprints_truncated"] is False
+    repository = BlueprintRepository(ledger)
+    assert all(
+        repository.get(row["blueprint_id"]) is not None
+        for row in result["blueprints"]
+    )
+    assert "/private/dashboard-secret" not in json.dumps(result)
+    ledger.connection.close()
+
+
+def test_pipeline_reads_suggestions_from_the_immutable_ledger_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "organism"
+    _, ledger, _ = _seed_governance_state(root)
+    from hermes_cli.evolution import suggestions as suggestions_module
+
+    def unexpected_reopen(*_args, **_kwargs):
+        raise AssertionError("dashboard read reopened the source database")
+
+    monkeypatch.setattr(suggestions_module, "_connect_existing", unexpected_reopen)
+
+    result = EvolutionDashboardService(root).pipeline()
+
+    assert result["state"] == "ready"
+    assert result["total_suggestions"] > 0
+    ledger.connection.close()
+
+
+def test_pipeline_caps_the_suggestion_database_read_at_the_public_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "organism"
+    identity, ledger, _ = _seed_governance_state(root)
+    active_digest = json.loads((root / "telos" / "active.json").read_text())["digest"]
+    repository = SuggestionRepository(root / "evolution" / "evolution.db")
+    for index in range(51):
+        repository.upsert_suggestion(
+            opportunity_key=f"{index + 1000:064x}",
+            initial_state="observing",
+            active_telos_digest=active_digest,
+            score=_score(),
+            envelopes=(
+                _observation(
+                    identity,
+                    event_id=f"event-extra-{index}",
+                    capability=f"extra-{index}",
+                ),
+            ),
+            summary_reason="Bounded dashboard suggestion.",
+        )
+
+    original = SuggestionRepository.list_suggestions
+    seen_limits: list[int | None] = []
+
+    def list_with_required_cap(self, state=None, *, limit=None):
+        seen_limits.append(limit)
+        if limit is None:
+            raise AssertionError("dashboard did not cap the suggestion read")
+        return original(self, state, limit=limit)
+
+    monkeypatch.setattr(SuggestionRepository, "list_suggestions", list_with_required_cap)
+
+    result = EvolutionDashboardService(root).pipeline(limit=50)
+
+    assert result["state"] == "ready"
+    assert seen_limits == [50]
+    assert len(result["suggestions"]) == 50
+    assert result["total_suggestions"] == 54
+    assert result["suggestions_truncated"] is True
+    ledger.connection.close()
+
+
+def test_pipeline_binds_selected_attempt_to_its_blueprint_and_suggestion(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "organism"
+    _, ledger, attempts = _seed_governance_state(root)
+    selected = attempts[0]
+
+    result = EvolutionDashboardService(root).pipeline(attempt_id=selected, limit=1)
+
+    assert result["state"] == "ready"
+    assert result["attempt_id"] == selected
+    assert result["attempts"][0]["attempt_id"] == selected
+    assert {row["attempt_id"] for row in result["blueprints"]} == {selected}
+    assert {
+        row["suggestion_id"] for row in result["suggestions"]
+    } == {row["suggestion_id"] for row in result["blueprints"]}
+    ledger.connection.close()
+
+
+def test_telos_fails_closed_when_revision_count_exceeds_the_read_cap(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "organism"
+    _, ledger, _ = _seed_governance_state(root)
+    store = TelosStore(root)
+    active_digest = json.loads((root / "telos" / "active.json").read_text())["digest"]
+    revision = store.get_revision(active_digest)
+    for _ in range(49):
+        revision = replace(revision, parent_digest=revision.canonical_digest)
+        store.save_revision(revision)
+
+    result = EvolutionDashboardService(root).telos(history_limit=50)
+
+    assert result["state"] == "blocked"
+    assert result["active_revision"] is None
+    assert result["history"] == []
+    ledger.connection.close()
+
+
+def test_telos_allows_the_active_revision_and_fifty_history_entries(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "organism"
+    _, ledger, _ = _seed_governance_state(root)
+    store = TelosStore(root)
+    active_digest = json.loads((root / "telos" / "active.json").read_text())["digest"]
+    revision = store.get_revision(active_digest)
+    for _ in range(48):
+        revision = replace(revision, parent_digest=revision.canonical_digest)
+        store.save_revision(revision)
+
+    result = EvolutionDashboardService(root).telos(history_limit=50)
+
+    assert result["state"] == "ready"
+    assert result["total_revisions"] == 51
+    assert len(result["history"]) == 50
+    assert result["truncated"] is False
+    ledger.connection.close()
+
+
+def test_pipeline_keeps_contract_only_stages_unavailable_without_actions(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "organism"
+    _, ledger, _ = _seed_governance_state(root)
+
+    stages = EvolutionDashboardService(root).pipeline()["stages"]
+
+    unavailable = [stage for stage in stages if not stage["available"]]
+    assert [stage["id"] for stage in unavailable] == [
+        "build",
+        "canary",
+        "promotion",
+        "stable",
+    ]
+    assert all("action" not in stage for stage in unavailable)
+    ledger.connection.close()
+
+
+def test_audit_read_is_monotonic_and_redacts_each_summary(tmp_path: Path) -> None:
+    root = tmp_path / "organism"
+    _, ledger, _ = _seed_governance_state(root)
+
+    result = EvolutionDashboardService(root).audit(after=0, limit=1)
+
+    sequences = [event["sequence"] for event in result["events"]]
+    assert result["state"] == "ready"
+    assert sequences == sorted(sequences)
+    assert len(sequences) == len(set(sequences))
+    assert result["truncated"] is True
+    assert "/private/dashboard-secret" not in json.dumps(result)
+    assert result["mutable_actions"] == []
+    ledger.connection.close()
+
+
+def test_corrupt_event_chain_disables_pipeline_and_audit_actions(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "organism"
+    _, ledger, _ = _seed_governance_state(root)
+    from hermes_cli.evolution import ledger as ledger_module
+
+    ledger.connection.execute("DROP TRIGGER lifecycle_events_no_update")
+    ledger.connection.execute(
+        (
+            "UPDATE lifecycle_events SET reason_summary = 'tampered' "
+            "WHERE event_sequence = 1"
+        )
+    )
+    ledger.connection.execute(
+        next(
+            statement
+            for statement in ledger_module._SCHEMA_STATEMENTS
+            if "CREATE TRIGGER lifecycle_events_no_update" in statement
+        )
+    )
+    ledger.connection.commit()
+
+    service = EvolutionDashboardService(root)
+
+    assert service.pipeline()["state"] == "corrupt"
+    assert service.pipeline()["mutable_actions"] == []
+    assert service.audit()["state"] == "corrupt"
+    assert service.audit()["mutable_actions"] == []
+    ledger.connection.close()
+
+
+def test_governance_reads_leave_an_absent_root_absent(tmp_path: Path) -> None:
+    root = tmp_path / "organism"
+    service = EvolutionDashboardService(root)
+
+    assert service.telos()["state"] == "missing"
+    assert service.pipeline()["state"] == "missing"
+    assert service.audit()["state"] == "missing"
+    assert not root.exists()
+
+
+def test_governance_reads_reject_bad_bounds(tmp_path: Path) -> None:
+    root = tmp_path / "organism"
+    service = EvolutionDashboardService(root)
+
+    for history_limit in (0, 51):
+        with pytest.raises(ValueError, match="invalid telos history limit"):
+            service.telos(history_limit=history_limit)
+    for limit in (0, 51):
+        with pytest.raises(ValueError, match="invalid pipeline limit"):
+            service.pipeline(limit=limit)
+    for after, limit in ((-1, 1), (0, 0), (0, 101)):
+        with pytest.raises(ValueError, match="invalid audit bounds"):
+            service.audit(after=after, limit=limit)
     assert not root.exists()
