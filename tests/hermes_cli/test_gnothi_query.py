@@ -320,3 +320,86 @@ def test_subgraph_uses_the_supplied_immutable_artifact(tmp_path: Path) -> None:
     )
 
     assert result["nodes"][0]["label"] == "Frozen Alpha"
+
+
+def test_subgraph_redacts_embedded_absolute_paths(tmp_path: Path) -> None:
+    store = OrganismRevisionStore(root=tmp_path)
+    artifact = _graph_artifact()
+    node = artifact["nodes"][0]
+    node["label"] = "Source at /private/secret/plugin.py is unavailable"
+    node["evidence_refs"] = [
+        r"Inspect C:\\Users\\secret\\plugin.py before retrying",
+    ]
+    store.publish(artifact)
+
+    result = OrganismQuery(store).subgraph(
+        root_id="capability:alpha",
+        depth=0,
+        limit=20,
+        kinds=frozenset(),
+        search="",
+    )
+
+    public_node = result["nodes"][0]
+    assert public_node["label"] == "Source at [ABSOLUTE_PATH] is unavailable"
+    assert public_node["evidence_refs"] == [
+        "Inspect [ABSOLUTE_PATH] before retrying",
+    ]
+    assert "/private/secret" not in str(result)
+    assert r"C:\Users\secret" not in str(result)
+
+
+def test_subgraph_accepts_public_owner_class_shape(tmp_path: Path) -> None:
+    store = OrganismRevisionStore(root=tmp_path)
+    artifact = _graph_artifact()
+    node = artifact["nodes"][0]
+    node["owner"] = None
+    node["owner_class"] = "third-party"
+    store.publish(artifact)
+
+    result = OrganismQuery(store).subgraph(
+        root_id="capability:alpha",
+        depth=0,
+        limit=20,
+        kinds=frozenset(),
+        search="",
+    )
+
+    assert result["nodes"][0]["owner_class"] == "third-party"
+
+
+def test_diff_counts_all_dependency_changes_before_bounding_rows(tmp_path: Path) -> None:
+    store = OrganismRevisionStore(root=tmp_path)
+    left = _artifact("rev-dependency-left")
+    right = copy.deepcopy(left)
+    right["organism_contract"]["revision_id"] = "rev-dependency-right"
+    for index in range(201):
+        node_id = f"runtime:dependency-{index:03d}"
+        for artifact in (left, right):
+            add_node(
+                artifact,
+                node_id=node_id,
+                kind="runtime",
+                label=f"Dependency {index:03d}",
+                owner_class="core",
+                owner_id="hermes",
+            )
+        add_edge(
+            right,
+            edge_id=f"edge:dependency-{index:03d}",
+            kind="depends_on",
+            source="provider:terminal",
+            target=node_id,
+        )
+    store.publish(left)
+    store.publish(right)
+
+    result = OrganismQuery(store).diff("rev-dependency-left", "rev-dependency-right")
+
+    assert len(result["dependency_changes"]) == 200
+    assert result["dependency_changes"][0] == (
+        "depends_on",
+        "provider:terminal",
+        "runtime:dependency-000",
+    )
+    assert result["truncated"] is True

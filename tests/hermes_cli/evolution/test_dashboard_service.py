@@ -608,6 +608,45 @@ def test_revision_diff_omits_non_scalar_private_evidence_refs(tmp_path: Path) ->
     assert identity.organism_id not in json.dumps(result)
 
 
+def test_revision_diff_preserves_raw_owner_class_and_redacts_embedded_paths(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "organism"
+    identity = create_organism_identity(root)
+    first = _graph_artifact(identity, revision_id="rev-owner-1", available=True)
+    second = _graph_artifact(identity, revision_id="rev-owner-2", available=True)
+    add_node(
+        second,
+        node_id="capability:private-path",
+        kind="capability",
+        label="Plugin at /private/secret/plugin.py is unavailable",
+        owner_class="third-party",
+        owner_id="private-owner",
+        state={"available": True},
+        evidence_refs=[r"See C:\\Users\\secret\\plugin.py before retrying"],
+    )
+    store = OrganismRevisionStore(root / "gnothi_seauton")
+    store.publish(first)
+    store.publish(second)
+
+    result = EvolutionDashboardService(root).revision_diff("rev-owner-1", "rev-owner-2")
+
+    added = result["added_capabilities"]
+    assert added == [
+        {
+            "id": "capability:private-path",
+            "kind": "capability",
+            "label": "Plugin at [ABSOLUTE_PATH] is unavailable",
+            "owner_class": "third-party",
+            "generation_scope": "stable",
+            "state": {"available": True},
+            "evidence_refs": ["See [ABSOLUTE_PATH] before retrying"],
+        }
+    ]
+    assert "/private/secret" not in json.dumps(result)
+    assert r"C:\Users\secret" not in json.dumps(result)
+
+
 def test_graph_and_revision_reads_leave_an_absent_root_absent(tmp_path: Path) -> None:
     root = tmp_path / "organism"
     service = EvolutionDashboardService(root)

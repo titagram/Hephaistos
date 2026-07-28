@@ -614,12 +614,16 @@ class EvolutionDashboardService:
             else {}
         )
         refs = row.get("evidence_refs")
+        owner_class = row.get("owner_class")
+        if not isinstance(owner_class, (str, int, float)):
+            owner = row.get("owner")
+            owner_class = owner.get("class") if isinstance(owner, dict) else None
         return {
             "id": self._public_text(row.get("id"), identity, limit=256),
             "kind": self._public_text(row.get("kind"), identity, limit=128),
             "label": self._public_text(row.get("label"), identity, limit=500),
             "owner_class": self._public_text(
-                row.get("owner_class"), identity, limit=128
+                owner_class, identity, limit=128
             ),
             "generation_scope": self._public_text(
                 row.get("generation_scope"), identity, limit=64

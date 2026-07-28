@@ -34,6 +34,15 @@ def _public_evidence_refs(value: object) -> list[str]:
     )[:MAX_GRAPH_EVIDENCE_REFS]
 
 
+def _owner_class(node: dict[str, Any]) -> object:
+    """Read the owner class from either raw graph or public-row schema."""
+    public_owner_class = node.get("owner_class")
+    if isinstance(public_owner_class, (str, int, float)):
+        return public_owner_class
+    owner = node.get("owner")
+    return owner.get("class") if isinstance(owner, dict) else None
+
+
 def _public_node(node: dict[str, Any]) -> dict[str, Any]:
     state = node.get("state")
     public_state = (
@@ -41,15 +50,11 @@ def _public_node(node: dict[str, Any]) -> dict[str, Any]:
         if isinstance(state, dict)
         else {}
     )
-    owner = node.get("owner")
     return {
         "id": _public_text(node.get("id"), limit=256),
         "kind": _public_text(node.get("kind"), limit=128),
         "label": _public_text(node.get("label")),
-        "owner_class": _public_text(
-            owner.get("class") if isinstance(owner, dict) else None,
-            limit=128,
-        ),
+        "owner_class": _public_text(_owner_class(node), limit=128),
         "generation_scope": _public_text(node.get("generation_scope"), limit=64),
         "state": public_state,
         "evidence_refs": _public_evidence_refs(node.get("evidence_refs")),
@@ -290,7 +295,8 @@ class OrganismQuery:
         ]
         edge_old = {(e.get("kind"), e.get("from"), e.get("to")) for e in left.get("edges", [])}
         edge_new = {(e.get("kind"), e.get("from"), e.get("to")) for e in right.get("edges", [])}
-        dependency_changes = sorted((edge_old ^ edge_new))[:MAX_RESULTS]
+        all_dependency_changes = sorted(edge_old ^ edge_new)
+        dependency_changes = all_dependency_changes[:MAX_RESULTS]
         quality_changes = []
         if left["organism_contract"].get("status") != right["organism_contract"].get("status"):
             quality_changes.append({"before": left["organism_contract"].get("status"), "after": right["organism_contract"].get("status")})
@@ -322,7 +328,7 @@ class OrganismQuery:
             len(added)
             + len(removed)
             + len(changed)
-            + len(dependency_changes)
+            + len(all_dependency_changes)
             + len(coverage_changes)
         )
         return {

@@ -14,6 +14,11 @@ SECRET_KEY_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _WINDOWS_ABSOLUTE_PATH = re.compile(r"^[A-Za-z]:[\\/]")
+_EMBEDDED_ABSOLUTE_PATH = re.compile(
+    r"(?<![A-Za-z0-9_:/])/(?:[^\s/\\]+(?:/[^\s/\\]+)*)"
+    r"|(?<![A-Za-z0-9_])(?:[A-Za-z]:[\\/]+[^\s<>\"'|?*]+)"
+)
+_PATH_TRAILING_PUNCTUATION = ".,;:!?)]}"
 
 
 def _safe_path(value: str, workspace_root: Path | None) -> tuple[str, int] | None:
@@ -32,6 +37,25 @@ def _safe_path(value: str, workspace_root: Path | None) -> tuple[str, int] | Non
         except ValueError:
             pass
     return ABSOLUTE_PATH, 1
+
+
+def _redact_embedded_absolute_paths(value: str) -> tuple[str, int]:
+    """Replace absolute paths embedded in untrusted prose without losing context."""
+
+    redactions = 0
+
+    def replace(match: re.Match[str]) -> str:
+        nonlocal redactions
+        candidate = match.group(0)
+        path = candidate.rstrip(_PATH_TRAILING_PUNCTUATION)
+        suffix = candidate[len(path):]
+        safe_path = _safe_path(path, workspace_root=None)
+        if safe_path is None:
+            return candidate
+        redactions += safe_path[1]
+        return f"{safe_path[0]}{suffix}"
+
+    return _EMBEDDED_ABSOLUTE_PATH.sub(replace, value), redactions
 
 
 def redact_value(
@@ -85,7 +109,8 @@ def redact_value(
         if safe_path is not None:
             safe_value, path_count = safe_path
             return safe_value, redactions + path_count
-        return value, redactions
+        value, embedded_path_redactions = _redact_embedded_absolute_paths(value)
+        return value, redactions + embedded_path_redactions
 
     return value, 0
 
