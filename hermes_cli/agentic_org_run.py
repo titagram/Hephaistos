@@ -7,10 +7,12 @@ import hashlib
 import json
 import re
 import sqlite3
+import time
 from typing import Any
 
 from hermes_cli import kanban_db as kb
 from hermes_cli.implementation_plan import (
+    IMPLEMENTATION_PLAN_SCHEMA,
     ImplementationPlan,
     ImplementationTask,
     PlanValidation,
@@ -127,6 +129,71 @@ def _global_review_required(plan: ImplementationPlan) -> bool:
     return plan.independent_review or any(task.risk == "high" for task in plan.tasks)
 
 
+def _planned_node_keys(plan: ImplementationPlan) -> tuple[str, ...]:
+    keys = [f"org-run:{plan.run_id}:anchor"]
+    for task in plan.tasks:
+        keys.append(_task_node_key(plan.run_id, task.id))
+        if _review_required(task):
+            keys.append(f"{_task_node_key(plan.run_id, task.id)}:review")
+    keys.append(f"org-run:{plan.run_id}:integration")
+    if _global_review_required(plan):
+        keys.append(f"org-run:{plan.run_id}:review")
+    keys.append(f"org-run:{plan.run_id}:finalize")
+    return tuple(keys)
+
+
+def _reject_unowned_task_keys(
+    conn: sqlite3.Connection,
+    plan: ImplementationPlan,
+) -> None:
+    keys = _planned_node_keys(plan)
+    placeholders = ",".join("?" for _ in keys)
+    collision = conn.execute(
+        f"SELECT idempotency_key FROM tasks "
+        f"WHERE idempotency_key IN ({placeholders}) LIMIT 1",
+        keys,
+    ).fetchone()
+    if collision is not None:
+        raise ValueError(
+            "pre-existing OrgRun task key requires explicit adoption: "
+            f"{collision['idempotency_key']}"
+        )
+
+
+def _complete_anchor_in_txn(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    summary: str,
+    metadata: dict[str, Any],
+) -> int:
+    """Complete a new anchor without firing observers before outer commit."""
+    now = int(time.time())
+    changed = conn.execute(
+        "UPDATE tasks SET status='done', completed_at=?, claim_lock=NULL, "
+        "claim_expires=NULL, worker_pid=NULL, block_kind=NULL, "
+        "block_recurrences=0 WHERE id=? AND status='ready'",
+        (now, task_id),
+    )
+    if changed.rowcount != 1:
+        raise ValueError(f"new OrgRun anchor is not ready: {task_id}")
+    run_id = kb._synthesize_ended_run(
+        conn,
+        task_id,
+        outcome="completed",
+        summary=summary,
+        metadata=metadata,
+    )
+    kb._append_event(
+        conn,
+        task_id,
+        "completed",
+        {"result_len": 0, "summary": summary},
+        run_id=run_id,
+    )
+    return run_id
+
+
 def materialize_org_run(
     conn: sqlite3.Connection,
     plan: ImplementationPlan,
@@ -150,6 +217,7 @@ def materialize_org_run(
                 )
             return topology
 
+        _reject_unowned_task_keys(conn, plan)
         runnable_kwargs = _runnable_workspace_kwargs(board)
         anchor_node_id = f"org-run:{plan.run_id}:anchor"
         anchor_id = kb.create_task(
@@ -164,18 +232,17 @@ def materialize_org_run(
             idempotency_key=anchor_node_id,
             board=board,
         )
-        anchor = kb.get_task(conn, anchor_id)
-        if anchor is not None and anchor.status != "done":
-            kb.complete_task(
-                conn,
-                anchor_id,
-                summary="Local OrgRun plan accepted for materialization.",
-                metadata={
-                    "kind": "agentic_org_run_anchor_v1",
-                    "run_id": plan.run_id,
-                    "base_commit": plan.base_commit,
-                },
-            )
+        anchor_summary = "Local OrgRun plan accepted for materialization."
+        anchor_run_id = _complete_anchor_in_txn(
+            conn,
+            anchor_id,
+            summary=anchor_summary,
+            metadata={
+                "kind": "agentic_org_run_anchor_v1",
+                "run_id": plan.run_id,
+                "base_commit": plan.base_commit,
+            },
+        )
 
         node_specs: list[_NodeSpec] = [
             _NodeSpec(
@@ -423,7 +490,7 @@ def materialize_org_run(
                 logical_role=spec.logical_role,
             )
 
-        return OrgRunTopology(
+        topology = OrgRunTopology(
             run_id=plan.run_id,
             anchor_id=anchor_id,
             tasks={
@@ -437,6 +504,15 @@ def materialize_org_run(
             review_id=review_id,
             finalization_id=finalization_id,
         )
+    kb._fire_kanban_lifecycle_hook(
+        "kanban_task_completed",
+        anchor_id,
+        board=board if board is not None else kb.get_current_board(),
+        assignee=_profile(validation, "orchestrator"),
+        run_id=anchor_run_id,
+        summary=anchor_summary,
+    )
+    return topology
 
 
 def _logical_task_id(run_id: str, node_id: str, node_kind: str) -> str | None:
@@ -455,6 +531,85 @@ def _logical_task_id(run_id: str, node_id: str, node_kind: str) -> str | None:
     return None
 
 
+def _validate_stored_node_provenance(
+    conn: sqlite3.Connection,
+    run_id: str,
+    *,
+    plan_version: int,
+    plan_hash: str,
+    nodes: list,
+) -> None:
+    stored = conn.execute(
+        "SELECT plan_hash, plan_json FROM kanban_org_plan_versions "
+        "WHERE run_id=? AND plan_version=?",
+        (run_id, int(plan_version)),
+    ).fetchone()
+    if stored is None or stored["plan_hash"] != plan_hash:
+        raise ValueError(f"OrgRun {run_id} has incomplete stored topology")
+    try:
+        plan_payload = json.loads(stored["plan_json"])
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"OrgRun {run_id} has incomplete stored topology"
+        ) from exc
+
+    expected_node_ids: set[str]
+    expected_records: set[tuple[str, str, str, str]] | None = None
+    if plan_payload.get("schema") == IMPLEMENTATION_PLAN_SCHEMA:
+        expected_node_ids = {f"org-run:{run_id}:anchor"}
+        tasks = plan_payload.get("tasks")
+        if not isinstance(tasks, list) or not tasks:
+            raise ValueError(f"OrgRun {run_id} has incomplete stored topology")
+        for task in tasks:
+            if not isinstance(task, dict) or not task.get("id"):
+                raise ValueError(
+                    f"OrgRun {run_id} has incomplete stored topology"
+                )
+            task_key = _task_node_key(run_id, str(task["id"]))
+            expected_node_ids.add(task_key)
+            if bool(task.get("independent_review")) or task.get("risk") == "high":
+                expected_node_ids.add(f"{task_key}:review")
+        expected_node_ids.add(f"org-run:{run_id}:integration")
+        if bool(plan_payload.get("independent_review")) or any(
+            isinstance(task, dict) and task.get("risk") == "high"
+            for task in tasks
+        ):
+            expected_node_ids.add(f"org-run:{run_id}:review")
+        expected_node_ids.add(f"org-run:{run_id}:finalize")
+    elif plan_payload.get("schema") == "hades.legacy-org-run-adoption.v1":
+        raw_nodes = plan_payload.get("nodes")
+        if not isinstance(raw_nodes, list) or not raw_nodes:
+            raise ValueError(f"OrgRun {run_id} has incomplete stored topology")
+        try:
+            expected_records = {
+                (
+                    str(node["node_id"]),
+                    str(node["task_id"]),
+                    str(node["node_kind"]),
+                    str(node["logical_role"]),
+                )
+                for node in raw_nodes
+            }
+        except (KeyError, TypeError) as exc:
+            raise ValueError(
+                f"OrgRun {run_id} has incomplete stored topology"
+            ) from exc
+        expected_node_ids = {record[0] for record in expected_records}
+    else:
+        raise ValueError(f"OrgRun {run_id} has incomplete stored topology")
+
+    actual_node_ids = {node.node_id for node in nodes}
+    if actual_node_ids != expected_node_ids:
+        raise ValueError(f"OrgRun {run_id} has incomplete stored topology")
+    if expected_records is not None:
+        actual_records = {
+            (node.node_id, node.task_id, node.node_kind, node.logical_role)
+            for node in nodes
+        }
+        if actual_records != expected_records:
+            raise ValueError(f"OrgRun {run_id} has incomplete stored topology")
+
+
 def load_org_run_topology(
     conn: sqlite3.Connection,
     run_id: str,
@@ -463,13 +618,21 @@ def load_org_run_topology(
     run = get_org_run(conn, run_id)
     if run is None:
         return None
+    nodes = list_org_nodes(conn, run_id)
+    _validate_stored_node_provenance(
+        conn,
+        run_id,
+        plan_version=run.plan_version,
+        plan_hash=run.plan_hash,
+        nodes=nodes,
+    )
     executions: dict[str, str] = {}
     reviews: dict[str, str] = {}
     integration_id: str | None = None
     review_id: str | None = None
     finalization_id: str | None = None
     anchor_task_ids: list[str] = []
-    for node in list_org_nodes(conn, run_id):
+    for node in nodes:
         logical_task_id = _logical_task_id(run_id, node.node_id, node.node_kind)
         if node.node_kind == "anchor":
             anchor_task_ids.append(node.task_id)

@@ -25,6 +25,7 @@ from hermes_cli.implementation_plan import (
 )
 from hermes_cli.kanban_portfolio import create_org_run
 from hermes_cli.org_run_store import get_org_run, list_org_nodes
+from tools.delegation_routing import DelegationProfile
 
 
 def _plan(
@@ -207,6 +208,57 @@ def test_materialize_exact_replay_is_idempotent_and_changed_plan_is_rejected(tmp
         assert _counts(conn) == first_counts
 
 
+def test_materialize_rejects_an_unowned_idempotency_key_collision(tmp_path):
+    plan = _plan()
+    anchor_key = f"org-run:{plan.run_id}:anchor"
+    with kb.connect(tmp_path / "kanban.db") as conn:
+        unrelated_id = kb.create_task(
+            conn,
+            title="Unrelated pre-existing card",
+            assignee="default",
+            idempotency_key=anchor_key,
+        )
+        before = _counts(conn)
+
+        with pytest.raises(ValueError, match="pre-existing OrgRun task key"):
+            materialize_org_run(
+                conn, plan, _validation(plan), board="default"
+            )
+
+        assert _counts(conn) == before
+        unrelated = kb.get_task(conn, unrelated_id)
+        assert unrelated.status == "ready"
+        assert unrelated.assignee == "default"
+
+
+def test_materialize_requires_explicit_adoption_for_legacy_key_collisions(
+    tmp_path,
+):
+    legacy_plan = parse_execution_portfolio(
+        _legacy_payload(run_id="local-run-001")
+    )
+    plan = _plan()
+    with kb.connect(tmp_path / "kanban.db") as conn:
+        legacy = create_org_run(
+            conn,
+            legacy_plan,
+            validate_execution_portfolio(legacy_plan),
+        )
+        task_count = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+        integration = kb.get_task(conn, legacy.integration_id)
+        integration_parents = kb.parent_ids(conn, legacy.integration_id)
+
+        with pytest.raises(ValueError, match="explicit adoption"):
+            materialize_org_run(
+                conn, plan, _validation(plan), board="default"
+            )
+
+        assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == task_count
+        assert get_org_run(conn, plan.run_id) is None
+        assert kb.get_task(conn, legacy.integration_id).assignee == integration.assignee
+        assert kb.parent_ids(conn, legacy.integration_id) == integration_parents
+
+
 def test_load_rejects_missing_anchor_provenance(tmp_path):
     plan = _plan()
     with kb.connect(tmp_path / "kanban.db") as conn:
@@ -223,6 +275,25 @@ def test_load_rejects_missing_anchor_provenance(tmp_path):
             load_org_run_topology(conn, plan.run_id)
 
 
+@pytest.mark.parametrize("missing_kind", ["task_review", "global_review"])
+def test_exact_replay_rejects_missing_required_review_provenance(
+    tmp_path,
+    missing_kind,
+):
+    plan = _plan()
+    validation = _validation(plan)
+    with kb.connect(tmp_path / "kanban.db") as conn:
+        materialize_org_run(conn, plan, validation, board="default")
+        conn.execute(
+            "DELETE FROM kanban_org_nodes WHERE run_id=? AND node_kind=?",
+            (plan.run_id, missing_kind),
+        )
+        conn.commit()
+
+        with pytest.raises(ValueError, match="incomplete stored topology"):
+            materialize_org_run(conn, plan, validation, board="default")
+
+
 def test_materialize_rolls_back_all_rows_when_task_creation_fails(
     tmp_path, monkeypatch
 ):
@@ -237,7 +308,13 @@ def test_materialize_rolls_back_all_rows_when_task_creation_fails(
             raise RuntimeError("injected create failure")
         return real_create(*args, **kwargs)
 
+    fired_hooks: list[tuple[str, str]] = []
     monkeypatch.setattr(kb, "create_task", fail_midway)
+    monkeypatch.setattr(
+        kb,
+        "_fire_kanban_lifecycle_hook",
+        lambda event, task_id, **_fields: fired_hooks.append((event, task_id)),
+    )
     with kb.connect(tmp_path / "kanban.db") as conn:
         with pytest.raises(RuntimeError, match="injected create failure"):
             materialize_org_run(
@@ -246,6 +323,7 @@ def test_materialize_rolls_back_all_rows_when_task_creation_fails(
 
         assert _counts(conn) == (0, 0, 0, 0)
         assert conn.execute("SELECT COUNT(*) FROM task_events").fetchone()[0] == 0
+        assert fired_hooks == []
 
 
 def _legacy_payload(*, run_id: str = "legacy-run-001") -> dict:
@@ -517,6 +595,124 @@ def test_dispatch_reads_managed_profile_availability_only_once(
 
         assert calls == 1
         assert [spawned[0] for spawned in result.spawned] == [task_id]
+
+
+def test_dispatch_never_applies_default_assignee_to_unassigned_managed_task(
+    tmp_path, monkeypatch
+):
+    plan = _plan(risk="low", task_review=False)
+    route = DelegationProfile("test", "model", None, 10, 60)
+    with kb.connect(tmp_path / "kanban.db") as conn:
+        topology = materialize_org_run(
+            conn, plan, _validation(plan), board="default"
+        )
+        task_id = topology.tasks["runtime"].execution_id
+        conn.execute("UPDATE tasks SET assignee=NULL WHERE id=?", (task_id,))
+        conn.commit()
+        monkeypatch.setattr(
+            "hermes_cli.profiles.profile_exists",
+            lambda _profile: True,
+        )
+        monkeypatch.setattr(
+            kb,
+            "_resolve_worker_role_route",
+            lambda _profile: route,
+        )
+        spawned: list[str] = []
+
+        kb.dispatch_once(
+            conn,
+            spawn_fn=lambda task, _workspace: spawned.append(task.id),
+            default_assignee="leaf",
+            board="default",
+        )
+
+        task = kb.get_task(conn, task_id)
+        assert task.status == "blocked"
+        assert task.assignee is None
+        assert task.block_kind == "capability"
+        assert spawned == []
+        assert not any(
+            event.kind == "assigned" for event in kb.list_events(conn, task_id)
+        )
+
+
+def test_dispatch_pins_validated_role_route_through_spawn(
+    tmp_path, monkeypatch
+):
+    plan = _plan(risk="low", task_review=False)
+    route = DelegationProfile("provider-a", "model-a", "high", 20, 120)
+    with kb.connect(tmp_path / "kanban.db") as conn:
+        topology = materialize_org_run(
+            conn, plan, _validation(plan), board="default"
+        )
+        task_id = topology.tasks["runtime"].execution_id
+        route_reads = 0
+        captured_routes: list[DelegationProfile | None] = []
+
+        def resolve_route(_profile):
+            nonlocal route_reads
+            route_reads += 1
+            return route if route_reads == 1 else None
+
+        def spawn(
+            _task,
+            _workspace,
+            *,
+            board=None,
+            routed_profile=None,
+        ):
+            captured_routes.append(routed_profile)
+            return 123
+
+        monkeypatch.setattr(
+            "hermes_cli.profiles.profile_exists",
+            lambda _profile: True,
+        )
+        monkeypatch.setattr(kb, "_resolve_worker_role_route", resolve_route)
+        monkeypatch.setattr(kb, "_default_spawn", spawn)
+
+        result = kb.dispatch_once(conn, board="default")
+
+        assert [item[0] for item in result.spawned] == [task_id]
+        assert route_reads == 1
+        assert captured_routes == [route]
+
+
+def test_dispatch_does_not_retry_spawn_without_the_pinned_route_on_type_error(
+    tmp_path, monkeypatch
+):
+    plan = _plan(risk="low", task_review=False)
+    route = DelegationProfile("provider-a", "model-a", None, 20, 120)
+    with kb.connect(tmp_path / "kanban.db") as conn:
+        materialize_org_run(
+            conn, plan, _validation(plan), board="default"
+        )
+        captured_routes: list[DelegationProfile | None] = []
+
+        def spawn(
+            _task,
+            _workspace,
+            *,
+            routed_profile=None,
+        ):
+            captured_routes.append(routed_profile)
+            raise TypeError("spawn implementation failed")
+
+        monkeypatch.setattr(
+            "hermes_cli.profiles.profile_exists",
+            lambda _profile: True,
+        )
+        monkeypatch.setattr(
+            kb,
+            "_resolve_worker_role_route",
+            lambda _profile: route,
+        )
+        monkeypatch.setattr(kb, "_default_spawn", spawn)
+
+        kb.dispatch_once(conn, board="default", failure_limit=5)
+
+        assert captured_routes == [route]
 
 
 def test_dispatch_blocks_adopted_review_instead_of_falling_back_to_default(

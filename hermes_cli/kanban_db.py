@@ -136,6 +136,7 @@ VALID_WORKSPACE_KINDS = {"scratch", "worktree", "dir"}
 VALID_REMOTE_PUBLICATION_POLICIES = {"ordinary", "org_run_gated"}
 KNOWN_TOOLSET_NAMES = frozenset(name.casefold() for name in get_toolset_names())
 _IS_WINDOWS = sys.platform == "win32"
+_ROUTED_PROFILE_UNSET = object()
 
 
 def _fire_kanban_lifecycle_hook(event: str, task_id: str, **fields: Any) -> None:
@@ -7877,23 +7878,29 @@ def _dispatch_admission_decision(
         return DispatchAdmission("defer", f"admission callback error: {exc}")
 
 
-def _org_run_role_unavailable_reason(
+def _resolve_org_run_role(
     profile_exists,
-    assignee: str,
-) -> Optional[str]:
-    """Return a stable capability reason when an OrgRun role cannot run."""
+    assignee: Optional[str],
+) -> tuple[Optional[str], Any]:
+    """Resolve one managed logical role once, returning a stable blocker."""
+    from tools.delegation_routing import ALLOWED_ROLES
+
+    label = assignee or "unassigned"
+    if assignee not in ALLOWED_ROLES:
+        return f"role_route_unavailable: {label}", None
     if profile_exists is not None:
         try:
             if not profile_exists(assignee):
-                return f"profile_unavailable: {assignee}"
+                return f"profile_unavailable: {label}", None
         except Exception:
-            return f"profile_unavailable: {assignee}"
+            return f"profile_unavailable: {label}", None
     try:
-        if _resolve_worker_role_route(assignee) is None:
-            return f"role_route_unavailable: {assignee}"
+        routed_profile = _resolve_worker_role_route(assignee)
+        if routed_profile is None:
+            return f"role_route_unavailable: {label}", None
     except Exception:
-        return f"role_route_unavailable: {assignee}"
-    return None
+        return f"role_route_unavailable: {label}", None
+    return None, routed_profile
 
 
 def dispatch_once(
@@ -8112,6 +8119,29 @@ def _dispatch_once_locked(
         if max_spawn is not None and running_count + spawned >= max_spawn:
             break
         row_assignee = row["assignee"]
+        from hermes_cli.agentic_org_run import is_org_run_task
+        managed_org_run_task = is_org_run_task(conn, row["id"])
+        pinned_role_route = None
+        if managed_org_run_task:
+            try:
+                from hermes_cli.profiles import profile_exists
+            except Exception:
+                profile_exists = None  # type: ignore[assignment]
+            unavailable_reason, pinned_role_route = _resolve_org_run_role(
+                profile_exists,
+                row_assignee,
+            )
+            if unavailable_reason is not None:
+                if dry_run:
+                    result.auto_blocked.append(row["id"])
+                else:
+                    block_task(
+                        conn,
+                        row["id"],
+                        reason=unavailable_reason,
+                        kind="capability",
+                    )
+                continue
         if not row_assignee:
             # Honour kanban.default_assignee: when the dispatcher hits an
             # unassigned ready task and an operator-configured fallback
@@ -8169,24 +8199,6 @@ def _dispatch_once_locked(
             from hermes_cli.profiles import profile_exists  # local import: avoids cycle
         except Exception:
             profile_exists = None  # type: ignore[assignment]
-        from hermes_cli.agentic_org_run import is_org_run_task
-        managed_org_run_task = is_org_run_task(conn, row["id"])
-        if managed_org_run_task:
-            unavailable_reason = _org_run_role_unavailable_reason(
-                profile_exists,
-                row_assignee,
-            )
-            if unavailable_reason is not None:
-                if dry_run:
-                    result.auto_blocked.append(row["id"])
-                else:
-                    block_task(
-                        conn,
-                        row["id"],
-                        reason=unavailable_reason,
-                        kind="capability",
-                    )
-                continue
         if (
             not managed_org_run_task
             and profile_exists is not None
@@ -8306,16 +8318,23 @@ def _dispatch_once_locked(
         try:
             # Back-compat: older spawn_fn signatures accept only
             # (task, workspace). Test stubs in the suite rely on that.
-            # Introspect the callable and pass `board` only when supported.
+            # Introspect the callable and pass optional context only when
+            # supported. Managed cards receive the exact role route validated
+            # before claim so launch cannot silently re-resolve to defaults.
             import inspect
             try:
                 sig = inspect.signature(_spawn)
+                spawn_kwargs = {}
                 if "board" in sig.parameters:
-                    pid = _spawn(claimed, str(workspace), board=board)
-                else:
-                    pid = _spawn(claimed, str(workspace))
+                    spawn_kwargs["board"] = board
+                if (
+                    managed_org_run_task
+                    and "routed_profile" in sig.parameters
+                ):
+                    spawn_kwargs["routed_profile"] = pinned_role_route
             except (TypeError, ValueError):
-                pid = _spawn(claimed, str(workspace))
+                spawn_kwargs = {}
+            pid = _spawn(claimed, str(workspace), **spawn_kwargs)
             if pid:
                 _set_worker_pid(conn, claimed.id, int(pid))
             # NOTE: we intentionally do NOT reset consecutive_failures
@@ -8368,8 +8387,9 @@ def _dispatch_once_locked(
             profile_exists = None  # type: ignore[assignment]
         from hermes_cli.agentic_org_run import is_org_run_task
         managed_org_run_task = is_org_run_task(conn, row["id"])
+        pinned_role_route = None
         if managed_org_run_task:
-            unavailable_reason = _org_run_role_unavailable_reason(
+            unavailable_reason, pinned_role_route = _resolve_org_run_role(
                 profile_exists,
                 row["assignee"],
             )
@@ -8462,12 +8482,17 @@ def _dispatch_once_locked(
             import inspect
             try:
                 sig = inspect.signature(_spawn)
+                spawn_kwargs = {}
                 if "board" in sig.parameters:
-                    pid = _spawn(claimed, str(workspace), board=board)
-                else:
-                    pid = _spawn(claimed, str(workspace))
+                    spawn_kwargs["board"] = board
+                if (
+                    managed_org_run_task
+                    and "routed_profile" in sig.parameters
+                ):
+                    spawn_kwargs["routed_profile"] = pinned_role_route
             except (TypeError, ValueError):
-                pid = _spawn(claimed, str(workspace))
+                spawn_kwargs = {}
+            pid = _spawn(claimed, str(workspace), **spawn_kwargs)
             if pid:
                 _set_worker_pid(conn, claimed.id, int(pid))
             result.spawned.append((claimed.id, claimed.assignee or "", str(workspace)))
@@ -8806,6 +8831,7 @@ def _default_spawn(
     workspace: str,
     *,
     board: Optional[str] = None,
+    routed_profile: Any = _ROUTED_PROFILE_UNSET,
 ) -> Optional[int]:
     """Fire-and-forget ``hermes -p <profile> chat -q ...`` subprocess.
 
@@ -8928,14 +8954,19 @@ def _default_spawn(
         for sk in task.skills:
             if sk:
                 cmd.extend(["--skills", sk])
-    routed_profile = _resolve_worker_role_route(profile_arg)
+    if routed_profile is _ROUTED_PROFILE_UNSET:
+        routed_profile = _resolve_worker_role_route(profile_arg)
+    from tools.delegation_routing import ALLOWED_ROLES
+    if profile_arg in ALLOWED_ROLES and routed_profile is None:
+        raise RuntimeError(
+            f"role route unavailable at launch: {profile_arg}"
+        )
+    if routed_profile is not None:
+        cmd.extend(["--provider", routed_profile.provider])
     if task.model_override:
         cmd.extend(["-m", task.model_override])
     elif routed_profile is not None:
-        cmd.extend([
-            "--provider", routed_profile.provider,
-            "-m", routed_profile.model,
-        ])
+        cmd.extend(["-m", routed_profile.model])
     worker_toolsets = _resolve_worker_cli_toolsets(env.get("HERMES_HOME"))
     if worker_toolsets:
         cmd.extend(["--toolsets", ",".join(worker_toolsets)])
