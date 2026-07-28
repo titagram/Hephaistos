@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import importlib
 import json
 import subprocess
 import sys
@@ -229,6 +228,34 @@ def test_list_marks_legacy_runs_until_adoption_without_recreating_cards(tmp_path
     assert listed["runs"][0]["plan_version"] == 1
 
 
+def test_list_includes_an_interrupted_legacy_anchor_without_full_topology(tmp_path, monkeypatch):
+    """Breaks if interrupted legacy runs vanish before an operator can adopt them."""
+    from hermes_cli.hades_org_cmd import list_org_runs
+
+    _configure_local_board(tmp_path, monkeypatch)
+    with kb.connect(board="default") as conn:
+        kb.create_task(
+            conn,
+            title="Interrupted legacy OrgRun",
+            idempotency_key="org-run:interrupted-001:anchor",
+            board="default",
+        )
+
+    listed, code = list_org_runs(board="default")
+
+    assert code == 0
+    assert listed == {
+        "status": "ok",
+        "runs": [{
+            "run_id": "interrupted-001",
+            "state": "legacy_unadopted",
+            "origin": "legacy",
+            "plan_version": None,
+            "plan_hash": None,
+        }],
+    }
+
+
 def test_org_sync_is_the_same_typed_non_retryable_local_boundary(tmp_path, monkeypatch, capsys):
     """Breaks if the compatibility parser invokes backend synchronization."""
     from hermes_cli.hades_org_cmd import build_parser, org_command, sync_kanban
@@ -270,25 +297,30 @@ def test_plan_commands_report_a_typed_missing_board_workspace(tmp_path, monkeypa
     assert result["code"] == "board_workspace_missing"
 
 
-def test_org_cli_import_has_no_backend_sync_dependencies(monkeypatch):
-    """Breaks if importing the local Org CLI reaches remote sync machinery."""
-    import builtins
-
+def test_org_cli_cold_import_has_no_backend_sync_or_lease_dependencies():
+    """A fresh interpreter prevents other tests from masking a prohibited import."""
     blocked = {
         "hermes_cli.hades_kanban_sync",
         "hermes_cli.kanban_backend",
         "hermes_cli.hades_backend_client",
+        "hermes_cli.hades_backend_sync",
     }
-    for module in {*blocked, "hermes_cli.hades_org_cmd", "hermes_cli.kanban_reports"}:
-        sys.modules.pop(module, None)
-    original_import = builtins.__import__
+    probe = """
+import importlib
+import json
+import sys
 
-    def guarded_import(name, *args, **kwargs):
-        if name in blocked:
-            raise AssertionError(f"local Org CLI imported {name}")
-        return original_import(name, *args, **kwargs)
+importlib.import_module('hermes_cli.hades_org_cmd')
+blocked = %r
+print(json.dumps(sorted(set(sys.modules).intersection(blocked))))
+""" % sorted(blocked)
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=REPOSITORY,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
 
-    monkeypatch.setattr(builtins, "__import__", guarded_import)
-    importlib.import_module("hermes_cli.hades_org_cmd")
-
-    assert blocked.isdisjoint(sys.modules)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == []

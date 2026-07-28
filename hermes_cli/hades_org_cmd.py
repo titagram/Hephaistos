@@ -208,30 +208,19 @@ def amend_org_run_file(path: str, *, board: str | None) -> tuple[dict[str, Any],
 
 def _legacy_run_ids(conn) -> list[str]:
     rows = conn.execute(
-        "SELECT idempotency_key FROM tasks "
-        "WHERE idempotency_key LIKE 'org-run:%:anchor'"
+        "SELECT t.idempotency_key FROM tasks AS t "
+        "WHERE t.idempotency_key LIKE 'org-run:%:anchor' "
+        "AND NOT EXISTS ("
+        "SELECT 1 FROM task_links AS link WHERE link.child_id = t.id"
+        ")"
     ).fetchall()
     prefix = "org-run:"
     suffix = ":anchor"
-    candidates = {
+    return sorted({
         str(row["idempotency_key"])[len(prefix):-len(suffix)]
         for row in rows
         if row["idempotency_key"]
-    }
-    keys = {
-        str(row["idempotency_key"])
-        for row in conn.execute(
-            "SELECT idempotency_key FROM tasks WHERE idempotency_key IS NOT NULL"
-        ).fetchall()
-    }
-    return sorted(
-        run_id for run_id in candidates
-        if {
-            f"org-run:{run_id}:integration",
-            f"org-run:{run_id}:org-review",
-            f"org-run:{run_id}:synthesis",
-        } <= keys
-    )
+    })
 
 
 def list_org_runs(*, board: str | None) -> tuple[dict[str, Any], int]:
