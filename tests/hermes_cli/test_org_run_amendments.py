@@ -284,6 +284,53 @@ def test_additive_amendment_versions_full_plan_and_replays_idempotently(tmp_path
         assert _snapshot(conn) == first_snapshot
 
 
+def test_amended_reused_finalization_projection_failure_keeps_run_reviewing(
+    tmp_path, monkeypatch,
+):
+    """A current amended run can retain its original finalization node."""
+    repository = Path(__file__).resolve().parents[2]
+    amendment = parse_implementation_amendment(
+        _amendment_payload(add_tasks=[_task_payload("regression")])
+    )
+    with kb.connect(tmp_path / "kanban.db") as conn:
+        plan = _plan(repository)
+        materialize_org_run(
+            conn, plan, _validation(plan), board="default", activate=True,
+        )
+        topology = apply_org_run_amendment(
+            conn,
+            amendment,
+            board="default",
+            repository=repository,
+            profile_exists=lambda _role: True,
+        )
+        final_node = next(
+            node for node in list_org_nodes(conn, amendment.run_id)
+            if node.task_id == topology.finalization_id
+        )
+        assert final_node.state == "active"
+        assert final_node.plan_version == 1
+        assert get_org_run(conn, amendment.run_id).plan_version == 2
+
+        for task_id in (
+            topology.tasks["runtime"].execution_id,
+            topology.tasks["regression"].execution_id,
+            topology.integration_id,
+        ):
+            assert kb.claim_task(conn, task_id, claimer="amended-projection-failure")
+            assert kb.complete_task(conn, task_id, summary="complete")
+        monkeypatch.setattr(
+            "hermes_cli.kanban_reports.project_after_task_completion",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("projection failed")),
+        )
+        assert kb.claim_task(
+            conn, topology.finalization_id, claimer="amended-projection-failure"
+        )
+        assert kb.complete_task(conn, topology.finalization_id, summary="final complete")
+
+        assert get_org_run(conn, amendment.run_id).state == "reviewing"
+
+
 @pytest.mark.parametrize(
     ("node_name", "status"),
     [

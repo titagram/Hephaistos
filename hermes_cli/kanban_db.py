@@ -5016,7 +5016,7 @@ def complete_task(
                 "SELECT DISTINCT n.run_id FROM kanban_org_nodes AS n "
                 "JOIN kanban_org_runs AS r ON r.run_id = n.run_id "
                 "WHERE n.task_id = ? AND n.node_kind = 'finalization' "
-                "AND n.state = 'active' AND n.plan_version = r.plan_version",
+                "AND n.state = 'active'",
                 (task_id,),
             ).fetchall()
             for row in rows:
