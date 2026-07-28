@@ -4905,13 +4905,6 @@ def complete_task(
             completed_payload,
             run_id=run_id,
         )
-        _enqueue_remote_terminal_result_in_txn(
-            conn,
-            task_id=task_id,
-            success=True,
-            message=summary if summary is not None else result,
-            now=now,
-        )
     # Prose-scan the summary + result for t_<hex> references that do
     # not resolve. Advisory — does not block the completion. Runs in
     # its own txn so the completion itself is already durable by the
@@ -4951,7 +4944,6 @@ def complete_task(
         run_id=run_id,
         summary=(summary if summary is not None else result),
     )
-    _fire_remote_terminal_delivery_hook(conn, task_id)
     return True
 
 
@@ -5586,12 +5578,6 @@ def block_task(
                 {"reason": reason, "kind": kind, "recurrences": recurrences},
                 run_id=run_id,
             )
-        _enqueue_remote_terminal_result_in_txn(
-            conn,
-            task_id=task_id,
-            success=False,
-            message=reason,
-        )
         _blocked_task = get_task(conn, task_id)
     _fire_kanban_lifecycle_hook(
         "kanban_task_blocked",
@@ -5601,7 +5587,6 @@ def block_task(
         run_id=run_id,
         reason=reason,
     )
-    _fire_remote_terminal_delivery_hook(conn, task_id)
     return True
 
 
@@ -6947,7 +6932,6 @@ def heartbeat_worker(
             {"note": note} if note else None,
             run_id=run_id,
         )
-    _fire_remote_heartbeat_hook(conn, task_id)
     return True
 
 
@@ -7526,12 +7510,6 @@ def _record_task_failure(
             _append_event(
                 conn, task_id, "gave_up", payload, run_id=run_id,
             )
-            _enqueue_remote_terminal_result_in_txn(
-                conn,
-                task_id=task_id,
-                success=False,
-                message=error,
-            )
             blocked = True
         else:
             # Below threshold.
@@ -7566,8 +7544,6 @@ def _record_task_failure(
                     run_id=run_id,
                 )
             # Timeout/crash path's caller already emitted its own event.
-    if blocked:
-        _fire_remote_terminal_delivery_hook(conn, task_id)
     return blocked
 
 
@@ -8550,12 +8526,11 @@ def _resolve_hermes_argv() -> list[str]:
     1. ``$HERMES_BIN`` — explicit operator override. Path-like values are
        normalized to absolute paths; bare command names keep normal PATH
        semantics and never prefer a same-directory file before ``PATH``.
-    2. The primary ``hades`` console-script shim.
-    3. The legacy ``hermes`` console-script shim for compatibility. On
-       Windows, PATH lookup can return a relative ``.cmd`` shim; directly
-       launching batch shims is unsafe with task-derived argv, so those fall
-       back to the interpreter-bound module form.
-    4. ``sys.executable -m hermes_cli.main`` — fallback for setups where
+    2. The primary ``hades`` console-script shim. On Windows, PATH lookup can
+       return a relative ``.cmd`` shim; directly launching batch shims is
+       unsafe with task-derived argv, so those fall back to the
+       interpreter-bound module form.
+    3. ``sys.executable -m hermes_cli.main`` — fallback for setups where
        Hades is launched from a venv and neither shim is on
        the dispatcher's ``$PATH`` (cron, systemd ``User=`` services,
        launchd jobs, detached processes, etc.). Goes through the running
@@ -8576,7 +8551,7 @@ def _resolve_hermes_argv() -> list[str]:
             return _hermes_path_argv(resolved_env_bin)
         return _module_hermes_argv()
 
-    for command in ("hades", "hermes"):
+    for command in ("hades",):
         resolved = (
             _safe_which_no_cwd(command)
             if _IS_WINDOWS

@@ -75,16 +75,20 @@ def test_parse_branch_flag_rejects_empty_and_option_like():
         kc._parse_branch_flag("bad branch")
 
 
-def test_kanban_sync_without_backend_is_successful_local_only(kanban_home, capsys):
-    """An unlinked board can explicitly sync without needing backend setup."""
+def test_kanban_sync_is_typed_non_retryable_local_boundary(kanban_home, capsys):
+    """Remote synchronization is deliberately unsupported by local Kanban."""
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command")
     kc.build_parser(sub)
 
     args = parser.parse_args(["kanban", "sync", "--json"])
 
-    assert kc.kanban_command(args) == 0
-    assert json.loads(capsys.readouterr().out)["state"] == "local_only"
+    assert kc.kanban_command(args) == 2
+    assert json.loads(capsys.readouterr().out) == {
+        "state": "unsupported",
+        "code": "agentic_kanban_has_no_remote_sync",
+        "retryable": False,
+    }
 
 
 def test_kanban_sync_accepts_board_after_subcommand(kanban_home, capsys):
@@ -98,8 +102,8 @@ def test_kanban_sync_accepts_board_after_subcommand(kanban_home, capsys):
         "kanban", "sync", "--board", "ariadne", "--status", "--json",
     ])
 
-    assert kc.kanban_command(args) == 0
-    assert json.loads(capsys.readouterr().out)["state"] == "local_only"
+    assert kc.kanban_command(args) == 2
+    assert json.loads(capsys.readouterr().out) == kc.agentic_kanban_sync_disabled()
 
 
 @pytest.mark.parametrize(
@@ -169,9 +173,9 @@ def test_cli_sync_classifies_transport_and_backend_identity_failures(
     kc.build_parser(sub)
     args = parser.parse_args(["kanban", "sync", "--json"])
 
-    assert kc.kanban_command(args) == expected_exit
+    assert kc.kanban_command(args) == 2
     payload = json.loads(capsys.readouterr().out)
-    assert payload["state"] == expected_state
+    assert payload == kc.agentic_kanban_sync_disabled()
 
 
 def _wrapped_transport_failure() -> HadesBackendError:
@@ -218,11 +222,9 @@ def test_cli_sync_redacts_bounded_backend_error_text(kanban_home, monkeypatch, c
     kc.build_parser(sub)
     args = parser.parse_args(["kanban", "sync", "--json"])
 
-    assert kc.kanban_command(args) == 1
+    assert kc.kanban_command(args) == 2
     payload = json.loads(capsys.readouterr().out)
-    assert payload["state"] == "sync_error"
-    assert "local-secret-token-value" not in payload["error"]
-    assert len(payload["error"]) <= 500
+    assert payload == kc.agentic_kanban_sync_disabled()
 
 
 def test_cli_sync_reports_misconfigured_binding_as_nonzero_sync_error(
@@ -244,10 +246,9 @@ def test_cli_sync_reports_misconfigured_binding_as_nonzero_sync_error(
     kc.build_parser(sub)
     args = parser.parse_args(["kanban", "sync", "--json"])
 
-    assert kc.kanban_command(args) == 1
+    assert kc.kanban_command(args) == 2
     payload = json.loads(capsys.readouterr().out)
-    assert payload["state"] == "sync_error"
-    assert "identity mismatch" in payload["error"]
+    assert payload == kc.agentic_kanban_sync_disabled()
 
 
 @pytest.mark.parametrize(
@@ -280,16 +281,13 @@ def test_kanban_serve_delegates_to_dashboard_with_direct_route(
     assert captured["no_open"] is True
 
 
-def test_cli_dispatch_keeps_local_card_running_when_optional_sync_is_offline(
+def test_cli_dispatch_ignores_backend_sync_entry_point(
     kanban_home, monkeypatch, capsys,
 ):
-    """The real CLI dispatch path syncs opportunistically, never as a gate."""
-    from hermes_cli.kanban_backend import KanbanSyncReport
-
-    sync_calls = []
+    """Dispatch stays local even when the removed sync entry point would fail."""
     monkeypatch.setattr(
         "hermes_cli.kanban_backend.maybe_run_kanban_sync",
-        lambda **kwargs: sync_calls.append(kwargs) or KanbanSyncReport(state="backend_offline"),
+        lambda **_kwargs: pytest.fail("backend sync called"),
     )
     monkeypatch.setattr("hermes_cli.profiles.profile_exists", lambda _name: True)
     monkeypatch.setattr("hermes_cli.kanban_db._default_spawn", lambda *_args, **_kwargs: 12345)
@@ -302,20 +300,17 @@ def test_cli_dispatch_keeps_local_card_running_when_optional_sync_is_offline(
     args = parser.parse_args(["kanban", "dispatch", "--json"])
 
     assert kc.kanban_command(args) == 0
-    assert sync_calls == [{"board": None}]
     assert len(json.loads(capsys.readouterr().out)["spawned"]) == 1
 
 
-def test_cli_dispatch_defers_remote_card_when_backend_is_unavailable(
+def test_cli_dispatch_treats_legacy_remote_link_as_local_work(
     kanban_home, monkeypatch, capsys,
 ):
-    """The real CLI path never turns a remote card into local work offline."""
-    from hermes_cli.kanban_backend import KanbanSyncReport
-
+    """An audit-only link cannot defer a local worker launch."""
     spawned = []
     monkeypatch.setattr(
         "hermes_cli.kanban_backend.maybe_run_kanban_sync",
-        lambda **_: KanbanSyncReport(state="backend_offline"),
+        lambda **_kwargs: pytest.fail("backend sync called"),
     )
     monkeypatch.setattr("hermes_cli.profiles.profile_exists", lambda _name: True)
     monkeypatch.setattr(
@@ -338,31 +333,21 @@ def test_cli_dispatch_defers_remote_card_when_backend_is_unavailable(
     args = parser.parse_args(["kanban", "dispatch", "--json"])
 
     assert kc.kanban_command(args) == 0
-    assert spawned == []
-    assert json.loads(capsys.readouterr().out)["spawned"] == []
+    assert spawned == [task_id]
+    assert [entry["task_id"] for entry in json.loads(capsys.readouterr().out)["spawned"]] == [task_id]
 
 
 def test_cli_offline_sync_report_does_not_retry_remote_client_per_card(
     kanban_home, monkeypatch, capsys,
 ):
     """A non-exception offline report must be a hard no-network admission path."""
-    from hermes_cli.kanban_backend import KanbanBackendContext, KanbanSyncReport
-
-    client_attempts = []
     monkeypatch.setattr(
         "hermes_cli.kanban_backend.maybe_run_kanban_sync",
-        lambda **_: KanbanSyncReport(state="backend_offline"),
-    )
-    monkeypatch.setattr(
-        "hermes_cli.kanban_backend.resolve_kanban_backend_context",
-        lambda **_: KanbanBackendContext(
-            "linked", Path.cwd(), project_id="project", workspace_binding_id="binding",
-            local_workspace_id="local", agent_id="agent",
-        ),
+        lambda **_kwargs: pytest.fail("backend sync called"),
     )
     monkeypatch.setattr(
         "hermes_cli.hades_kanban_sync._make_remote_client",
-        lambda *_args, **_kwargs: client_attempts.append("attempt") or object(),
+        lambda *_args, **_kwargs: pytest.fail("remote client called"),
     )
     monkeypatch.setattr("hermes_cli.profiles.profile_exists", lambda _name: True)
     with kb.connect_closing() as conn:
@@ -381,8 +366,7 @@ def test_cli_offline_sync_report_does_not_retry_remote_client_per_card(
     args = parser.parse_args(["kanban", "dispatch", "--json"])
 
     assert kc.kanban_command(args) == 0
-    assert client_attempts == []
-    assert json.loads(capsys.readouterr().out)["spawned"] == []
+    assert len(json.loads(capsys.readouterr().out)["spawned"]) == 1
 
 
 # ---------------------------------------------------------------------------

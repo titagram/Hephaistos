@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import multiprocessing
 import threading
 import time
@@ -74,10 +75,10 @@ def _remote_task(conn, *, title: str = "remote") -> str:
     return task_id
 
 
-def test_core_terminal_transitions_enqueue_binding_scoped_results_before_delivery(
+def test_core_terminal_transitions_leave_legacy_outbox_empty(
     monkeypatch,
 ):
-    """Removing either core enqueue would lose ordinary CLI/dashboard/worker exits."""
+    """Legacy links remain audit-only during local terminal transitions."""
     kb.init_db()
     monkeypatch.setattr(kb, "_fire_remote_terminal_delivery_hook", lambda *a, **k: None)
     with kb.connect() as conn:
@@ -92,17 +93,11 @@ def test_core_terminal_transitions_enqueue_binding_scoped_results_before_deliver
             "FROM kanban_sync_outbox ORDER BY task_id"
         ).fetchall()
 
-    assert {
-        (r["task_id"], r["operation"], r["status"]) for r in rows
-    } == {
-        (blocked, "fail", "pending"),
-        (completed, "complete", "pending"),
-    }
-    assert all(":binding-1:" in r["idempotency_key"] for r in rows)
+    assert rows == []
 
 
-def test_cli_completion_survives_restart_before_outbox_drain(monkeypatch):
-    """A process exit after local completion must not erase the remote result."""
+def test_cli_completion_does_not_create_legacy_outbox_work(monkeypatch):
+    """CLI completion remains local after the restart boundary."""
     kb.init_db()
     monkeypatch.setattr(kb, "_fire_remote_terminal_delivery_hook", lambda *a, **k: None)
     with kb.connect() as conn:
@@ -116,25 +111,14 @@ def test_cli_completion_survives_restart_before_outbox_drain(monkeypatch):
     )
     assert kanban_cli._cmd_complete(args) == 0
 
-    calls: list[str] = []
-
-    class Client:
-        def complete_agent_work_item(self, work_item_id, **_kwargs):
-            calls.append(work_item_id)
-
     with kb.connect() as reopened:
-        delivered, failed = remote_sync.drain_remote_outbox(
-            reopened,
-            context=_linked_context(),
-            client_factory=lambda _agent=None: Client(),
-            now=2_000_000_000,
-        )
-    assert (delivered, failed) == (1, 0)
-    assert calls == [f"work-{task_id}"]
+        assert reopened.execute(
+            "SELECT COUNT(*) FROM kanban_sync_outbox WHERE task_id=?", (task_id,)
+        ).fetchone()[0] == 0
 
 
-def test_internal_give_up_enqueues_remote_failure(monkeypatch):
-    """Circuit-breaker terminal failures use the same durable terminal policy."""
+def test_internal_give_up_does_not_enqueue_remote_failure(monkeypatch):
+    """Circuit-breaker terminal failures remain local."""
     kb.init_db()
     monkeypatch.setattr(kb, "_fire_remote_terminal_delivery_hook", lambda *a, **k: None)
     with kb.connect() as conn:
@@ -144,29 +128,14 @@ def test_internal_give_up_enqueues_remote_failure(monkeypatch):
             conn, task_id, "spawn failed", failure_limit=1,
         )
         row = conn.execute(
-            "SELECT operation, status FROM kanban_sync_outbox WHERE task_id=?",
+            "SELECT COUNT(*) FROM kanban_sync_outbox WHERE task_id=?",
             (task_id,),
         ).fetchone()
-    assert tuple(row) == ("fail", "pending")
-
-    calls: list[str] = []
-
-    class Client:
-        def fail_agent_work_item(self, work_item_id, **_kwargs):
-            calls.append(work_item_id)
-
-    with kb.connect() as reopened:
-        assert remote_sync.drain_remote_outbox(
-            reopened,
-            context=_linked_context(),
-            client_factory=lambda _context: Client(),
-            now=2_000_000_000,
-        ) == (1, 0)
-    assert calls == [f"work-{task_id}"]
+    assert row[0] == 0
 
 
-def test_dashboard_block_survives_restart_before_outbox_drain(monkeypatch):
-    """Dashboard terminal writes use the same durable core hook as workers/CLI."""
+def test_dashboard_block_does_not_create_legacy_outbox_work(monkeypatch):
+    """Dashboard terminal writes use the local core transition."""
     from plugins.kanban.dashboard import plugin_api
 
     kb.init_db()
@@ -184,24 +153,14 @@ def test_dashboard_block_survives_restart_before_outbox_drain(monkeypatch):
     )
     assert response["task"]["status"] == "blocked"
 
-    calls: list[str] = []
-
-    class Client:
-        def fail_agent_work_item(self, work_item_id, **_kwargs):
-            calls.append(work_item_id)
-
     with kb.connect() as reopened:
-        assert remote_sync.drain_remote_outbox(
-            reopened,
-            context=_linked_context(),
-            client_factory=lambda _context: Client(),
-            now=2_000_000_000,
-        ) == (1, 0)
-    assert calls == [f"work-{task_id}"]
+        assert reopened.execute(
+            "SELECT COUNT(*) FROM kanban_sync_outbox WHERE task_id=?", (task_id,)
+        ).fetchone()[0] == 0
 
 
-def test_remote_heartbeat_is_wired_to_local_worker_heartbeat(monkeypatch):
-    """Long-running linked tasks renew the remote lease whenever local liveness does."""
+def test_local_worker_heartbeat_does_not_renew_legacy_remote_lease(monkeypatch):
+    """Long-running local tasks do not touch the remote lease path."""
     kb.init_db()
     calls: list[str] = []
     monkeypatch.setattr(
@@ -214,7 +173,7 @@ def test_remote_heartbeat_is_wired_to_local_worker_heartbeat(monkeypatch):
         assert kb.claim_task(conn, task_id) is not None
         assert kb.heartbeat_worker(conn, task_id)
         assert kb.heartbeat_worker(conn, task_id)
-    assert calls == [task_id, task_id]
+    assert calls == []
 
 
 @pytest.mark.parametrize(
@@ -328,10 +287,10 @@ def test_admission_classifies_wrapped_transport_during_client_construction():
     assert "factory-secret" not in (link.last_error or "")
 
 
-def test_wrapped_transport_heartbeat_then_completion_keeps_durable_intent(
+def test_wrapped_transport_heartbeat_then_completion_stays_without_outbox_work(
     monkeypatch,
 ):
-    """The production Hades wrapper must not erase a live lease or its result."""
+    """A direct legacy heartbeat cannot make local completion enqueue delivery."""
     kb.init_db()
 
     class Client:
@@ -358,15 +317,15 @@ def test_wrapped_transport_heartbeat_then_completion_keeps_durable_intent(
         assert kb.get_remote_link(conn, task_id).lease_status == "acquired"
         assert kb.complete_task(conn, task_id, summary="completed while offline")
         row = conn.execute(
-            "SELECT status FROM kanban_sync_outbox WHERE task_id=?",
+            "SELECT COUNT(*) FROM kanban_sync_outbox WHERE task_id=?",
             (task_id,),
         ).fetchone()
 
-    assert row["status"] == "pending"
+    assert row[0] == 0
 
 
-def test_expired_lease_completion_stays_pending_for_reconciliation(monkeypatch):
-    """A permanent heartbeat result must not make terminal intent disappear."""
+def test_expired_lease_completion_does_not_create_reconciliation_work(monkeypatch):
+    """A direct legacy heartbeat cannot change local completion behavior."""
     kb.init_db()
     calls: list[str] = []
 
@@ -400,20 +359,13 @@ def test_expired_lease_completion_stays_pending_for_reconciliation(monkeypatch):
             conn, task_id,
         ) == "expired"
         assert kb.complete_task(conn, task_id, summary="done after expiry")
-        assert remote_sync.drain_remote_outbox(
-            conn,
-            context=_linked_context(),
-            client_factory=lambda _context: DeliveryClient(),
-            now=2_000_000_000,
-        ) == (0, 1)
         row = conn.execute(
-            "SELECT status, last_error FROM kanban_sync_outbox WHERE task_id=?",
+            "SELECT COUNT(*) FROM kanban_sync_outbox WHERE task_id=?",
             (task_id,),
         ).fetchone()
 
     assert calls == []
-    assert row["status"] == "pending"
-    assert "reconciliation" in row["last_error"]
+    assert row[0] == 0
 
 
 def test_offline_exact_context_reuses_persisted_lease_without_client(monkeypatch):
@@ -466,8 +418,8 @@ def test_unconfigured_backend_defers_unleased_remote_card_without_false_mismatch
     )
 
 
-def test_status_flag_is_read_only_and_never_runs_network_sync(monkeypatch, capsys):
-    """`sync --status` reports durable local state without any mutation trigger."""
+def test_status_flag_reports_the_non_retryable_local_boundary(monkeypatch, capsys):
+    """`sync --status` cannot re-enable the retired remote operation."""
     kb.init_db()
     monkeypatch.setattr(
         kanban_backend,
@@ -480,8 +432,8 @@ def test_status_flag_is_read_only_and_never_runs_network_sync(monkeypatch, capsy
         lambda **_kwargs: KanbanSyncReport(state="backend_offline", outbox_pending=2),
     )
     args = argparse.Namespace(board=None, status=True, json=True)
-    assert kanban_cli._cmd_sync(args) == 0
-    assert '"outbox_pending": 2' in capsys.readouterr().out
+    assert kanban_cli._cmd_sync(args) == 2
+    assert json.loads(capsys.readouterr().out) == kanban_cli.agentic_kanban_sync_disabled()
 
 
 def test_atomic_remote_materialization_prevents_unlinked_orphan(monkeypatch):

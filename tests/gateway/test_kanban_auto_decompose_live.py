@@ -88,9 +88,8 @@ def test_live_toggle_takes_effect_between_calls():
     assert _resolve_auto_decompose_settings(lambda: state)[0] is False
 
 
-def test_gateway_dispatch_tick_runs_optional_sync_and_remote_admission(tmp_path, monkeypatch):
-    """The embedded dispatcher composes bounded sync and admission per board."""
-    from hermes_cli.kanban_backend import KanbanBackendContext, KanbanSyncReport
+def test_gateway_dispatch_tick_is_local_without_backend_entry_points(tmp_path, monkeypatch):
+    """The gateway dispatcher never composes backend sync or remote admission."""
 
     home = tmp_path / ".hermes"
     home.mkdir()
@@ -101,28 +100,28 @@ def test_gateway_dispatch_tick_runs_optional_sync_and_remote_admission(tmp_path,
     with kb.connect_closing() as conn:
         kb.create_task(conn, title="local", assignee="default")
 
-    sync_calls = []
-    admissions = []
     monkeypatch.setattr(
         "hermes_cli.kanban_backend.maybe_run_kanban_sync",
-        lambda **kwargs: sync_calls.append(kwargs) or KanbanSyncReport(state="local_only"),
+        lambda **_kwargs: pytest.fail("backend sync called"),
     )
     monkeypatch.setattr(
-        "hermes_cli.kanban_backend.resolve_kanban_backend_context",
-        lambda **_: KanbanBackendContext("local_only", Path.cwd()),
+        "hermes_cli.hades_kanban_sync.make_remote_admission",
+        lambda *_args, **_kwargs: pytest.fail("remote admission called"),
     )
-
-    def _admission(conn, *, context):
-        admissions.append((conn, context))
-        return lambda _task: kb.DispatchAdmission("allow", "local-only task")
-
-    monkeypatch.setattr("hermes_cli.hades_kanban_sync.make_remote_admission", _admission)
     monkeypatch.setattr("hermes_cli.config.load_config", lambda: {
         "kanban": {"dispatch_in_gateway": True, "auto_decompose": False},
     })
     monkeypatch.setattr(watchers, "_acquire_singleton_lock", lambda _path: (None, "unavailable"))
     monkeypatch.setattr("hermes_cli.profiles.profile_exists", lambda _name: True)
     monkeypatch.setattr("hermes_cli.kanban_db._default_spawn", lambda *_args, **_kwargs: 12345)
+    real_dispatch_once = kb.dispatch_once
+    dispatch_kwargs = []
+
+    def _dispatch_once(*args, **kwargs):
+        dispatch_kwargs.append(kwargs)
+        return real_dispatch_once(*args, **kwargs)
+
+    monkeypatch.setattr(kb, "dispatch_once", _dispatch_once)
 
     class _Runner(GatewayKanbanWatchersMixin):
         _running = True
@@ -139,14 +138,12 @@ def test_gateway_dispatch_tick_runs_optional_sync_and_remote_admission(tmp_path,
     monkeypatch.setattr(watchers.asyncio, "sleep", _sleep)
     asyncio.run(runner._kanban_dispatcher_watcher())
 
-    assert sync_calls == [{"board": "default"}]
-    assert len(admissions) == 1
-    assert admissions[0][1].mode == "local_only"
+    assert dispatch_kwargs
+    assert all("admission_fn" not in kwargs for kwargs in dispatch_kwargs)
 
 
-def test_gateway_offline_sync_report_does_not_retry_remote_client_per_card(tmp_path, monkeypatch):
-    """Gateway dispatch treats a reported offline sync as an offline admission context."""
-    from hermes_cli.kanban_backend import KanbanBackendContext, KanbanSyncReport
+def test_gateway_dispatch_runs_legacy_link_locally(tmp_path, monkeypatch):
+    """A legacy link does not defer a gateway worker launch."""
 
     home = tmp_path / ".hermes"
     home.mkdir()
@@ -164,27 +161,20 @@ def test_gateway_offline_sync_report_does_not_retry_remote_client_per_card(tmp_p
             remote_work_item_id="work-item",
         )
 
-    client_attempts = []
     monkeypatch.setattr(
         "hermes_cli.kanban_backend.maybe_run_kanban_sync",
-        lambda **_: KanbanSyncReport(state="backend_offline"),
+        lambda **_kwargs: pytest.fail("backend sync called"),
     )
     monkeypatch.setattr(
-        "hermes_cli.kanban_backend.resolve_kanban_backend_context",
-        lambda **_: KanbanBackendContext(
-            "linked", Path.cwd(), project_id="project", workspace_binding_id="binding",
-            local_workspace_id="local", agent_id="agent",
-        ),
-    )
-    monkeypatch.setattr(
-        "hermes_cli.hades_kanban_sync._make_remote_client",
-        lambda *_args, **_kwargs: client_attempts.append("attempt") or object(),
+        "hermes_cli.hades_kanban_sync.make_remote_admission",
+        lambda *_args, **_kwargs: pytest.fail("remote admission called"),
     )
     monkeypatch.setattr("hermes_cli.config.load_config", lambda: {
         "kanban": {"dispatch_in_gateway": True, "auto_decompose": False},
     })
     monkeypatch.setattr(watchers, "_acquire_singleton_lock", lambda _path: (None, "unavailable"))
     monkeypatch.setattr("hermes_cli.profiles.profile_exists", lambda _name: True)
+    monkeypatch.setattr("hermes_cli.kanban_db._default_spawn", lambda *_args, **_kwargs: 12345)
 
     class _Runner(GatewayKanbanWatchersMixin):
         _running = True
@@ -201,4 +191,5 @@ def test_gateway_offline_sync_report_does_not_retry_remote_client_per_card(tmp_p
     monkeypatch.setattr(watchers.asyncio, "sleep", _sleep)
     asyncio.run(runner._kanban_dispatcher_watcher())
 
-    assert client_attempts == []
+    with kb.connect_closing() as conn:
+        assert kb.get_task(conn, task_id).status == "running"

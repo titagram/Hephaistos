@@ -29,57 +29,23 @@ from hermes_cli.kanban import run_slash
 # Local-first backend independence
 # ---------------------------------------------------------------------------
 
-def test_local_only_board_completes_without_backend_configuration(kanban_home, monkeypatch):
-    """The production CLI dispatch composition keeps an unlinked board local."""
-    from hermes_cli import hades_kanban_sync
-    from hermes_cli import kanban_backend
-
-    monkeypatch.setattr("hermes_cli.profiles.profile_exists", lambda _name: True)
-    client_attempts = []
-    sync_calls = []
-    admission_contexts = []
-    real_sync = kanban_backend.maybe_run_kanban_sync
-    real_admission = hades_kanban_sync.make_remote_admission
-
-    def _forbid_backend_client(*_args, **_kwargs):
-        client_attempts.append("attempted")
-        raise AssertionError("local-only dispatch must not construct a backend client")
-
-    def _tracked_sync(**kwargs):
-        sync_calls.append(kwargs)
-        return real_sync(**kwargs)
-
-    def _tracked_admission(conn, *, context):
-        admission_contexts.append(context)
-        return real_admission(conn, context=context)
-
-    monkeypatch.setattr(kanban_backend, "make_kanban_client", _forbid_backend_client)
-    monkeypatch.setattr(hades_kanban_sync, "_make_remote_client", _forbid_backend_client)
-    monkeypatch.setattr(kanban_backend, "maybe_run_kanban_sync", _tracked_sync)
-    monkeypatch.setattr(hades_kanban_sync, "make_remote_admission", _tracked_admission)
-    spawned = []
+def test_local_completion_ignores_legacy_remote_link(kanban_home, monkeypatch):
+    """Legacy audit links must not trigger a remote completion delivery."""
     monkeypatch.setattr(
-        kb,
-        "_default_spawn",
-        lambda task, *_args, **_kwargs: spawned.append(task.id) or 12345,
+        "hermes_cli.hades_kanban_sync.deliver_remote_terminal_for_task",
+        lambda *_a, **_k: pytest.fail("remote delivery called"),
     )
-    kb.init_db(board="offline")
-
-    with kb.scoped_current_board("offline"), kb.connect_closing() as conn:
-        task_id = kb.create_task(conn, title="offline work", assignee="leaf")
-
-        payload = json.loads(run_slash("dispatch --json"))
-        assert [entry["task_id"] for entry in payload["spawned"]] == [task_id]
-        assert spawned == [task_id]
-        assert sync_calls == [{"board": None}]
-        assert [context.mode for context in admission_contexts] == ["local_only"]
-        assert client_attempts == []
-
-        assert f"Completed {task_id}" in run_slash(
-            f"complete {task_id} --result 'offline complete'"
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="local execution", assignee="leaf")
+        kb.upsert_remote_link(
+            conn, task_id=task_id, project_id="legacy-project",
+            workspace_binding_id="legacy-binding",
+            remote_work_item_id="legacy-work",
         )
-        task = kb.get_task(conn, task_id)
-        assert task is not None and task.status == "done"
+        assert kb.complete_task(conn, task_id, summary="done")
+        assert conn.execute(
+            "SELECT COUNT(*) FROM kanban_sync_outbox WHERE task_id=?", (task_id,)
+        ).fetchone()[0] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -4883,6 +4849,7 @@ def test_dispatch_once_integrates_stale_detection(kanban_home, monkeypatch):
     import hermes_cli.kanban_db as _kb
 
     monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: False)
+    monkeypatch.setattr(_kb.os, "kill", lambda *_args: None)
 
     with kb.connect() as conn:
         t = kb.create_task(conn, title="stale-dispatch", assignee="worker")

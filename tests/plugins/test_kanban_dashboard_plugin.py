@@ -80,24 +80,19 @@ def test_board_empty(client):
     assert data["latest_event_id"] == 0
 
 
-def test_board_payload_marks_local_only_and_local_cards(client):
+def test_board_payload_has_only_local_card_fields(client):
     created = client.post("/api/plugins/kanban/tasks", json={"title": "local"}).json()["task"]
 
     board = client.get("/api/plugins/kanban/board").json()
     cards = [task for column in board["columns"] for task in column["tasks"]]
 
-    assert board["sync"] == {
-        "state": "local_only",
-        "workspace_binding_id": None,
-        "outbox_pending": 0,
-        "last_error": None,
-    }
+    assert "sync" not in board
     card = next(task for task in cards if task["id"] == created["id"])
-    assert card["origin"] == "local"
-    assert card["remote_sync_status"] is None
+    assert "origin" not in card
+    assert "remote_sync_status" not in card
 
 
-def test_board_payload_marks_remote_card_without_exposing_lease(client):
+def test_board_payload_ignores_legacy_remote_link(client, monkeypatch):
     created = client.post("/api/plugins/kanban/tasks", json={"title": "remote"}).json()["task"]
     with kb.connect_closing() as conn:
         kb.upsert_remote_link(
@@ -111,26 +106,24 @@ def test_board_payload_marks_remote_card_without_exposing_lease(client):
             conn, created["id"], lease_token="super-secret-lease", lease_status="acquired",
         )
 
+    monkeypatch.setattr(
+        "hermes_cli.kanban_backend.resolve_kanban_backend_context",
+        lambda **_kwargs: pytest.fail("backend context read"),
+    )
     payload = client.get("/api/plugins/kanban/board").json()
     card = next(task for column in payload["columns"] for task in column["tasks"] if task["id"] == created["id"])
 
-    assert card["origin"] == "remote"
-    assert card["remote_sync_status"] == "linked"
+    assert "sync" not in payload
+    assert "origin" not in card
+    assert "remote_sync_status" not in card
     assert "super-secret-lease" not in json.dumps(payload)
     assert "lease_token" not in json.dumps(payload)
 
 
-def test_board_payload_reads_only_the_selected_binding_sync_state(client, monkeypatch):
-    from hermes_cli.kanban_backend import KanbanBackendContext
-
+def test_board_payload_never_reads_legacy_sync_state(client, monkeypatch):
     monkeypatch.setattr(
         "hermes_cli.kanban_backend.resolve_kanban_backend_context",
-        lambda **_: KanbanBackendContext(
-            "linked", Path.cwd(), project_id="project", workspace_binding_id="selected",
-        ),
-    )
-    monkeypatch.setattr(
-        "hermes_cli.kanban_backend.maybe_run_kanban_sync", lambda **_: None,
+        lambda **_kwargs: pytest.fail("backend context read"),
     )
     with kb.connect_closing() as conn:
         selected_task = kb.create_task(conn, title="selected remote")
@@ -160,19 +153,12 @@ def test_board_payload_reads_only_the_selected_binding_sync_state(client, monkey
             summary={}, last_error="other binding must not leak",
         )
 
-    sync = client.get("/api/plugins/kanban/board").json()["sync"]
-
-    assert sync == {
-        "state": "backend_offline",
-        "workspace_binding_id": "selected",
-        "outbox_pending": 1,
-        "last_error": "selected backend unavailable",
-    }
+    payload = client.get("/api/plugins/kanban/board").json()
+    assert "sync" not in payload
 
 
-def test_board_sync_coalesces_repeated_linked_gets_and_releases_after_run(client, monkeypatch):
-    """A burst of reads must not create one daemon thread per HTTP request."""
-    from hermes_cli.kanban_backend import KanbanBackendContext
+def test_board_read_never_starts_dashboard_sync(client, monkeypatch):
+    """Board reads remain SQLite-only even when a backend binding exists."""
 
     class HeldThread:
         started: list["HeldThread"] = []
@@ -185,25 +171,20 @@ def test_board_sync_coalesces_repeated_linked_gets_and_releases_after_run(client
 
     monkeypatch.setattr(
         "hermes_cli.kanban_backend.resolve_kanban_backend_context",
-        lambda **_: KanbanBackendContext(
-            "linked", Path.cwd(), project_id="project", workspace_binding_id="binding",
-        ),
+        lambda **_kwargs: pytest.fail("backend context read"),
     )
     monkeypatch.setattr("threading.Thread", HeldThread)
-    monkeypatch.setattr("hermes_cli.kanban_backend.maybe_run_kanban_sync", lambda **_: None)
+    monkeypatch.setattr(
+        "hermes_cli.kanban_backend.maybe_run_kanban_sync",
+        lambda **_kwargs: pytest.fail("backend sync called"),
+    )
 
     assert client.get("/api/plugins/kanban/board").status_code == 200
     assert client.get("/api/plugins/kanban/board").status_code == 200
-    assert len(HeldThread.started) == 1
-
-    HeldThread.started[0].target()
-    assert client.get("/api/plugins/kanban/board").status_code == 200
-    assert len(HeldThread.started) == 2
-    HeldThread.started[1].target()
+    assert len(HeldThread.started) == 0
 
 
-def test_board_sync_redacts_persisted_and_resolver_secrets(client, monkeypatch):
-    from hermes_cli.kanban_backend import KanbanBackendContext
+def test_board_does_not_expose_persisted_sync_errors(client, monkeypatch):
 
     hades_agent_token = "hades_agent_0123456789ABCDEFGHJKMNPQRS|" + "A" * 64
     stored_secret = (
@@ -218,49 +199,11 @@ def test_board_sync_redacts_persisted_and_resolver_secrets(client, monkeypatch):
 
     monkeypatch.setattr(
         "hermes_cli.kanban_backend.resolve_kanban_backend_context",
-        lambda **_: KanbanBackendContext(
-            "linked", Path.cwd(), project_id="project", workspace_binding_id="binding",
-        ),
+        lambda **_kwargs: pytest.fail("backend context read"),
     )
-    monkeypatch.setattr("hermes_cli.kanban_backend.maybe_run_kanban_sync", lambda **_: None)
-    persisted = client.get("/api/plugins/kanban/board").json()["sync"]["last_error"]
-
-    assert persisted is not None
-    assert "stored-secret-value" not in persisted
-    assert "stored-api-key" not in persisted
-    assert "sk-live-abcdefghijk" not in persisted
-    assert hades_agent_token not in persisted
-    assert "backend refused" in persisted
-    assert len(persisted) <= 500
-
-    monkeypatch.setattr(
-        "hermes_cli.kanban_backend.resolve_kanban_backend_context",
-        lambda **_: (_ for _ in ()).throw(
-            RuntimeError(
-                "sync failed token=Bearer leaked-token-value "
-                "Authorization: Bearer resolver-bearer"
-            ),
-        ),
-    )
-    resolver = client.get("/api/plugins/kanban/board").json()["sync"]["last_error"]
-
-    assert resolver is not None
-    assert "leaked-token-value" not in resolver
-    assert "resolver-bearer" not in resolver
-    assert "sync failed" in resolver
-
-
-def test_dashboard_bundle_renders_sync_and_remote_badges():
-    bundle = (
-        Path(__file__).resolve().parents[2]
-        / "plugins" / "kanban" / "dashboard" / "dist" / "index.js"
-    ).read_text()
-
-    assert 'sync.state === "local_only"' in bundle
-    assert '"Backend offline"' in bundle
-    assert 't.origin === "remote"' in bundle
-    assert '"Remote"' in bundle
-    assert "backend lease is unavailable" in bundle
+    payload = client.get("/api/plugins/kanban/board").json()
+    assert "sync" not in payload
+    assert stored_secret not in json.dumps(payload)
 
 
 # ---------------------------------------------------------------------------
@@ -790,38 +733,24 @@ def test_dispatch_dry_run(client):
     assert isinstance(body, dict)
 
 
-def test_dispatch_runs_optional_sync_and_installs_remote_admission(client, monkeypatch):
-    """The dashboard quick path uses the same safe remote gate as the CLI."""
-    from hermes_cli.kanban_backend import KanbanBackendContext, KanbanSyncReport
-
-    sync_calls = []
-    admissions = []
+def test_dispatch_runs_without_backend_sync_or_remote_admission(client, monkeypatch):
+    """The dashboard dispatch nudge is a local database operation."""
     monkeypatch.setattr(
         "hermes_cli.kanban_backend.maybe_run_kanban_sync",
-        lambda **kwargs: sync_calls.append(kwargs) or KanbanSyncReport(state="local_only"),
+        lambda **_kwargs: pytest.fail("backend sync called"),
     )
     monkeypatch.setattr(
-        "hermes_cli.kanban_backend.resolve_kanban_backend_context",
-        lambda **_: KanbanBackendContext("local_only", Path.cwd()),
+        "hermes_cli.hades_kanban_sync.make_remote_admission",
+        lambda *_args, **_kwargs: pytest.fail("remote admission called"),
     )
-
-    def _admission(conn, *, context):
-        admissions.append((conn, context))
-        return lambda _task: kb.DispatchAdmission("allow", "local-only task")
-
-    monkeypatch.setattr("hermes_cli.hades_kanban_sync.make_remote_admission", _admission)
 
     response = client.post("/api/plugins/kanban/dispatch?dry_run=true")
 
     assert response.status_code == 200
-    assert sync_calls == [{"board": None}]
-    assert len(admissions) == 1
-    assert admissions[0][1].mode == "local_only"
 
 
-def test_dispatch_offline_sync_report_does_not_retry_remote_client_per_card(client, monkeypatch):
-    """Dashboard dispatch keeps a reported backend outage fully local."""
-    from hermes_cli.kanban_backend import KanbanBackendContext, KanbanSyncReport
+def test_dispatch_treats_legacy_link_as_local_work(client, monkeypatch):
+    """A legacy remote link cannot defer dashboard dispatch."""
 
     remote = client.post(
         "/api/plugins/kanban/tasks",
@@ -836,27 +765,22 @@ def test_dispatch_offline_sync_report_does_not_retry_remote_client_per_card(clie
             remote_work_item_id="work-item",
         )
 
-    client_attempts = []
     monkeypatch.setattr(
         "hermes_cli.kanban_backend.maybe_run_kanban_sync",
-        lambda **_: KanbanSyncReport(state="backend_offline"),
+        lambda **_kwargs: pytest.fail("backend sync called"),
     )
     monkeypatch.setattr(
-        "hermes_cli.kanban_backend.resolve_kanban_backend_context",
-        lambda **_: KanbanBackendContext(
-            "linked", Path.cwd(), project_id="project", workspace_binding_id="binding",
-            local_workspace_id="local", agent_id="agent",
-        ),
+        "hermes_cli.hades_kanban_sync.make_remote_admission",
+        lambda *_args, **_kwargs: pytest.fail("remote admission called"),
     )
-    monkeypatch.setattr(
-        "hermes_cli.hades_kanban_sync._make_remote_client",
-        lambda *_args, **_kwargs: client_attempts.append("attempt") or object(),
-    )
+    monkeypatch.setattr("hermes_cli.profiles.profile_exists", lambda _name: True)
+    monkeypatch.setattr("hermes_cli.kanban_db._default_spawn", lambda *_args, **_kwargs: 12345)
 
     response = client.post("/api/plugins/kanban/dispatch")
 
     assert response.status_code == 200
-    assert client_attempts == []
+    with kb.connect_closing() as conn:
+        assert kb.get_task(conn, remote["id"]).status == "running"
 
 
 # ---------------------------------------------------------------------------

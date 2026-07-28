@@ -686,8 +686,6 @@ class GatewayKanbanWatchersMixin:
 
         try:
             from hermes_cli import kanban_db as _kb
-            from hermes_cli import kanban_backend as _kanban_backend
-            from hermes_cli.hades_kanban_sync import make_remote_admission as _make_remote_admission
         except Exception:
             logger.warning("kanban dispatcher: local-first kanban components not importable; dispatcher disabled")
             return
@@ -914,25 +912,9 @@ class GatewayKanbanWatchersMixin:
                 # re-ran the migration on a second connection, racing
                 # the first. See the matching comment in
                 # `_kanban_notifier_watcher` and issue #21378.
-                try:
-                    _sync_report = _kanban_backend.maybe_run_kanban_sync(board=slug)
-                    _backend_context = _kanban_backend.dispatch_context_for_sync_report(
-                        _sync_report, board=slug,
-                    )
-                except Exception:
-                    # Backend probing is optional for local work; the
-                    # local-only context still makes remote-linked cards
-                    # defer through the admission callback below.
-                    _backend_context = _kanban_backend.KanbanBackendContext(
-                        "local_only", Path.cwd(),
-                    )
-                _admission = _make_remote_admission(
-                    conn, context=_backend_context,
-                )
                 return _kb.dispatch_once(
                     conn,
                     board=slug,
-                    admission_fn=_admission,
                     max_spawn=max_spawn,
                     max_in_progress=max_in_progress,
                     failure_limit=failure_limit,

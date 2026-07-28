@@ -3716,6 +3716,20 @@ def test_migrate_add_optional_columns_tolerates_concurrent_migration(kanban_home
 # ---------------------------------------------------------------------------
 
 
+def test_worker_launcher_never_resolves_legacy_process_names(monkeypatch):
+    """Workers resolve only the current Hades process name before fallback."""
+    seen = []
+    monkeypatch.delenv("HERMES_BIN", raising=False)
+    monkeypatch.setattr(
+        "shutil.which",
+        lambda name: seen.append(name) or ("/bin/hades" if name == "hades" else None),
+    )
+    assert kb._resolve_hermes_argv() == ["/bin/hades"]
+    assert seen == ["hades"]
+    assert "hermes-agent" not in seen
+    assert "hermes-review-engine" not in seen
+
+
 def test_resolve_hermes_argv_prefers_path_shim(monkeypatch):
     """The Hades fork prefers its primary shim over legacy Hermes aliases."""
     import shutil

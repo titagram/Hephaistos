@@ -1294,49 +1294,25 @@ def _cmd_init(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_sync(args: argparse.Namespace) -> int:
-    """Synchronize a linked board without turning local-only into an error."""
-    from hermes_cli.kanban_backend import (
-        maybe_run_kanban_sync,
-        read_kanban_sync_status,
-    )
-
-    if getattr(args, "status", False):
-        report = read_kanban_sync_status(board=getattr(args, "board", None))
-    else:
-        report = maybe_run_kanban_sync(
-            board=getattr(args, "board", None),
-            min_interval_seconds=0,
-            force=True,
-        )
-    payload = {
-        "state": report.state,
-        "workspace_binding_id": report.workspace_binding_id,
-        "pulled": report.pulled,
-        "created": report.created,
-        "existing": report.existing,
-        "delivered": report.delivered,
-        "deferred": report.deferred,
-        "failed": report.failed,
-        "outbox_pending": report.outbox_pending,
-        "error": report.error,
+def agentic_kanban_sync_disabled() -> dict[str, object]:
+    return {
+        "state": "unsupported",
+        "code": "agentic_kanban_has_no_remote_sync",
+        "retryable": False,
     }
+
+
+def _cmd_sync(args: argparse.Namespace) -> int:
+    """Report the deliberate local-only Agentic-Kanban boundary."""
+    payload = agentic_kanban_sync_disabled()
     if getattr(args, "json", False):
-        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
     else:
-        print(f"Kanban sync: {report.state}")
-        if report.state != "local_only":
-            print(
-                f"pulled={report.pulled} created={report.created} "
-                f"delivered={report.delivered} deferred={report.deferred} "
-                f"pending={report.outbox_pending}"
-            )
-        if report.error:
-            print(report.error, file=sys.stderr)
-    return 0 if report.state in {
-        "local_only", "linked", "synced", "sync_deferred",
-        "sync_inflight", "backend_offline",
-    } else 1
+        print(
+            "Agentic-Kanban is local and does not synchronize remote cards.",
+            file=sys.stderr,
+        )
+    return 2
 
 
 def _cmd_serve(args: argparse.Namespace) -> int:
@@ -1360,23 +1336,6 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     )
     result = cmd_dashboard(dashboard_args)
     return int(result or 0)
-
-
-def _remote_dispatch_admission(conn, *, board: str | None):
-    """Build the optional remote gate without making local cards depend on it."""
-    from hermes_cli import kanban_backend
-    from hermes_cli.hades_kanban_sync import make_remote_admission
-
-    try:
-        report = kanban_backend.maybe_run_kanban_sync(board=board)
-        context = kanban_backend.dispatch_context_for_sync_report(
-            report, board=board,
-        )
-    except Exception:
-        # A failed optional probe must still allow local cards.  The callback
-        # sees remote links and keeps those cards fail-closed.
-        context = kanban_backend.KanbanBackendContext("local_only", Path.cwd())
-    return make_remote_admission(conn, context=context)
 
 
 def _cmd_heartbeat(args: argparse.Namespace) -> int:
@@ -2284,10 +2243,8 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
         max_spawn = getattr(args, "max", None)
     board = getattr(args, "board", None)
     with kb.connect_closing() as conn:
-        admission = _remote_dispatch_admission(conn, board=board)
         res = kb.dispatch_once(
             conn,
-            admission_fn=admission,
             dry_run=args.dry_run,
             max_spawn=max_spawn,
             max_in_progress=max_in_progress,
@@ -2478,23 +2435,12 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
         except Exception:
             return False
 
-    board = getattr(args, "board", None)
-
-    def _sync_tick():
-        from hermes_cli.kanban_backend import maybe_run_kanban_sync
-        return maybe_run_kanban_sync(board=board)
-
-    def _admission_for_connection(conn):
-        return _remote_dispatch_admission(conn, board=board)
-
     try:
         kb.run_daemon(
             interval=args.interval,
             max_spawn=args.max,
             failure_limit=getattr(args, "failure_limit", kb.DEFAULT_SPAWN_FAILURE_LIMIT),
             on_tick=_on_tick,
-            sync_fn=_sync_tick,
-            admission_fn=_admission_for_connection,
         )
     finally:
         if pidfile:
