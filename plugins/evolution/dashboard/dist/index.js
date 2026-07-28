@@ -32078,7 +32078,7 @@
     const [view, setView] = useState(initialView());
     const store = useEvolutionSnapshot();
     const facet = store.snapshot === null ? null : organismFacet(store.snapshot, null);
-    return /* @__PURE__ */ React.createElement("main", { className: "evo-shell" }, /* @__PURE__ */ React.createElement("header", { className: "evo-shell__header" }, /* @__PURE__ */ React.createElement("h1", null, "Evolution"), /* @__PURE__ */ React.createElement("p", null, "Local organism \xB7 all profiles"), facet !== null && facet.organism !== null ? /* @__PURE__ */ React.createElement("p", null, "Organism ", facet.organism.id_prefix, " \xB7 Lineage ", facet.organism.lineage_prefix) : null), /* @__PURE__ */ React.createElement("nav", { className: "evo-shell__nav", role: "tablist", "aria-label": "Evolution views" }, VIEWS.map((item) => /* @__PURE__ */ React.createElement(
+    return /* @__PURE__ */ React.createElement("main", { className: "evo-shell" }, /* @__PURE__ */ React.createElement("header", { className: "evo-shell__header" }, /* @__PURE__ */ React.createElement("h2", { className: "evo-shell__title" }, "Evolution"), /* @__PURE__ */ React.createElement("p", null, "Local organism \xB7 all profiles"), facet !== null && facet.organism !== null ? /* @__PURE__ */ React.createElement("p", null, "Organism ", facet.organism.id_prefix, " \xB7 Lineage ", facet.organism.lineage_prefix) : null), /* @__PURE__ */ React.createElement("nav", { className: "evo-shell__nav", role: "tablist", "aria-label": "Evolution views" }, VIEWS.map((item) => /* @__PURE__ */ React.createElement(
       "button",
       {
         key: item.id,

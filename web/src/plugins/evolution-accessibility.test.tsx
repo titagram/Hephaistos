@@ -163,13 +163,21 @@ describe("Evolution dashboard accessibility", () => {
     expect(container.textContent).not.toContain("Recent audit activity");
   });
 
-  it("exposes one named page heading and an internal tab navigation with one selected view", async () => {
+  it("keeps the host page heading unique while exposing the plugin title as a section heading", async () => {
     installSdk();
     const { EvolutionShell } = await import("../../../plugins/evolution/dashboard/src/components/EvolutionShell");
-    const container = await render(<EvolutionShell />);
+    const container = await render(
+      <>
+        <h1>Evolution</h1>
+        <EvolutionShell />
+      </>,
+    );
 
     expect(container.querySelectorAll("h1")).toHaveLength(1);
     expect(container.querySelector("h1")?.textContent).toBe("Evolution");
+    expect(container.querySelectorAll(".evo-shell h1")).toHaveLength(0);
+    expect(container.querySelector(".evo-shell__title")?.tagName).toBe("H2");
+    expect(container.querySelector(".evo-shell__title")?.textContent).toBe("Evolution");
     const navigation = container.querySelector('[role="tablist"][aria-label="Evolution views"]');
     expect(navigation).not.toBeNull();
     expect(navigation?.querySelectorAll('[role="tab"]')).toHaveLength(4);

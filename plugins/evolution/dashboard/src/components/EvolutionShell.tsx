@@ -26,7 +26,7 @@ export function EvolutionShell(): React.ReactElement {
   return (
     <main className="evo-shell">
       <header className="evo-shell__header">
-        <h1>Evolution</h1>
+        <h2 className="evo-shell__title">Evolution</h2>
         <p>Local organism · all profiles</p>
         {facet !== null && facet.organism !== null ? (
           <p>

@@ -41,7 +41,7 @@
   letter-spacing: 0.1em;
   text-transform: uppercase;
 }
-.evo-shell h1 { margin-bottom: 0.35rem; font-size: clamp(1.45rem, 2.8vw, 2.2rem); line-height: 1.15; }
+.evo-shell h1, .evo-shell__title { margin-bottom: 0.35rem; font-size: clamp(1.45rem, 2.8vw, 2.2rem); line-height: 1.15; }
 .evo-shell h2 { margin-bottom: 0.55rem; font-size: 1rem; }
 .evo-shell h3 { margin-bottom: 0.4rem; font-size: 0.75rem; }
 .evo-shell p { margin-bottom: 0.65rem; }
