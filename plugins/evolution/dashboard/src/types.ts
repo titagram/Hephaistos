@@ -132,18 +132,46 @@ export interface RevisionListResponse {
   truncated: boolean;
 }
 
+/** A capability state transition; each state map contains at most 200 entries. */
+export interface RevisionStateChange {
+  id: string;
+  before: Record<string, boolean>;
+  after: Record<string, boolean>;
+}
+
+/** A directed dependency transition between two graph nodes. */
+export interface RevisionDependencyChange {
+  kind: string;
+  from: string;
+  to: string;
+}
+
+/** A quality status transition. */
+export interface RevisionQualityChange {
+  before: string;
+  after: string;
+}
+
+/** A coverage status transition for one domain. */
+export interface RevisionCoverageChange {
+  domain: string;
+  before: string;
+  after: string;
+}
+
 export interface RevisionDiffResponse {
   schema_version: 1;
   left_revision_id: string;
   right_revision_id: string;
-  added_capabilities: string[];
-  removed_capabilities: string[];
-  changed_state: string[];
-  dependency_changes: string[];
-  invariant_impact: string[];
-  runtime_changes: string[];
-  quality_changes: string[];
-  coverage_changes: string[];
+  /** Every row array is capped at 200 entries; see `truncated`. */
+  added_capabilities: GraphNode[];
+  removed_capabilities: GraphNode[];
+  changed_state: RevisionStateChange[];
+  dependency_changes: RevisionDependencyChange[];
+  invariant_impact: GraphNode[];
+  runtime_changes: GraphNode[];
+  quality_changes: RevisionQualityChange[];
+  coverage_changes: RevisionCoverageChange[];
   truncated: boolean;
 }
 
