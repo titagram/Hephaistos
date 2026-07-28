@@ -79,28 +79,17 @@ def test_project_linked_task_is_still_local_without_remote_link(
 ):
     """The CLI admission path does not treat project_id as a remote link."""
     monkeypatch.setattr("hermes_cli.profiles.profile_exists", lambda _name: True)
-    client_attempts = []
-    sync_calls = []
-    admission_contexts = []
-    real_sync = kanban_backend.maybe_run_kanban_sync
-    real_admission = hades_kanban_sync.make_remote_admission
 
-    def _forbid_backend_client(*_args, **_kwargs):
-        client_attempts.append("attempted")
-        raise AssertionError("a project-linked local card must not construct a backend client")
+    def _forbid_remote_edge(*_args, **_kwargs):
+        raise AssertionError(
+            "a project-linked local card must not use a backend client, "
+            "sync, or remote admission"
+        )
 
-    def _tracked_sync(**kwargs):
-        sync_calls.append(kwargs)
-        return real_sync(**kwargs)
-
-    def _tracked_admission(conn, *, context):
-        admission_contexts.append(context)
-        return real_admission(conn, context=context)
-
-    monkeypatch.setattr(kanban_backend, "make_kanban_client", _forbid_backend_client)
-    monkeypatch.setattr(hades_kanban_sync, "_make_remote_client", _forbid_backend_client)
-    monkeypatch.setattr(kanban_backend, "maybe_run_kanban_sync", _tracked_sync)
-    monkeypatch.setattr(hades_kanban_sync, "make_remote_admission", _tracked_admission)
+    monkeypatch.setattr(kanban_backend, "make_kanban_client", _forbid_remote_edge)
+    monkeypatch.setattr(hades_kanban_sync, "_make_remote_client", _forbid_remote_edge)
+    monkeypatch.setattr(kanban_backend, "maybe_run_kanban_sync", _forbid_remote_edge)
+    monkeypatch.setattr(hades_kanban_sync, "make_remote_admission", _forbid_remote_edge)
     spawned = []
     monkeypatch.setattr(
         kb,
@@ -122,9 +111,6 @@ def test_project_linked_task_is_still_local_without_remote_link(
 
     assert [entry["task_id"] for entry in payload["spawned"]] == [task_id]
     assert spawned == [task_id]
-    assert sync_calls == [{"board": None}]
-    assert [context.mode for context in admission_contexts] == ["local_only"]
-    assert client_attempts == []
     assert kb.get_remote_link(kanban_conn, task_id) is None
     assert f"Completed {task_id}" in kc.run_slash(
         f"complete {task_id} --result 'local project complete'"
