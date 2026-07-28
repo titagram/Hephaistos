@@ -7,6 +7,8 @@ import json
 import os
 import stat
 import shutil
+import threading
+from contextlib import contextmanager
 from dataclasses import asdict, replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -1342,6 +1344,22 @@ def _tree_bytes(root: Path) -> dict[str, bytes]:
     }
 
 
+def _filesystem_bytes(root: Path) -> dict[str, tuple[str, bytes | int]]:
+    """Capture every visible path so rejected operations prove true no-op."""
+    if not root.exists():
+        return {}
+    snapshot: dict[str, tuple[str, bytes | int]] = {}
+    for path in sorted(root.rglob("*")):
+        relative = str(path.relative_to(root))
+        if path.is_symlink():
+            snapshot[relative] = ("symlink", os.readlink(path))
+        elif path.is_dir():
+            snapshot[relative] = ("directory", stat.S_IMODE(path.stat().st_mode))
+        elif path.is_file():
+            snapshot[relative] = ("file", path.read_bytes())
+    return snapshot
+
+
 def _suggestion_digest(record: object) -> str:
     """Independently derive the public optimistic-concurrency digest."""
     assert isinstance(record, SuggestionRecord)
@@ -1375,6 +1393,57 @@ def test_initialize_is_absence_only_and_preserves_existing_or_corrupt_bytes(
     assert _tree_bytes(corrupt) == corrupt_before
 
 
+@pytest.mark.parametrize("kind", ["valid", "corrupt"])
+def test_initialize_rechecks_concurrent_creation_inside_the_initialization_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+) -> None:
+    """A root created after the first observation must not be initialized or repaired."""
+    root = tmp_path / f"concurrent-{kind}"
+    original_probe = dashboard_module.probe_organism_identity
+    first_probe = threading.Event()
+    continue_initialize = threading.Event()
+    calls = 0
+
+    def paused_probe(path: Path):
+        nonlocal calls
+        calls += 1
+        result = original_probe(path)
+        if calls == 1:
+            first_probe.set()
+            assert continue_initialize.wait(timeout=5)
+        return result
+
+    monkeypatch.setattr(dashboard_module, "probe_organism_identity", paused_probe)
+    outcome: list[BaseException | dict[str, object]] = []
+
+    def initialize() -> None:
+        try:
+            outcome.append(EvolutionDashboardService(root).initialize())
+        except BaseException as exc:  # Assert the public failure below.
+            outcome.append(exc)
+
+    worker = threading.Thread(target=initialize)
+    worker.start()
+    assert first_probe.wait(timeout=5)
+    if kind == "valid":
+        create_organism_identity(root)
+    else:
+        root.mkdir(mode=0o700)
+        (root / "identity.json").write_text("{not-json", encoding="utf-8")
+    before = _filesystem_bytes(root)
+    continue_initialize.set()
+    worker.join(timeout=10)
+    assert not worker.is_alive()
+    assert len(outcome) == 1
+    assert isinstance(outcome[0], EvolutionDashboardError)
+    assert outcome[0].code == (
+        "organism_exists" if kind == "valid" else "organism_corrupt"
+    )
+    assert _filesystem_bytes(root) == before
+
+
 @pytest.mark.parametrize("enabled", [False, True])
 def test_observer_toggle_rejects_stale_snapshot_without_writing(
     tmp_path: Path, enabled: bool
@@ -1394,6 +1463,74 @@ def test_observer_toggle_rejects_stale_snapshot_without_writing(
 
     assert _tree_bytes(root) == before
     assert identity.generation_id
+
+
+def test_stale_mutation_does_not_rewrite_lifecycle_lock_diagnostics(
+    tmp_path: Path,
+) -> None:
+    """Acquiring a diagnostic-writing lock before stale rejection mutates state."""
+    root = tmp_path / "organism"
+    ensure_global_lifecycle_initialized(root)
+    lock_path = root / "evolution" / ".lifecycle.lock"
+    before = lock_path.read_bytes()
+    identity = probe_organism_identity(root)
+    assert identity is not None
+
+    with pytest.raises(EvolutionDashboardConflict, match="snapshot_changed"):
+        EvolutionDashboardService(root).set_observer_enabled(
+            organism_id=identity.organism_id,
+            expected_snapshot_digest="0" * 64,
+            enabled=False,
+        )
+
+    assert lock_path.read_bytes() == before
+
+
+def test_mutation_revalidates_a_snapshot_changed_after_optimistic_precheck(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The second check under the lock catches a competing change after precheck."""
+    root = tmp_path / "organism"
+    ensure_global_lifecycle_initialized(root)
+    identity = probe_organism_identity(root)
+    assert identity is not None
+    store = TelosStore(root)
+    first_revision = _dashboard_telos(identity, parent_digest=None)
+    next_revision = replace(
+        _dashboard_telos(identity, parent_digest=first_revision.canonical_digest),
+        purpose="Provide safe, reliable, and privacy-preserving assistance.",
+    )
+    store.save_revision(first_revision)
+    store.save_revision(next_revision)
+    active = root / "telos" / "active.json"
+    active.write_text(
+        json.dumps({"digest": first_revision.canonical_digest}), encoding="utf-8"
+    )
+    service = EvolutionDashboardService(root)
+    expected = service.snapshot()["snapshot_digest"]
+    original_lock = dashboard_module.lifecycle_lock
+    changed = False
+
+    @contextmanager
+    def concurrent_change(*, home: Path, timeout_seconds: float):
+        nonlocal changed
+        if not changed:
+            changed = True
+            active.write_text(
+                json.dumps({"digest": next_revision.canonical_digest}), encoding="utf-8"
+            )
+        with original_lock(home=home, timeout_seconds=timeout_seconds) as lease:
+            yield lease
+
+    monkeypatch.setattr(dashboard_module, "lifecycle_lock", concurrent_change)
+    with pytest.raises(EvolutionDashboardConflict, match="snapshot_changed"):
+        service.set_observer_enabled(
+            organism_id=identity.organism_id,
+            expected_snapshot_digest=expected,
+            enabled=False,
+        )
+    assert changed
 
 
 def test_mutation_context_returns_only_full_identity_and_current_digest(
@@ -1528,6 +1665,30 @@ def test_telos_draft_validates_active_parent_and_document_before_any_write(
             document=invalid,
         )
     assert _tree_bytes(root) == before
+    ledger.connection.close()
+
+
+def test_stale_telos_parent_with_missing_telos_is_a_byte_and_filesystem_noop(
+    tmp_path: Path,
+) -> None:
+    """A stale draft must not recreate a missing Telos tree before rejection."""
+    root = tmp_path / "organism"
+    identity, ledger, _ = _seed_governance_state(root)
+    active = TelosStore(root).get_active_digest()
+    assert active is not None
+    shutil.rmtree(root / "telos")
+    service = EvolutionDashboardService(root)
+    expected = service.snapshot()["snapshot_digest"]
+    before = _filesystem_bytes(root)
+
+    with pytest.raises(EvolutionDashboardConflict, match="telos_active_changed"):
+        service.save_telos_draft(
+            organism_id=identity.organism_id,
+            expected_snapshot_digest=expected,
+            document=asdict(_dashboard_telos(identity, parent_digest=active)),
+        )
+
+    assert _filesystem_bytes(root) == before
     ledger.connection.close()
 
 

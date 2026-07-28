@@ -9,7 +9,6 @@ or raw SQL as authority.
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 from dataclasses import dataclass
@@ -261,47 +260,35 @@ def perform_telos_transition(
             message="chain verification fields mismatch",
         )
 
-    # ── Atomically publish active/lkg pointer ──
-    now = _utcnow()
-
-    if action == "activate":
-        if store.active_pointer.exists():
-            current_active = json.loads(
-                store.active_pointer.read_text(encoding="utf-8")
+    # ── Atomically publish active/lkg pointer through retained descriptors ──
+    # The request was validated above without mutating authority records.  The
+    # descriptor pass repeats the revision proof immediately before the first
+    # Telos write, so a telos/revisions replacement cannot redirect it.
+    try:
+        with store.open_mutation() as mutation:
+            anchored_revision = mutation.revision(telos_digest)
+            if (
+                anchored_revision.canonical_digest != telos_digest
+                or anchored_revision.organism_id != organism_id
+            ):
+                return TelosTransitionResult(
+                    status="rejected",
+                    request_id=request_id,
+                    message="revision changed before publication",
+                )
+            mutation.transition(
+                digest=telos_digest,
+                grant_id=grant_id,
+                action=action,
+                now=_utcnow(),
             )
-            lkg_data = {"digest": current_active["digest"]}
-            tmp_lkg = store.lkg_pointer.with_suffix(".json.tmp")
-            tmp_lkg.write_text(
-                json.dumps(lkg_data, sort_keys=True), encoding="utf-8"
-            )
-            tmp_lkg.chmod(0o600)
-            tmp_lkg.rename(store.lkg_pointer)
-
-        active_data = {
-            "digest": telos_digest,
-            "activated_at": now,
-            "grant_id": grant_id,
-        }
-        tmp = store.active_pointer.with_suffix(".json.tmp")
-        tmp.write_text(
-            json.dumps(active_data, sort_keys=True), encoding="utf-8"
+    except TelosStoreError as exc:
+        logger.warning("Telos pointer publication failed safely: %s", exc)
+        return TelosTransitionResult(
+            status="rejected",
+            request_id=request_id,
+            message="pointer publication failed",
         )
-        tmp.chmod(0o600)
-        tmp.rename(store.active_pointer)
-
-    elif action == "rollback":
-        active_data = {
-            "digest": telos_digest,
-            "activated_at": now,
-            "grant_id": grant_id,
-            "rollback": True,
-        }
-        tmp = store.active_pointer.with_suffix(".json.tmp")
-        tmp.write_text(
-            json.dumps(active_data, sort_keys=True), encoding="utf-8"
-        )
-        tmp.chmod(0o600)
-        tmp.rename(store.active_pointer)
 
     return TelosTransitionResult(
         status="approved",

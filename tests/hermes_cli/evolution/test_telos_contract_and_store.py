@@ -1,8 +1,10 @@
 """Tests for Telos contract, validation, and store — no host-authorised pointer mutation."""
 import hashlib
+import os
 import pytest
 from pathlib import Path
 
+import hermes_cli.evolution.telos_store as telos_store_module
 from hermes_cli.evolution.telos_contract import (
     CapabilityDirection,
     DesiredTrait,
@@ -106,3 +108,51 @@ def test_telos_store_get_missing_revision(tmp_path: Path, monkeypatch):
     store = TelosStore(org_root)
     with pytest.raises(TelosStoreError, match="Telos revision not found"):
         store.get_revision("f" * 64)
+
+
+def test_save_revision_telos_directory_swap_cannot_redirect_revision_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A revision write must be descriptor-anchored rather than path-following."""
+    root = tmp_path / "organism"
+    store = TelosStore(root)
+    revision = create_sample_telos()
+    target = root / "telos" / "revisions" / f"{revision.canonical_digest}.json"
+    external_telos = tmp_path / "external-telos"
+    (external_telos / "revisions").mkdir(parents=True)
+    external_target = external_telos / "revisions" / target.name
+    swapped = False
+    original_open_directory = telos_store_module._TelosMutation._open_directory
+
+    def racing_open_directory(self, parent_descriptor, path, name):
+        nonlocal swapped
+        if name == "revisions" and not swapped:
+            swapped = True
+            (root / "telos" / "revisions").rename(
+                root / "telos" / "retained-revisions"
+            )
+            os.symlink(
+                external_telos / "revisions",
+                root / "telos" / "revisions",
+                target_is_directory=True,
+            )
+        return original_open_directory(self, parent_descriptor, path, name)
+
+    monkeypatch.setattr(
+        telos_store_module._TelosMutation,
+        "_open_directory",
+        racing_open_directory,
+    )
+    try:
+        with pytest.raises(TelosStoreError):
+            store.save_revision(revision)
+
+        assert swapped
+        assert not external_target.exists()
+    finally:
+        live_revisions = root / "telos" / "revisions"
+        if os.path.islink(live_revisions):
+            os.unlink(live_revisions)
+        retained = root / "telos" / "retained-revisions"
+        if os.path.lexists(retained):
+            os.rename(retained, live_revisions)

@@ -11,7 +11,7 @@ import stat
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterator, Literal, TypedDict, cast
+from typing import Any, Callable, Iterator, Literal, TypedDict, cast
 
 from agent.redact import redact_sensitive_text
 from hermes_constants import get_organism_home
@@ -28,7 +28,12 @@ from .dashboard_jobs import EvolutionJob, EvolutionJobManager
 from .global_config import load_global_config, save_global_config
 from .ledger import EvolutionLedgerError, StoredEvent
 from .lifecycle_global import ensure_global_lifecycle_initialized
-from .locking import LifecycleLockError, LifecycleLockTimeout, lifecycle_lock
+from .locking import (
+    LifecycleLockError,
+    LifecycleLockTimeout,
+    initialization_lock,
+    lifecycle_lock,
+)
 from .organism_identity import (
     OrganismIdentity,
     load_organism_identity,
@@ -449,24 +454,35 @@ class EvolutionDashboardService:
         rather than silently receiving another operator's organism.
         """
         try:
-            identity = probe_organism_identity(self.root)
-        except Exception:
-            raise EvolutionDashboardError("organism_corrupt") from None
-        if identity is not None:
-            raise EvolutionDashboardConflict("organism_exists")
-        try:
-            if self.root.exists():
-                # A root with no verifiable identity may contain partial or
-                # hostile material.  Initialization must never repair it.
-                raise EvolutionDashboardError("organism_corrupt")
-        except OSError:
-            raise EvolutionDashboardError("organism_corrupt") from None
+            with initialization_lock(organism_root=self.root, timeout_seconds=10):
+                try:
+                    identity = probe_organism_identity(self.root)
+                except Exception:
+                    raise EvolutionDashboardError("organism_corrupt") from None
+                if identity is not None:
+                    raise EvolutionDashboardConflict("organism_exists")
+                try:
+                    if self.root.exists():
+                        # A concurrent creator may have produced a valid
+                        # identity between the first probe and this check.
+                        try:
+                            appeared = probe_organism_identity(self.root)
+                        except Exception:
+                            raise EvolutionDashboardError("organism_corrupt") from None
+                        if appeared is not None:
+                            raise EvolutionDashboardConflict("organism_exists")
+                        # A root with no verifiable identity may contain
+                        # partial or hostile material.  Never repair it.
+                        raise EvolutionDashboardError("organism_corrupt")
+                except OSError:
+                    raise EvolutionDashboardError("organism_corrupt") from None
 
-        try:
-            ensure_global_lifecycle_initialized(self.root)
-            created = load_organism_identity(self.root)
+                ensure_global_lifecycle_initialized(self.root)
+                created = load_organism_identity(self.root)
         except EvolutionDashboardError:
             raise
+        except (LifecycleLockTimeout, LifecycleLockError):
+            raise EvolutionDashboardError("evolution_unavailable") from None
         except Exception:
             raise EvolutionDashboardError("evolution_unavailable") from None
         return {
@@ -493,6 +509,7 @@ class EvolutionDashboardService:
         *,
         organism_id: str,
         expected_snapshot_digest: str,
+        precondition: Callable[[OrganismIdentity], None] | None = None,
     ) -> Iterator[OrganismIdentity]:
         """Hold the lifecycle lock through full optimistic-concurrency proof."""
         if not isinstance(organism_id, str) or not isinstance(
@@ -501,12 +518,30 @@ class EvolutionDashboardService:
             raise EvolutionDashboardConflict("snapshot_changed")
         # ``lifecycle_lock`` only accepts an already safe local lifecycle
         # root.  Probe first without creating or repairing a missing root.
+        def validate(identity: OrganismIdentity) -> None:
+            if identity.organism_id != organism_id:
+                raise EvolutionDashboardConflict("organism_changed")
+            snapshot = self.snapshot()
+            # Corrupt identity/artifacts are never mutation targets.  A
+            # partial or blocked operational view can still need the governed
+            # repair actions exposed here, so its digest remains the boundary.
+            if snapshot["state"] == "corrupt":
+                raise EvolutionDashboardError("evolution_unavailable")
+            if snapshot["snapshot_digest"] != expected_snapshot_digest:
+                raise EvolutionDashboardConflict("snapshot_changed")
+            if precondition is not None:
+                precondition(identity)
+
         try:
             preliminary = probe_organism_identity(self.root)
         except Exception:
             raise EvolutionDashboardError("organism_corrupt") from None
         if preliminary is None:
             raise EvolutionDashboardConflict("organism_changed")
+        # Reject an obsolete request before taking a lock whose diagnostics
+        # would otherwise become an externally observable write.  This pass is
+        # advisory only; the identical proof below the lease is authoritative.
+        validate(preliminary)
 
         try:
             with lifecycle_lock(home=self.root, timeout_seconds=10):
@@ -514,18 +549,7 @@ class EvolutionDashboardService:
                     identity = load_organism_identity(self.root)
                 except Exception:
                     raise EvolutionDashboardError("organism_corrupt") from None
-                if identity.organism_id != organism_id:
-                    raise EvolutionDashboardConflict("organism_changed")
-                snapshot = self.snapshot()
-                # Corrupt identity/artifacts are never mutation targets.  A
-                # partial or blocked operational view can still need the
-                # governed repair actions exposed here (for example rebuild
-                # or saving an inert Telos draft), so its digest remains the
-                # concurrency boundary rather than a blanket denial.
-                if snapshot["state"] == "corrupt":
-                    raise EvolutionDashboardError("evolution_unavailable")
-                if snapshot["snapshot_digest"] != expected_snapshot_digest:
-                    raise EvolutionDashboardConflict("snapshot_changed")
+                validate(identity)
                 yield identity
         except (LifecycleLockTimeout, LifecycleLockError):
             raise EvolutionDashboardError("evolution_unavailable") from None
@@ -633,17 +657,27 @@ class EvolutionDashboardService:
         except Exception:
             raise EvolutionDashboardError("invalid_telos_draft") from None
 
+        def current_parent(identity: OrganismIdentity) -> None:
+            if revision.organism_id != identity.organism_id:
+                raise EvolutionDashboardConflict("organism_changed")
+            # This preflight intentionally binds to existing paths only.  In
+            # particular it must not instantiate TelosStore(), whose legacy
+            # constructor creates a missing Telos hierarchy.
+            store = TelosStore.from_verified_read_root(self.root)
+            if revision.parent_digest != store.get_active_digest():
+                raise EvolutionDashboardConflict("telos_active_changed")
+
         with self._validated_mutation(
             organism_id=organism_id,
             expected_snapshot_digest=expected_snapshot_digest,
+            precondition=current_parent,
         ) as identity:
-            if revision.organism_id != identity.organism_id:
-                raise EvolutionDashboardConflict("organism_changed")
             try:
-                store = TelosStore(self.root)
-                if revision.parent_digest != store.get_active_digest():
-                    raise EvolutionDashboardConflict("telos_active_changed")
-                store.save_revision(revision)
+                store = TelosStore.from_verified_read_root(self.root)
+                with store.open_mutation() as mutation:
+                    if revision.parent_digest != mutation.active_digest():
+                        raise EvolutionDashboardConflict("telos_active_changed")
+                    mutation.save_revision(revision)
             except EvolutionDashboardConflict:
                 raise
             except Exception:

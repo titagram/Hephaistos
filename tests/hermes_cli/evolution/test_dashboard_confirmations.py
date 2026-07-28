@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
+import hermes_cli.evolution.telos_store as telos_store_module
 from hermes_cli.evolution.dashboard_service import EvolutionDashboardConflict, EvolutionDashboardService
 from hermes_cli.evolution.lifecycle_global import ensure_global_lifecycle_initialized
 from hermes_cli.evolution.organism_identity import OrganismIdentity, probe_organism_identity
@@ -183,3 +185,53 @@ def test_transition_rejects_target_mismatch_expiry_and_replay(tmp_path: Path, mo
     with pytest.raises(EvolutionDashboardConflict, match="confirmation_not_found"):
         _confirm(store, prepared, expected)
     assert current.canonical_digest != target.canonical_digest
+
+
+def test_confirmation_telos_directory_swap_cannot_redirect_pointer_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A path swap after revision validation must fail before an external pointer write."""
+    root, _, _, target, expected, store, prepared = _prepared_transition(tmp_path)
+    external_telos = tmp_path / "external-telos"
+    external_revisions = external_telos / "revisions"
+    external_revisions.mkdir(parents=True)
+    revision_path = root / "telos" / "revisions" / f"{target.canonical_digest}.json"
+    (external_revisions / revision_path.name).write_bytes(revision_path.read_bytes())
+    active = root / "telos" / "active.json"
+    active_before = active.read_bytes()
+    swapped = False
+    original_open_directory = telos_store_module._TelosMutation._open_directory
+
+    def racing_open_directory(self, parent_descriptor, path, name):
+        nonlocal swapped
+        if name == "revisions" and not swapped:
+            swapped = True
+            (root / "telos" / "revisions").rename(
+                root / "telos" / "retained-revisions"
+            )
+            os.symlink(
+                external_revisions,
+                root / "telos" / "revisions",
+                target_is_directory=True,
+            )
+        return original_open_directory(self, parent_descriptor, path, name)
+
+    monkeypatch.setattr(
+        telos_store_module._TelosMutation,
+        "_open_directory",
+        racing_open_directory,
+    )
+    try:
+        with pytest.raises(EvolutionDashboardConflict, match="telos_transition_rejected"):
+            _confirm(store, prepared, expected)
+
+        assert swapped
+        assert active.read_bytes() == active_before
+    finally:
+        live_revisions = root / "telos" / "revisions"
+        if os.path.islink(live_revisions):
+            os.unlink(live_revisions)
+        retained = root / "telos" / "retained-revisions"
+        if os.path.lexists(retained):
+            os.rename(retained, live_revisions)

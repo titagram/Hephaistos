@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import errno
+import hashlib
 import json
 import math
 import os
@@ -331,6 +332,69 @@ def _verify_paths(
         raise
     except (OSError, TypeError, NotImplementedError) as exc:
         raise LifecycleLockError("unsafe_lifecycle_lock_path") from exc
+
+
+@contextmanager
+def initialization_lock(
+    *,
+    organism_root: Path,
+    timeout_seconds: float = 30.0,
+) -> Iterator[None]:
+    """Serialize an organism-root creation before that root exists.
+
+    The normal lifecycle lease is deliberately rooted *inside* the organism,
+    so using it to protect initialization would create the very hierarchy the
+    caller is trying to validate.  This namespace lock instead lives under
+    the nearest already-private ancestor and uses a digest of the requested
+    absolute root as its fixed name.  It writes no diagnostics.
+    """
+    timeout = _validate_timeout(timeout_seconds)
+    if fcntl is None and msvcrt is None:
+        raise LifecycleLockError("native_lifecycle_lock_unavailable")
+    target = Path(os.path.abspath(organism_root))
+    parent = target.parent
+    while True:
+        try:
+            parent_info = parent.lstat()
+            _validate_directory(parent_info)
+            break
+        except FileNotFoundError:
+            if parent == parent.parent:
+                raise LifecycleLockError("unsafe_lifecycle_lock_path")
+            parent = parent.parent
+        except (OSError, TypeError, NotImplementedError) as exc:
+            raise LifecycleLockError("unsafe_lifecycle_lock_path") from exc
+
+    parent_descriptor: int | None = None
+    descriptor: int | None = None
+    acquired = False
+    try:
+        parent_descriptor = _open_directory(parent, parent_info)
+        name = ".evolution-init-" + hashlib.sha256(
+            os.fsencode(str(target))
+        ).hexdigest() + ".lock"
+        descriptor = _open_lock_file(parent / name, parent_descriptor)
+        _acquire(descriptor, timeout)
+        acquired = True
+        # The ancestor itself must still be the retained directory before a
+        # caller begins creating its child hierarchy.
+        linked = parent.lstat()
+        opened = os.fstat(parent_descriptor)
+        _validate_directory(linked)
+        _validate_directory(opened)
+        if not _same_inode(linked, opened):
+            _fail()
+        yield
+    finally:
+        if acquired and descriptor is not None:
+            try:
+                _unlock(descriptor)
+            except OSError as exc:
+                raise LifecycleLockError("native_lifecycle_unlock_failure") from exc
+        if descriptor is not None:
+            os.close(descriptor)
+        if parent_descriptor is not None:
+            os.close(parent_descriptor)
 
 
 @contextmanager
