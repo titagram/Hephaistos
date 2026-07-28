@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 from hermes_cli.evolution.dashboard_service import EvolutionDashboardService
@@ -11,6 +12,15 @@ from hermes_cli.evolution.organism_identity import (
     OrganismIdentity,
     create_organism_identity,
     probe_organism_identity,
+)
+from hermes_cli.evolution.telos_contract import (
+    CapabilityDirection,
+    DesiredTrait,
+    Priority,
+    ProactivityPolicy,
+    Prohibition,
+    SuccessIndicator,
+    TelosRevision,
 )
 from hermes_cli.gnothi.contract import new_artifact
 from hermes_cli.gnothi.store import OrganismRevisionStore
@@ -48,6 +58,50 @@ def _current_coverage() -> dict[str, dict[str, object]]:
         name: {"status": "current", "fingerprint": f"sha256:{name}"}
         for name in ("source", "capabilities", "runtime", "contracts")
     }
+
+
+def _write_telos(root: Path, identity: OrganismIdentity) -> str:
+    revision = TelosRevision(
+        schema_version=1,
+        organism_id=identity.organism_id,
+        parent_digest=None,
+        purpose="Assist the user while preserving privacy and quality.",
+        desired_traits=(
+            DesiredTrait(
+                "reliable", "Produce reliable results.", ("trait.reliable",), 5
+            ),
+        ),
+        capability_directions=(
+            CapabilityDirection(
+                "local", "Prefer local operations.", ("capability.local",), 4
+            ),
+        ),
+        priorities=(
+            Priority("safety", "Prioritize user safety.", ("priority.safety",), 5),
+        ),
+        tradeoffs=(),
+        prohibitions=(
+            Prohibition(
+                "no_leaks", "Do not disclose private data.", ("prohibition.privacy",), 5
+            ),
+        ),
+        proactivity_policy=ProactivityPolicy(
+            "bounded", "Offer bounded helpful suggestions.", ("proactivity.bounded",), 3
+        ),
+        success_indicators=(
+            SuccessIndicator(
+                "complete", "Complete requested tasks.", ("indicator.complete",), 4
+            ),
+        ),
+    )
+    digest = revision.canonical_digest
+    revisions = root / "revisions"
+    revisions.mkdir(parents=True)
+    (revisions / f"{digest}.json").write_text(
+        revision.to_canonical_json(), encoding="utf-8"
+    )
+    (root / "active.json").write_text(json.dumps({"digest": digest}), encoding="utf-8")
+    return digest
 
 
 def test_snapshot_missing_is_bounded_and_non_mutating(tmp_path: Path) -> None:
@@ -157,3 +211,54 @@ def test_snapshot_coherent_state_is_public_stable_and_digest_ignores_observed_at
     assert first["observed_at"] != second["observed_at"]
     assert first["snapshot_digest"] == second["snapshot_digest"]
     assert identity.organism_id not in json.dumps(first)
+
+
+def test_snapshot_rejects_telos_directory_symlink(tmp_path: Path) -> None:
+    """A substituted Telos parent cannot make external data appear ready."""
+    root = tmp_path / "organism"
+    identity = create_organism_identity(root)
+    external_telos = tmp_path / "external-telos"
+    _write_telos(external_telos, identity)
+    shutil.rmtree(root / "telos")
+    (root / "telos").symlink_to(external_telos, target_is_directory=True)
+
+    result = EvolutionDashboardService(root).snapshot()
+
+    assert result["telos"] == {"state": "corrupt", "active_digest_prefix": None}
+    assert "telos_pointer_invalid" in result["diagnostics"]
+
+
+def test_snapshot_rejects_telos_revisions_directory_symlink(tmp_path: Path) -> None:
+    """A substituted revision parent cannot make an external revision active."""
+    root = tmp_path / "organism"
+    identity = create_organism_identity(root)
+    external_telos = tmp_path / "external-telos"
+    digest = _write_telos(external_telos, identity)
+    telos = root / "telos"
+    shutil.rmtree(telos / "revisions")
+    (telos / "active.json").write_text(json.dumps({"digest": digest}), encoding="utf-8")
+    (telos / "revisions").symlink_to(
+        external_telos / "revisions", target_is_directory=True
+    )
+
+    result = EvolutionDashboardService(root).snapshot()
+
+    assert result["telos"] == {"state": "corrupt", "active_digest_prefix": None}
+    assert "telos_pointer_invalid" in result["diagnostics"]
+
+
+def test_snapshot_rejects_non_directory_telos_revisions_parent(tmp_path: Path) -> None:
+    """Telos revision storage must remain a directory, not an arbitrary file."""
+    root = tmp_path / "organism"
+    identity = create_organism_identity(root)
+    external_telos = tmp_path / "external-telos"
+    digest = _write_telos(external_telos, identity)
+    telos = root / "telos"
+    shutil.rmtree(telos / "revisions")
+    (telos / "active.json").write_text(json.dumps({"digest": digest}), encoding="utf-8")
+    (telos / "revisions").write_text("not a directory", encoding="utf-8")
+
+    result = EvolutionDashboardService(root).snapshot()
+
+    assert result["telos"] == {"state": "corrupt", "active_digest_prefix": None}
+    assert "telos_pointer_invalid" in result["diagnostics"]

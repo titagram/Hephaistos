@@ -81,8 +81,92 @@ def _regular_file_exists(path: Path) -> bool:
     return stat.S_ISREG(info.st_mode) and not stat.S_ISLNK(info.st_mode)
 
 
-def _read_regular_json(path: Path) -> dict[str, Any] | None:
-    """Read one bounded JSON object without following a substituted path."""
+def _same_inode(left: os.stat_result, right: os.stat_result) -> bool:
+    return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
+
+
+def _directory_read_flags() -> int:
+    try:
+        return os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    except AttributeError as exc:
+        raise _PublicReadError("unsafe") from exc
+
+
+def _file_read_flags() -> int:
+    try:
+        return os.O_RDONLY | os.O_NOFOLLOW
+    except AttributeError as exc:
+        raise _PublicReadError("unsafe") from exc
+
+
+def _open_regular_file_beneath_root(root: Path, path: Path) -> int | None:
+    """Open a regular file through retained, non-symlink directory descriptors."""
+    try:
+        relative = path.relative_to(root)
+    except ValueError as exc:
+        raise _PublicReadError("unsafe") from exc
+    if not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
+        raise _PublicReadError("unsafe")
+
+    descriptor: int | None = None
+    try:
+        expected_root = root.lstat()
+        if stat.S_ISLNK(expected_root.st_mode) or not stat.S_ISDIR(
+            expected_root.st_mode
+        ):
+            raise _PublicReadError("unsafe")
+        descriptor = os.open(root, _directory_read_flags())
+        opened_root = os.fstat(descriptor)
+        if not stat.S_ISDIR(opened_root.st_mode) or not _same_inode(
+            expected_root, opened_root
+        ):
+            raise _PublicReadError("unsafe")
+
+        for part in relative.parts[:-1]:
+            expected = os.stat(part, dir_fd=descriptor, follow_symlinks=False)
+            if stat.S_ISLNK(expected.st_mode) or not stat.S_ISDIR(expected.st_mode):
+                raise _PublicReadError("unsafe")
+            child = os.open(part, _directory_read_flags(), dir_fd=descriptor)
+            try:
+                opened = os.fstat(child)
+                if not stat.S_ISDIR(opened.st_mode) or not _same_inode(
+                    expected, opened
+                ):
+                    raise _PublicReadError("unsafe")
+            except BaseException:
+                os.close(child)
+                raise
+            parent_descriptor = descriptor
+            descriptor = child
+            os.close(parent_descriptor)
+
+        leaf = relative.name
+        expected = os.stat(leaf, dir_fd=descriptor, follow_symlinks=False)
+        if stat.S_ISLNK(expected.st_mode) or not stat.S_ISREG(expected.st_mode):
+            raise _PublicReadError("unsafe")
+        file_descriptor = os.open(leaf, _file_read_flags(), dir_fd=descriptor)
+        try:
+            opened = os.fstat(file_descriptor)
+            if not stat.S_ISREG(opened.st_mode) or not _same_inode(expected, opened):
+                raise _PublicReadError("unsafe")
+            return file_descriptor
+        except BaseException:
+            os.close(file_descriptor)
+            raise
+    except FileNotFoundError:
+        return None
+    except _PublicReadError:
+        raise
+    except (OSError, TypeError, NotImplementedError) as exc:
+        raise _PublicReadError("unreadable") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _open_regular_file(path: Path, root: Path | None) -> int | None:
+    if root is not None:
+        return _open_regular_file_beneath_root(root, path)
     try:
         expected = path.lstat()
     except FileNotFoundError:
@@ -92,20 +176,31 @@ def _read_regular_json(path: Path) -> dict[str, Any] | None:
     if stat.S_ISLNK(expected.st_mode) or not stat.S_ISREG(expected.st_mode):
         raise _PublicReadError("unsafe")
 
-    flags = os.O_RDONLY
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
     try:
-        descriptor = os.open(path, flags)
+        descriptor = os.open(path, _file_read_flags())
     except OSError as exc:
         raise _PublicReadError("unreadable") from exc
     try:
         current = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(current.st_mode)
-            or (current.st_dev, current.st_ino) != (expected.st_dev, expected.st_ino)
+        if not stat.S_ISREG(current.st_mode) or (current.st_dev, current.st_ino) != (
+            expected.st_dev,
+            expected.st_ino,
         ):
             raise _PublicReadError("unsafe")
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _read_regular_json(
+    path: Path, *, root: Path | None = None
+) -> dict[str, Any] | None:
+    """Read one bounded JSON object without following a substituted path."""
+    descriptor = _open_regular_file(path, root)
+    if descriptor is None:
+        return None
+    try:
         chunks: list[bytes] = []
         size = 0
         while chunk := os.read(descriptor, 64 * 1024):
@@ -302,13 +397,16 @@ class EvolutionDashboardService:
     ) -> dict[str, Any]:
         pointer_path = self.root / "telos" / "active.json"
         try:
-            pointer = _read_regular_json(pointer_path)
+            pointer = _read_regular_json(pointer_path, root=self.root)
             if pointer is None:
                 return self._missing_telos()
             digest = pointer.get("digest")
             if not isinstance(digest, str) or _DIGEST.fullmatch(digest) is None:
                 raise _PublicReadError("invalid_digest")
-            revision = _read_regular_json(self.root / "telos" / "revisions" / f"{digest}.json")
+            revision = _read_regular_json(
+                self.root / "telos" / "revisions" / f"{digest}.json",
+                root=self.root,
+            )
             if revision is None:
                 raise _PublicReadError("missing_revision")
             parsed = telos_revision_from_dict(revision)
