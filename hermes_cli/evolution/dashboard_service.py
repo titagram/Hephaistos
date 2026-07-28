@@ -24,7 +24,7 @@ from hermes_cli.gnothi.store import OrganismRevisionStore
 from .bootstrap import evolution_state_kind
 from .blueprint_repository import BlueprintRepository
 from .contract import content_digest
-from .dashboard_jobs import EvolutionJob, EvolutionJobManager
+from .dashboard_jobs import EvolutionJob, EvolutionJobConflict, EvolutionJobManager
 from .global_config import load_global_config, save_global_config
 from .ledger import EvolutionLedgerError, StoredEvent
 from .lifecycle_global import ensure_global_lifecycle_initialized
@@ -622,6 +622,8 @@ class EvolutionDashboardService:
                 return self._jobs().submit_rebuild(
                     force=force, collector_names=selected
                 )
+            except EvolutionJobConflict:
+                raise
             except Exception:
                 raise EvolutionDashboardError("job_unavailable") from None
 
@@ -638,6 +640,8 @@ class EvolutionDashboardService:
         ):
             try:
                 return self._jobs().submit_observer_scan()
+            except EvolutionJobConflict:
+                raise
             except Exception:
                 raise EvolutionDashboardError("job_unavailable") from None
 

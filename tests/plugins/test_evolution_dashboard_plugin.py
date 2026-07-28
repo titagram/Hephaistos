@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -29,6 +30,18 @@ def _load_plugin(root: Path):
     return module
 
 
+def _load_production_plugin():
+    """Load the adapter as the server does, without its test-only root hook."""
+    plugin_file = PLUGIN_DIR / "plugin_api.py"
+    name = f"hermes_dashboard_plugin_evolution_production_test_{id(plugin_file)}"
+    spec = importlib.util.spec_from_file_location(name, plugin_file)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 @pytest.fixture
 def plugin(tmp_path, monkeypatch):
     home = tmp_path / ".hermes"
@@ -44,6 +57,27 @@ def plugin(tmp_path, monkeypatch):
 def client(plugin):
     app = FastAPI()
     app.include_router(plugin.router, prefix="/api/plugins/evolution")
+    with TestClient(app) as test_client:
+        yield test_client
+
+
+@pytest.fixture
+def production_plugin(tmp_path, monkeypatch):
+    """A real server root comes from Hermes storage, never a request field."""
+    home = tmp_path / ".hermes"
+    home.mkdir(mode=0o700)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    module = _load_production_plugin()
+    assert module._local_root is None
+    yield module
+    module.shutdown_for_tests()
+    sys.modules.pop(module.__name__, None)
+
+
+@pytest.fixture
+def production_client(production_plugin):
+    app = FastAPI()
+    app.include_router(production_plugin.router, prefix="/api/plugins/evolution")
     with TestClient(app) as test_client:
         yield test_client
 
@@ -130,6 +164,89 @@ def test_jobs_mutations_and_polling_use_digest_bound_context(client):
     assert stale.json() == {"code": "snapshot_changed"}
 
 
+@pytest.mark.parametrize(
+    ("path", "payload"),
+    [
+        ("organism-rebuild", {"force": False, "collectors": []}),
+        ("observer-scan", {}),
+    ],
+)
+def test_server_owned_root_reuses_one_job_manager_for_submission_and_polling(
+    production_client, production_plugin, path, payload
+):
+    """Dropping the production manager after submission must fail this poll contract."""
+    initialized = production_client.post("/api/plugins/evolution/initialize")
+    assert initialized.status_code == 200, initialized.text
+    context = _mutation_context(production_client)
+
+    submitted = production_client.post(
+        f"/api/plugins/evolution/jobs/{path}", json={**context, **payload}
+    )
+
+    assert submitted.status_code == 202, submitted.text
+    job_id = submitted.json()["job_id"]
+    assert production_plugin._manager is not None
+    assert production_plugin._manager_root == production_plugin._root()
+    polled = production_client.get(f"/api/plugins/evolution/jobs/{job_id}")
+    assert polled.status_code == 200, polled.text
+    assert polled.json()["job_id"] == job_id
+
+
+def test_job_conflicts_return_a_stable_conflict_response(client, plugin, monkeypatch):
+    """Rewrapping a live-job conflict as an unavailable server failure must fail."""
+    from hermes_cli.evolution.dashboard_jobs import EvolutionJobConflict
+
+    assert client.post("/api/plugins/evolution/initialize").status_code == 200
+    context = _mutation_context(client)
+
+    def conflict(*args, **kwargs):
+        raise EvolutionJobConflict("job_already_active")
+
+    monkeypatch.setattr(plugin.EvolutionJobManager, "submit_rebuild", conflict)
+    response = client.post(
+        "/api/plugins/evolution/jobs/organism-rebuild",
+        json={**context, "force": False, "collectors": []},
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {"code": "job_already_active"}
+
+
+def _valid_telos_document(organism_id: str) -> dict[str, object]:
+    item = {"id": "bounded", "statement": "Operate safely.", "tags": ["safe"], "priority": 3}
+    return {
+        "schema_version": 1,
+        "organism_id": organism_id,
+        "parent_digest": None,
+        "purpose": "Assist safely and reliably.",
+        "desired_traits": [item],
+        "capability_directions": [item],
+        "priorities": [item],
+        "tradeoffs": [],
+        "prohibitions": [item],
+        "proactivity_policy": item,
+        "success_indicators": [item],
+    }
+
+
+@pytest.mark.parametrize("untrusted_key", ["actor_ref", "ActorRef", "actor-ref", "session_ref", "command_name", "source_path", "url"])
+def test_telos_draft_rejects_untrusted_document_keys_at_every_depth(client, untrusted_key):
+    """Permitting host-control metadata in a Telos document must fail at the HTTP boundary."""
+    assert client.post("/api/plugins/evolution/initialize").status_code == 200
+    context = _mutation_context(client)
+    root_document = _valid_telos_document(context["organism_id"])
+    nested_document = deepcopy(root_document)
+    nested_document["desired_traits"][0][untrusted_key] = "host-metadata"
+
+    for document in ({**root_document, untrusted_key: "host-metadata"}, nested_document):
+        response = client.post(
+            "/api/plugins/evolution/telos/drafts",
+            json={**context, "document": document},
+        )
+        assert response.status_code == 422
+        assert response.json() == {"code": "invalid_request"}
+
+
 def test_mutation_models_forbid_unbounded_or_untrusted_fields(client):
     assert client.post("/api/plugins/evolution/initialize").status_code == 200
     context = _mutation_context(client)
@@ -160,8 +277,8 @@ def test_router_exposes_all_governed_mutation_endpoints(client):
         "/api/plugins/evolution/telos/drafts",
         json={**context, "document": {}},
     )
-    assert draft.status_code == 400
-    assert draft.json() == {"code": "invalid_telos_draft"}
+    assert draft.status_code == 422
+    assert draft.json() == {"code": "invalid_request"}
 
     prepare = client.post(
         "/api/plugins/evolution/telos/transitions/prepare",

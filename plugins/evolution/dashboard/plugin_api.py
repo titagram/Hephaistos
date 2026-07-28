@@ -15,8 +15,10 @@ from fastapi import APIRouter, FastAPI, Request, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+import hermes_constants
 from hermes_cli.evolution.dashboard_confirmations import DashboardConfirmationStore
 from hermes_cli.evolution.dashboard_jobs import (
+    EvolutionJobConflict,
     EvolutionJobError,
     EvolutionJobManager,
 )
@@ -74,6 +76,31 @@ class InitializeRequest(_StrictModel):
     """Intentionally empty: initialization has no client-selected target."""
 
 
+class TelosItemDocument(_StrictModel):
+    """The complete inert Telos item schema accepted from the dashboard."""
+
+    id: str
+    statement: str
+    tags: list[str] = Field(default_factory=list)
+    priority: int
+
+
+class TelosDocument(_StrictModel):
+    """The closed Telos revision shape; no host context crosses this boundary."""
+
+    schema_version: int
+    organism_id: str
+    parent_digest: str | None = None
+    purpose: str
+    desired_traits: list[TelosItemDocument]
+    capability_directions: list[TelosItemDocument]
+    priorities: list[TelosItemDocument]
+    tradeoffs: list[TelosItemDocument]
+    prohibitions: list[TelosItemDocument]
+    proactivity_policy: TelosItemDocument
+    success_indicators: list[TelosItemDocument]
+
+
 class MutationContext(_StrictModel):
     organism_id: str = Field(pattern=_UUID.pattern)
     expected_snapshot_digest: str = Field(pattern=_DIGEST.pattern)
@@ -89,7 +116,7 @@ class ObserverToggleRequest(MutationContext):
 
 
 class TelosDraftRequest(MutationContext):
-    document: dict[str, Any]
+    document: TelosDocument
 
 
 class TelosPrepareRequest(MutationContext):
@@ -139,7 +166,9 @@ def shutdown_for_tests() -> None:
 
 
 def _root() -> Path | None:
-    return _local_root
+    # The dashboard server owns its one global organism root.  Test harnesses
+    # may substitute a root, but requests never select one.
+    return _local_root if _local_root is not None else hermes_constants.get_organism_home()
 
 
 def _service(*, with_jobs: bool = False) -> EvolutionDashboardService:
@@ -250,6 +279,8 @@ def _raise_public_error(exc: Exception) -> None:
             else status.HTTP_400_BAD_REQUEST
         )
         raise _error(exc.code, status_code) from None
+    if isinstance(exc, EvolutionJobConflict):
+        raise _error(exc.code, status.HTTP_409_CONFLICT) from None
     if isinstance(exc, EvolutionJobError):
         raise _error(exc.code, status.HTTP_400_BAD_REQUEST) from None
     if isinstance(exc, ValueError):
@@ -493,10 +524,15 @@ async def post_observer(request: Request) -> dict[str, Any]:
 @_public_route
 async def post_telos_draft(request: Request) -> dict[str, Any]:
     body = await _body(request, TelosDraftRequest)
-    if not _document_is_bounded(body.document):
+    document = body.document.model_dump()
+    if not _document_is_bounded(document):
         raise _error("invalid_request", status.HTTP_422_UNPROCESSABLE_CONTENT)
     try:
-        return _service().save_telos_draft(**body.model_dump())
+        return _service().save_telos_draft(
+            organism_id=body.organism_id,
+            expected_snapshot_digest=body.expected_snapshot_digest,
+            document=document,
+        )
     except Exception as exc:
         _raise_public_error(exc)
 
