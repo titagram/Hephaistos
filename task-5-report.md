@@ -50,3 +50,23 @@
   setup/cleanup errors. Each verification file was therefore given a distinct
   temporary base. This is test-runner infrastructure debt, not a Task 5
   functional failure.
+
+## Dashboard UI delivery
+
+Implemented the Telos control-center view with structured, bounded form fields
+for the complete public Telos document schema. Draft saves use the active digest
+as their displayed and serialized parent, remain inert, and surface local
+validation plus server rejection feedback.
+
+The view exposes truthful bounded revision history and semantic field-level
+diffs. Activate and rollback share one accessible strong-confirmation dialog,
+but describe distinct consequences. The dialog fetches fresh mutation context
+before prepare and confirmation, displays the server-issued organism, digests,
+action, expiry, and exact phrase, and permits only one confirmation attempt. A
+409 closes the dialog, refreshes current state, shows a warning, and does not
+retry.
+
+Validation run:
+
+- `npm run test -- evolution-telos.test.ts evolution-api.test.ts evolution-plugin.test.ts evolution-graph.test.ts` — 29 passing tests
+- `npm run check:evolution` — TypeScript check, rebuilt dashboard bundle, and JavaScript syntax check passed

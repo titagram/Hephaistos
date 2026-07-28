@@ -50,7 +50,7 @@ export interface TelosDraftRequest extends MutationContext {
   document: TelosDocument;
 }
 
-export interface TelosTransitionRequest {
+export interface TelosTransitionRequest extends MutationContext {
   current_digest: string;
   target_digest: string;
   action: "activate" | "rollback";

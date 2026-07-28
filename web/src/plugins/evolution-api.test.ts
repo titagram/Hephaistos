@@ -92,8 +92,8 @@ describe("Evolution dashboard API client", () => {
     await evolutionApi.observerScan(context);
     await evolutionApi.setObserver({ ...context, enabled: true });
     await evolutionApi.saveTelosDraft({ ...context, document });
-    await evolutionApi.prepareTelosTransition({ current_digest: "b".repeat(64), target_digest: "c".repeat(64), action: "activate" });
-    await evolutionApi.confirmTelosTransition({ confirmation_id: context.organism_id, current_digest: "b".repeat(64), target_digest: "c".repeat(64), action: "activate", phrase: "ACTIVATE" });
+    await evolutionApi.prepareTelosTransition({ ...context, current_digest: "b".repeat(64), target_digest: "c".repeat(64), action: "activate" });
+    await evolutionApi.confirmTelosTransition({ ...context, confirmation_id: context.organism_id, current_digest: "b".repeat(64), target_digest: "c".repeat(64), action: "activate", phrase: "ACTIVATE" });
     await evolutionApi.createBlueprint(context.organism_id, { ...context, expected_suggestion_digest: "d".repeat(64) });
 
     expect(calls.map(call => call.path)).toEqual([
@@ -108,5 +108,7 @@ describe("Evolution dashboard API client", () => {
     ]);
     expect(calls.every(call => call.init?.method === "POST")).toBe(true);
     expect(JSON.stringify(calls)).not.toContain("__HERMES_SESSION_TOKEN__");
+    expect(JSON.parse(String(calls[5]?.init?.body))).toMatchObject(context);
+    expect(JSON.parse(String(calls[6]?.init?.body))).toMatchObject(context);
   });
 });

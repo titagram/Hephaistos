@@ -2060,7 +2060,7 @@
     hasRequiredHeap$1 = 1;
     (function(module, exports$1) {
       (function() {
-        var Heap2, defaultCmp, floor, heapify, heappop, heappush, heappushpop, heapreplace, insort, min4, nlargest, nsmallest, updateItem, _siftdown, _siftup;
+        var Heap2, defaultCmp, floor, heapify, heappop, heappush, heappushpop, heapreplace, insort, min4, nlargest, nsmallest, updateItem2, _siftdown, _siftup;
         floor = Math.floor, min4 = Math.min;
         defaultCmp = function(x2, y2) {
           if (x2 < y2) {
@@ -2157,7 +2157,7 @@
           }
           return _results;
         };
-        updateItem = function(array3, item, cmp) {
+        updateItem2 = function(array3, item, cmp) {
           var pos;
           if (cmp == null) {
             cmp = defaultCmp;
@@ -2260,7 +2260,7 @@
           Heap3.replace = heapreplace;
           Heap3.pushpop = heappushpop;
           Heap3.heapify = heapify;
-          Heap3.updateItem = updateItem;
+          Heap3.updateItem = updateItem2;
           Heap3.nlargest = nlargest;
           Heap3.nsmallest = nsmallest;
           function Heap3(cmp) {
@@ -2289,7 +2289,7 @@
             return heapify(this.nodes, this.cmp);
           };
           Heap3.prototype.updateItem = function(x2) {
-            return updateItem(this.nodes, x2, this.cmp);
+            return updateItem2(this.nodes, x2, this.cmp);
           };
           Heap3.prototype.clear = function() {
             return this.nodes = [];
@@ -31301,6 +31301,379 @@
     return /* @__PURE__ */ React.createElement("section", { className: "evo-status-rail", "aria-label": "Evolution status" }, /* @__PURE__ */ React.createElement("p", null, "Overall status: ", humanize(snapshot.state)), blockers.length === 0 ? /* @__PURE__ */ React.createElement("p", null, "All monitored local organism systems are ready.") : /* @__PURE__ */ React.createElement("ol", null, blockers.map((blocker) => /* @__PURE__ */ React.createElement("li", { key: blocker.source }, blocker.label, ": ", humanize(blocker.state)))));
   }
 
+  // ../plugins/evolution/dashboard/src/telos-model.ts
+  var TELOS_COLLECTIONS = [
+    "desired_traits",
+    "capability_directions",
+    "priorities",
+    "tradeoffs",
+    "prohibitions",
+    "success_indicators"
+  ];
+  var COLLECTION_LABELS = {
+    desired_traits: "Desired traits",
+    capability_directions: "Capability directions",
+    priorities: "Priorities",
+    tradeoffs: "Tradeoffs",
+    prohibitions: "Prohibitions",
+    success_indicators: "Success indicators"
+  };
+  function cloneItem(item) {
+    return { ...item, tags: [...item.tags] };
+  }
+  function cloneItems(items) {
+    return items.map(cloneItem);
+  }
+  function createTelosDraft(source) {
+    if (source !== null) {
+      return {
+        purpose: source.purpose,
+        desired_traits: cloneItems(source.desired_traits),
+        capability_directions: cloneItems(source.capability_directions),
+        priorities: cloneItems(source.priorities),
+        tradeoffs: cloneItems(source.tradeoffs),
+        prohibitions: cloneItems(source.prohibitions),
+        proactivity_policy: cloneItem(source.proactivity_policy),
+        success_indicators: cloneItems(source.success_indicators)
+      };
+    }
+    return {
+      purpose: "",
+      desired_traits: [],
+      capability_directions: [],
+      priorities: [],
+      tradeoffs: [],
+      prohibitions: [],
+      proactivity_policy: { id: "proactivity", statement: "", tags: [], priority: 1 },
+      success_indicators: []
+    };
+  }
+  function serializeTelosDraft(draft, organismId, parentDigest) {
+    return {
+      schema_version: 1,
+      organism_id: organismId,
+      parent_digest: parentDigest,
+      purpose: draft.purpose,
+      desired_traits: cloneItems(draft.desired_traits),
+      capability_directions: cloneItems(draft.capability_directions),
+      priorities: cloneItems(draft.priorities),
+      tradeoffs: cloneItems(draft.tradeoffs),
+      prohibitions: cloneItems(draft.prohibitions),
+      proactivity_policy: cloneItem(draft.proactivity_policy),
+      success_indicators: cloneItems(draft.success_indicators)
+    };
+  }
+  var ITEM_ID = /^[a-z][a-z0-9_.-]{0,63}$/;
+  var TAG = /^[a-z][a-z0-9_.-]{0,127}$/;
+  function itemErrors(label, item) {
+    const errors = [];
+    if (!ITEM_ID.test(item.id)) errors.push(`${label} ID must use lowercase letters, digits, dots, underscores, or hyphens.`);
+    if (item.statement.trim().length < 1 || item.statement.length > 500) errors.push(`${label} statement must be 1\u2013500 characters.`);
+    if (!Number.isInteger(item.priority) || item.priority < 1 || item.priority > 5) errors.push(`${label} priority must be an integer from 1 to 5.`);
+    if (item.tags.length > 16 || item.tags.some((tag) => !TAG.test(tag))) errors.push(`${label} tags must contain at most 16 lowercase identifiers.`);
+    return errors;
+  }
+  function validateTelosDraft(draft) {
+    const errors = [];
+    if (draft.purpose.trim().length < 1 || draft.purpose.length > 1e3) errors.push("Purpose must be 1\u20131000 characters.");
+    const seen = /* @__PURE__ */ new Set();
+    for (const field of TELOS_COLLECTIONS) {
+      const items = draft[field];
+      const minimum = field === "tradeoffs" ? 0 : 1;
+      if (items.length < minimum || items.length > 32) errors.push(`${COLLECTION_LABELS[field]} must contain ${minimum}\u201332 items.`);
+      for (const item of items) {
+        errors.push(...itemErrors(`${COLLECTION_LABELS[field]} ${item.id || "item"}`, item));
+        if (seen.has(item.id)) errors.push(`Item ID ${item.id} must be unique across Telos.`);
+        seen.add(item.id);
+      }
+    }
+    errors.push(...itemErrors("Proactivity policy", draft.proactivity_policy));
+    if (seen.has(draft.proactivity_policy.id)) errors.push(`Item ID ${draft.proactivity_policy.id} must be unique across Telos.`);
+    return errors;
+  }
+  function itemChanged(left, right) {
+    return left.statement !== right.statement || left.priority !== right.priority || left.tags.length !== right.tags.length || left.tags.some((tag, index) => tag !== right.tags[index]);
+  }
+  function collectionDiff(field, before, after) {
+    const beforeById = new Map(before.map((item) => [item.id, item]));
+    const afterById = new Map(after.map((item) => [item.id, item]));
+    return {
+      field,
+      label: COLLECTION_LABELS[field],
+      changes: [],
+      added: after.filter((item) => !beforeById.has(item.id)).map((item) => item.id),
+      removed: before.filter((item) => !afterById.has(item.id)).map((item) => item.id),
+      changed: after.filter((item) => {
+        const previous = beforeById.get(item.id);
+        return previous !== void 0 && itemChanged(previous, item);
+      }).map((item) => item.id)
+    };
+  }
+  function semanticTelosDiff(before, after) {
+    const groups = [];
+    if (before.purpose !== after.purpose) {
+      groups.push({ field: "purpose", label: "Purpose", changes: ["Purpose changed"], added: [], removed: [], changed: [] });
+    }
+    for (const field of TELOS_COLLECTIONS) {
+      const group2 = collectionDiff(field, before[field], after[field]);
+      if (group2.added.length > 0 || group2.removed.length > 0 || group2.changed.length > 0) groups.push(group2);
+    }
+    if (itemChanged(before.proactivity_policy, after.proactivity_policy)) {
+      groups.push({
+        field: "proactivity_policy",
+        label: "Proactivity policy",
+        changes: ["Proactivity policy changed"],
+        added: [],
+        removed: [],
+        changed: [after.proactivity_policy.id]
+      });
+    }
+    return groups;
+  }
+  function isExactConfirmationPhrase(value, requiredPhrase) {
+    return value === requiredPhrase;
+  }
+  function confirmationConsequences(action) {
+    return action === "activate" ? "This activates the selected inert Telos revision for the local organism. It does not alter its immutable draft." : "This restores the selected prior Telos revision as the local organism's active Telos. It does not delete newer revisions.";
+  }
+  function statusFromError2(error3) {
+    if (typeof error3 === "object" && error3 !== null && "status" in error3) {
+      const value = Reflect.get(error3, "status");
+      if (typeof value === "number") return value;
+    }
+    if (error3 instanceof Error && /^409(?::|\s|$)/.test(error3.message)) return 409;
+    return null;
+  }
+  function staleTransitionRecovery(error3) {
+    if (statusFromError2(error3) !== 409) return null;
+    return {
+      close: true,
+      refresh: true,
+      retry: false,
+      warning: "The organism changed elsewhere. Refresh completed before another Telos transition can be prepared."
+    };
+  }
+
+  // ../plugins/evolution/dashboard/src/components/StrongConfirmationDialog.tsx
+  function errorMessage3(error3) {
+    if (error3 instanceof Error && /^422(?::|\s|$)/.test(error3.message)) return "The server rejected this Telos transition. Review the displayed values and refresh before preparing it again.";
+    return error3 instanceof Error ? error3.message : "The Telos transition could not be completed.";
+  }
+  function expired(prepared) {
+    const timestamp = Date.parse(prepared.expires_at);
+    return Number.isFinite(timestamp) && Date.now() >= timestamp;
+  }
+  function StrongConfirmationDialog({
+    organismId,
+    currentDigest,
+    targetDigest,
+    action,
+    onClose,
+    onConfirmed,
+    onStale
+  }) {
+    const { useRef, useState } = SDK.hooks;
+    const [prepared, setPrepared] = useState(null);
+    const [phrase, setPhrase] = useState("");
+    const [submitting, setSubmitting] = useState(false);
+    const [error3, setError] = useState(null);
+    const confirmedRef = useRef(false);
+    const title = action === "activate" ? "Activate Telos revision" : "Roll back Telos revision";
+    const handleStale = async (nextError) => {
+      const recovery = staleTransitionRecovery(nextError);
+      if (recovery === null) return false;
+      onClose();
+      await onStale(recovery.warning);
+      return true;
+    };
+    const prepare = async () => {
+      if (submitting) return;
+      setSubmitting(true);
+      setError(null);
+      try {
+        const context = await evolutionApi.mutationContext();
+        const next = await evolutionApi.prepareTelosTransition({ ...context, current_digest: currentDigest, target_digest: targetDigest, action });
+        setPrepared(next);
+        setPhrase("");
+      } catch (nextError) {
+        if (!await handleStale(nextError)) setError(errorMessage3(nextError));
+      } finally {
+        setSubmitting(false);
+      }
+    };
+    const confirm = async () => {
+      if (prepared === null || submitting || confirmedRef.current || expired(prepared) || !isExactConfirmationPhrase(phrase, prepared.required_phrase)) return;
+      confirmedRef.current = true;
+      setSubmitting(true);
+      setError(null);
+      try {
+        const context = await evolutionApi.mutationContext();
+        await evolutionApi.confirmTelosTransition({
+          ...context,
+          confirmation_id: prepared.confirmation_id,
+          current_digest: prepared.current_digest,
+          target_digest: prepared.target_digest,
+          action: prepared.action,
+          phrase
+        });
+        await onConfirmed();
+        onClose();
+      } catch (nextError) {
+        if (!await handleStale(nextError)) setError(errorMessage3(nextError));
+      } finally {
+        setSubmitting(false);
+      }
+    };
+    const canConfirm = prepared !== null && !expired(prepared) && isExactConfirmationPhrase(phrase, prepared.required_phrase) && !submitting && !confirmedRef.current;
+    return /* @__PURE__ */ React.createElement("div", { className: "evo-confirmation-dialog", role: "dialog", "aria-modal": "true", "aria-labelledby": "evo-telos-confirmation-title", "aria-describedby": "evo-telos-confirmation-description" }, /* @__PURE__ */ React.createElement("section", { className: "evo-confirmation-dialog__content" }, /* @__PURE__ */ React.createElement("header", null, /* @__PURE__ */ React.createElement("h2", { id: "evo-telos-confirmation-title" }, title)), /* @__PURE__ */ React.createElement("p", { id: "evo-telos-confirmation-description" }, "This is a consequential local Telos pointer change. Prepare the server-issued confirmation before it can be confirmed once."), /* @__PURE__ */ React.createElement("dl", null, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("dt", null, "Organism"), /* @__PURE__ */ React.createElement("dd", null, prepared?.organism_id ?? organismId)), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("dt", null, "Current digest"), /* @__PURE__ */ React.createElement("dd", null, prepared?.current_digest ?? currentDigest)), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("dt", null, "Target digest"), /* @__PURE__ */ React.createElement("dd", null, prepared?.target_digest ?? targetDigest)), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("dt", null, "Action"), /* @__PURE__ */ React.createElement("dd", null, action)), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("dt", null, "Consequences"), /* @__PURE__ */ React.createElement("dd", null, confirmationConsequences(action))), prepared !== null ? /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("dt", null, "Expires"), /* @__PURE__ */ React.createElement("dd", null, prepared.expires_at)) : null), prepared === null ? /* @__PURE__ */ React.createElement("button", { type: "button", onClick: () => void prepare(), disabled: submitting }, submitting ? "Preparing\u2026" : "Prepare confirmation") : /* @__PURE__ */ React.createElement("label", null, "Type the exact server phrase", /* @__PURE__ */ React.createElement("input", { value: phrase, onChange: (event3) => setPhrase(event3.target.value), autoComplete: "off", "aria-describedby": "evo-telos-required-phrase", disabled: submitting || expired(prepared) }), /* @__PURE__ */ React.createElement("span", { id: "evo-telos-required-phrase" }, prepared.required_phrase)), prepared !== null && expired(prepared) ? /* @__PURE__ */ React.createElement("p", { role: "alert" }, "This confirmation expired. Close it and prepare a new transition.") : null, error3 !== null ? /* @__PURE__ */ React.createElement("p", { role: "alert" }, error3) : null, /* @__PURE__ */ React.createElement("footer", null, /* @__PURE__ */ React.createElement("button", { type: "button", onClick: onClose, disabled: submitting }, "Cancel"), prepared !== null ? /* @__PURE__ */ React.createElement("button", { type: "button", onClick: () => void confirm(), disabled: !canConfirm }, "Confirm ", action) : null)));
+  }
+
+  // ../plugins/evolution/dashboard/src/components/TelosDiff.tsx
+  function TelosDiff({ current, target }) {
+    if (current === null || target === null) return null;
+    const groups = semanticTelosDiff(current, target);
+    return /* @__PURE__ */ React.createElement("section", { className: "evo-telos-diff", "aria-labelledby": "evo-telos-diff-heading" }, /* @__PURE__ */ React.createElement("h3", { id: "evo-telos-diff-heading" }, "Semantic Telos diff"), groups.length === 0 ? /* @__PURE__ */ React.createElement("p", null, "No semantic Telos changes are present.") : /* @__PURE__ */ React.createElement("ul", null, groups.map((group2) => /* @__PURE__ */ React.createElement("li", { key: group2.field }, /* @__PURE__ */ React.createElement("strong", null, group2.label), group2.changes.map((change) => /* @__PURE__ */ React.createElement("p", { key: change }, change)), group2.added.length > 0 ? /* @__PURE__ */ React.createElement("p", null, "Added: ", group2.added.join(", ")) : null, group2.removed.length > 0 ? /* @__PURE__ */ React.createElement("p", null, "Removed: ", group2.removed.join(", ")) : null, group2.changed.length > 0 ? /* @__PURE__ */ React.createElement("p", null, "Changed: ", group2.changed.join(", ")) : null))));
+  }
+
+  // ../plugins/evolution/dashboard/src/components/TelosEditor.tsx
+  var LABELS = {
+    desired_traits: "Desired traits",
+    capability_directions: "Capability directions",
+    priorities: "Priorities",
+    tradeoffs: "Tradeoffs",
+    prohibitions: "Prohibitions",
+    success_indicators: "Success indicators"
+  };
+  function itemFor(field, index) {
+    return { id: `${field.replaceAll("_", "-")}-${index + 1}`, statement: "", tags: [], priority: 3 };
+  }
+  function updateItem(items, index, patch) {
+    return items.map((item, itemIndex) => itemIndex === index ? { ...item, ...patch } : item);
+  }
+  function ItemFields({
+    item,
+    label,
+    disabled,
+    onChange
+  }) {
+    return /* @__PURE__ */ React.createElement("div", { className: "evo-telos-editor__item" }, /* @__PURE__ */ React.createElement("label", null, label, " ID", /* @__PURE__ */ React.createElement("input", { value: item.id, maxLength: 64, disabled, onChange: (event3) => onChange({ id: event3.target.value }) })), /* @__PURE__ */ React.createElement("label", null, "Statement", /* @__PURE__ */ React.createElement("textarea", { value: item.statement, maxLength: 500, disabled, onChange: (event3) => onChange({ statement: event3.target.value }) })), /* @__PURE__ */ React.createElement("label", null, "Tags (comma separated, up to 16)", /* @__PURE__ */ React.createElement(
+      "input",
+      {
+        value: item.tags.join(", "),
+        maxLength: 2048,
+        disabled,
+        onChange: (event3) => onChange({ tags: event3.target.value.split(",").map((tag) => tag.trim()).filter(Boolean).slice(0, 16) })
+      }
+    )), /* @__PURE__ */ React.createElement("label", null, "Priority", /* @__PURE__ */ React.createElement("input", { type: "number", min: 1, max: 5, step: 1, value: item.priority, disabled, onChange: (event3) => onChange({ priority: Number(event3.target.value) }) })));
+  }
+  function TelosEditor({ draft, parentDigest, disabled, onChange }) {
+    const replaceCollection = (field, items) => onChange({ ...draft, [field]: items });
+    return /* @__PURE__ */ React.createElement("section", { className: "evo-telos-editor", "aria-labelledby": "evo-telos-editor-heading" }, /* @__PURE__ */ React.createElement("h2", { id: "evo-telos-editor-heading" }, "Telos draft"), /* @__PURE__ */ React.createElement("p", null, "Structured fields are validated locally before saving. Saving is inert and never changes the active Telos."), /* @__PURE__ */ React.createElement("dl", null, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("dt", null, "Selected parent digest"), /* @__PURE__ */ React.createElement("dd", null, parentDigest ?? "No active Telos revision"))), /* @__PURE__ */ React.createElement("label", null, "Purpose", /* @__PURE__ */ React.createElement("textarea", { value: draft.purpose, maxLength: 1e3, disabled, onChange: (event3) => onChange({ ...draft, purpose: event3.target.value }) })), TELOS_COLLECTIONS.map((field) => {
+      const minimum = field === "tradeoffs" ? 0 : 1;
+      const items = draft[field];
+      return /* @__PURE__ */ React.createElement("fieldset", { key: field, disabled }, /* @__PURE__ */ React.createElement("legend", null, LABELS[field], " (", items.length, "/32)"), items.map((item, index) => /* @__PURE__ */ React.createElement("div", { key: `${field}-${index}` }, /* @__PURE__ */ React.createElement(ItemFields, { item, label: `${LABELS[field]} ${index + 1}`, disabled, onChange: (patch) => replaceCollection(field, updateItem(items, index, patch)) }), /* @__PURE__ */ React.createElement("button", { type: "button", onClick: () => replaceCollection(field, items.filter((_, itemIndex) => itemIndex !== index)), disabled: disabled || items.length <= minimum }, "Remove ", LABELS[field], " ", index + 1))), /* @__PURE__ */ React.createElement("button", { type: "button", onClick: () => replaceCollection(field, [...items, itemFor(field, items.length)]), disabled: disabled || items.length >= 32 }, "Add ", LABELS[field]));
+    }), /* @__PURE__ */ React.createElement("fieldset", { disabled }, /* @__PURE__ */ React.createElement("legend", null, "Proactivity policy"), /* @__PURE__ */ React.createElement(ItemFields, { item: draft.proactivity_policy, label: "Proactivity policy", disabled, onChange: (patch) => onChange({ ...draft, proactivity_policy: { ...draft.proactivity_policy, ...patch } }) })));
+  }
+
+  // ../plugins/evolution/dashboard/src/components/TelosView.tsx
+  var HISTORY_LIMIT = 50;
+  function errorMessage4(error3) {
+    if (error3 instanceof Error && /^422(?::|\s|$)/.test(error3.message)) return "The server rejected the structured Telos document. Correct the highlighted fields and try again.";
+    return error3 instanceof Error ? error3.message : "Local Telos data is unavailable.";
+  }
+  function draftAsRevision(draft, digest, parentDigest) {
+    return { digest, parent_digest: parentDigest, ...draft };
+  }
+  function transitionTarget(response, saved, digest) {
+    if (digest === null) return null;
+    const revisions = [response?.active_revision, ...response?.history ?? [], saved];
+    return revisions.find((item) => item?.digest === digest) ?? null;
+  }
+  function TelosView({ snapshot, onRefresh }) {
+    const { useCallback, useEffect, useMemo, useState } = SDK.hooks;
+    const [telos, setTelos] = useState(null);
+    const [draft, setDraft] = useState(null);
+    const [savedRevision, setSavedRevision] = useState(null);
+    const [selectedDigest, setSelectedDigest] = useState(null);
+    const [dialogAction, setDialogAction] = useState(null);
+    const [loading, setLoading] = useState(true);
+    const [saving, setSaving] = useState(false);
+    const [error3, setError] = useState(null);
+    const [warning, setWarning] = useState(null);
+    const load = useCallback(async () => {
+      setLoading(true);
+      try {
+        const next = await evolutionApi.telos(HISTORY_LIMIT);
+        setTelos(next);
+        setDraft((current2) => current2 ?? createTelosDraft(next.active_revision));
+        setSelectedDigest((current2) => current2 ?? next.active_digest);
+        setError(null);
+      } catch (nextError) {
+        setError(errorMessage4(nextError));
+      } finally {
+        setLoading(false);
+      }
+    }, []);
+    useEffect(() => {
+      void load();
+    }, [load]);
+    const unsafe = snapshot?.state === "corrupt" || snapshot?.state === "blocked" || snapshot?.telos.state === "corrupt" || snapshot?.telos.state === "blocked";
+    const selected = useMemo(() => transitionTarget(telos, savedRevision, selectedDigest), [savedRevision, selectedDigest, telos]);
+    const current = telos?.active_revision ?? null;
+    const canTransition = !unsafe && current !== null && selected !== null && selected.digest !== current.digest;
+    const recoverStale = useCallback(async (message) => {
+      setDialogAction(null);
+      setWarning(message);
+      await onRefresh();
+      await load();
+    }, [load, onRefresh]);
+    const saveDraft = async () => {
+      if (draft === null || saving || unsafe) return;
+      const errors = validateTelosDraft(draft);
+      if (errors.length > 0) {
+        setError(errors.join(" "));
+        return;
+      }
+      setSaving(true);
+      setError(null);
+      try {
+        const context = await evolutionApi.mutationContext();
+        const document2 = serializeTelosDraft(draft, context.organism_id, telos?.active_digest ?? null);
+        const saved = await evolutionApi.saveTelosDraft({ ...context, document: document2 });
+        const revision = draftAsRevision(draft, saved.digest, document2.parent_digest);
+        setSavedRevision(revision);
+        setSelectedDigest(saved.digest);
+        await onRefresh();
+        await load();
+      } catch (nextError) {
+        const recovery = staleTransitionRecovery(nextError);
+        if (recovery !== null) await recoverStale(recovery.warning);
+        else setError(errorMessage4(nextError));
+      } finally {
+        setSaving(false);
+      }
+    };
+    if (snapshot === null || loading) return /* @__PURE__ */ React.createElement("section", { className: "evo-telos", "aria-busy": "true" }, /* @__PURE__ */ React.createElement("p", null, "Loading local Telos revisions\u2026"));
+    if (unsafe) return /* @__PURE__ */ React.createElement("section", { className: "evo-telos", "aria-live": "polite" }, /* @__PURE__ */ React.createElement("h2", null, "Telos is unavailable"), /* @__PURE__ */ React.createElement("p", null, "Telos details and changes are hidden until the local organism is safe to inspect."));
+    if (telos === null || draft === null) return /* @__PURE__ */ React.createElement("section", { className: "evo-telos" }, /* @__PURE__ */ React.createElement("p", { role: "alert" }, error3 ?? "Telos data is unavailable."));
+    const revisions = [telos.active_revision, ...telos.history, savedRevision].filter((item) => item !== null).filter((item, index, items) => items.findIndex((candidate) => candidate.digest === item.digest) === index);
+    return /* @__PURE__ */ React.createElement("section", { className: "evo-telos", "aria-labelledby": "evo-telos-heading" }, /* @__PURE__ */ React.createElement("header", null, /* @__PURE__ */ React.createElement("h2", { id: "evo-telos-heading" }, "Telos"), /* @__PURE__ */ React.createElement("p", null, "Active digest: ", telos.active_digest ?? "No active Telos revision")), warning !== null ? /* @__PURE__ */ React.createElement("p", { role: "status" }, warning) : null, error3 !== null ? /* @__PURE__ */ React.createElement("p", { role: "alert" }, error3) : null, /* @__PURE__ */ React.createElement(TelosEditor, { draft, parentDigest: telos.active_digest, disabled: saving, onChange: setDraft }), /* @__PURE__ */ React.createElement("button", { type: "button", onClick: () => void saveDraft(), disabled: saving }, saving ? "Saving inert draft\u2026" : "Save inert Telos draft"), /* @__PURE__ */ React.createElement("section", { "aria-labelledby": "evo-telos-history-heading" }, /* @__PURE__ */ React.createElement("h3", { id: "evo-telos-history-heading" }, "Bounded revision history"), /* @__PURE__ */ React.createElement("p", null, "The latest ", HISTORY_LIMIT, " inactive revisions are available for comparison and transition."), telos.truncated ? /* @__PURE__ */ React.createElement("p", null, "Additional immutable Telos history exists but is not displayed in this bounded view.") : null, /* @__PURE__ */ React.createElement("label", null, "Compare or transition target", /* @__PURE__ */ React.createElement("select", { value: selectedDigest ?? "", onChange: (event3) => setSelectedDigest(event3.target.value || null) }, /* @__PURE__ */ React.createElement("option", { value: "" }, "Select an immutable Telos revision"), revisions.map((revision) => /* @__PURE__ */ React.createElement("option", { key: revision.digest, value: revision.digest }, revision.digest, revision.digest === telos.active_digest ? " (active)" : ""))))), /* @__PURE__ */ React.createElement(TelosDiff, { current, target: selected }), /* @__PURE__ */ React.createElement("div", { className: "evo-telos__actions" }, /* @__PURE__ */ React.createElement("button", { type: "button", onClick: () => setDialogAction("activate"), disabled: !canTransition }, "Activate selected revision"), /* @__PURE__ */ React.createElement("button", { type: "button", onClick: () => setDialogAction("rollback"), disabled: !canTransition }, "Roll back to selected revision")), dialogAction !== null && current !== null && selected !== null ? /* @__PURE__ */ React.createElement(
+      StrongConfirmationDialog,
+      {
+        organismId: snapshot.organism?.id_prefix ?? "local organism",
+        currentDigest: current.digest,
+        targetDigest: selected.digest,
+        action: dialogAction,
+        onClose: () => setDialogAction(null),
+        onConfirmed: async () => {
+          await onRefresh();
+          await load();
+        },
+        onStale: recoverStale
+      }
+    ) : null);
+  }
+
   // ../plugins/evolution/dashboard/src/components/EvolutionShell.tsx
   var VIEWS = [
     { id: "overview", label: "Overview" },
@@ -31331,7 +31704,7 @@
         onTrackJob: store.trackJob,
         onNavigate: setView
       }
-    ) : view === "organism" ? /* @__PURE__ */ React.createElement(OrganismView, { snapshot: store.snapshot, onRefresh: store.refresh, onTrackJob: store.trackJob }) : /* @__PURE__ */ React.createElement("p", null, VIEWS.find((item) => item.id === view)?.label, " view will appear here.")));
+    ) : view === "organism" ? /* @__PURE__ */ React.createElement(OrganismView, { snapshot: store.snapshot, onRefresh: store.refresh, onTrackJob: store.trackJob }) : view === "telos" ? /* @__PURE__ */ React.createElement(TelosView, { snapshot: store.snapshot, onRefresh: store.refresh }) : /* @__PURE__ */ React.createElement("p", null, VIEWS.find((item) => item.id === view)?.label, " view will appear here.")));
   }
 
   // ../plugins/evolution/dashboard/src/index.tsx
