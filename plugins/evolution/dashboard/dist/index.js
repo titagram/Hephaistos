@@ -657,7 +657,7 @@
     }
   }
   var _window = typeof window === "undefined" ? null : window;
-  var navigator = _window ? _window.navigator : null;
+  var navigator2 = _window ? _window.navigator : null;
   _window ? _window.document : null;
   var typeofstr = _typeof("");
   var typeofobj = _typeof({});
@@ -735,7 +735,7 @@
     return object(obj) && fn$6(obj.then);
   };
   var ms = function ms2() {
-    return navigator && navigator.userAgent.match(/msie|trident|edge/i);
+    return navigator2 && navigator2.userAgent.match(/msie|trident|edge/i);
   };
   var memoize = function memoize2(fn3, keyFn) {
     if (!keyFn) {
@@ -31289,6 +31289,198 @@
     ) : null);
   }
 
+  // ../plugins/evolution/dashboard/src/pipeline-model.ts
+  var STAGES = [
+    { id: "suggestion", label: "Suggestion" },
+    { id: "research", label: "Research" },
+    { id: "blueprint", label: "Blueprint" },
+    { id: "build", label: "Build" },
+    { id: "canary", label: "Canary" },
+    { id: "promotion", label: "Promotion" },
+    { id: "stable", label: "Stable" }
+  ];
+  function fixedPipelineStages(pipeline) {
+    const availability = new Map(pipeline.stages.map((stage) => [stage.id, stage.available]));
+    return STAGES.map((stage) => {
+      const available = availability.get(stage.id) === true;
+      return {
+        ...stage,
+        available,
+        explanation: available ? `${stage.label} is available in the local evolution pipeline.` : `${stage.label} is not available until a local runtime owns this stage.`
+      };
+    });
+  }
+  function blueprintAction(suggestion, blueprints) {
+    const existing = blueprints.find((blueprint) => blueprint.suggestion_id === suggestion.suggestion_id);
+    if (existing !== void 0) {
+      return { kind: "existing", message: "Immutable blueprint already exists", blueprint: existing };
+    }
+    if (suggestion.state !== "eligible") {
+      return { kind: "blocked", message: "Blueprint creation requires an eligible suggestion." };
+    }
+    return { kind: "create", message: "Create immutable blueprint" };
+  }
+  function decimal(value) {
+    return Number.isFinite(value) ? value.toFixed(2) : "0.00";
+  }
+  function publicResearchBrief(suggestion) {
+    return {
+      text: [
+        "Research public documentation for a local evolution opportunity.",
+        `Score: ${decimal(suggestion.score)}`,
+        `Telos alignment: ${decimal(suggestion.telos_alignment)}`,
+        `Observed sessions: ${Math.max(0, suggestion.distinct_session_count)}`,
+        `Observation count: ${Math.max(0, suggestion.observation_count)}`,
+        "Use public documentation only."
+      ].join("\n"),
+      destination: "/chat",
+      toast: "Research brief copied \u2014 paste it in Chat.",
+      authorizationEndpoint: null
+    };
+  }
+  function sortedAuditEvents(events) {
+    return [...events].sort((left, right) => left.sequence - right.sequence);
+  }
+
+  // ../plugins/evolution/dashboard/src/components/BlueprintInspector.tsx
+  var HYPOTHESIS_LIMIT = 280;
+  function BlueprintInspector({ blueprint, auditEvents }) {
+    const { useState } = SDK.hooks;
+    const [expanded, setExpanded] = useState(false);
+    if (blueprint === null) {
+      return /* @__PURE__ */ React.createElement("aside", { className: "evo-pipeline-inspector", "aria-label": "Blueprint inspector" }, /* @__PURE__ */ React.createElement("p", null, "Select an immutable blueprint to inspect it."));
+    }
+    const hypothesis = expanded || blueprint.capability_hypothesis.length <= HYPOTHESIS_LIMIT ? blueprint.capability_hypothesis : `${blueprint.capability_hypothesis.slice(0, HYPOTHESIS_LIMIT)}\u2026`;
+    const history = sortedAuditEvents(auditEvents.filter((event3) => event3.attempt_id === blueprint.attempt_id));
+    return /* @__PURE__ */ React.createElement("aside", { className: "evo-pipeline-inspector", "aria-labelledby": "evo-blueprint-inspector-heading" }, /* @__PURE__ */ React.createElement("h2", { id: "evo-blueprint-inspector-heading" }, "Immutable blueprint"), /* @__PURE__ */ React.createElement("dl", null, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("dt", null, "Blueprint ID"), /* @__PURE__ */ React.createElement("dd", null, blueprint.blueprint_id)), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("dt", null, "Canonical digest"), /* @__PURE__ */ React.createElement("dd", null, blueprint.canonical_digest)), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("dt", null, "Active Telos digest"), /* @__PURE__ */ React.createElement("dd", null, blueprint.active_telos_digest)), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("dt", null, "State"), /* @__PURE__ */ React.createElement("dd", null, blueprint.state))), /* @__PURE__ */ React.createElement("section", { "aria-labelledby": "evo-blueprint-scope-heading" }, /* @__PURE__ */ React.createElement("h3", { id: "evo-blueprint-scope-heading" }, "Requested scope"), /* @__PURE__ */ React.createElement("p", null, hypothesis), blueprint.capability_hypothesis.length > HYPOTHESIS_LIMIT ? /* @__PURE__ */ React.createElement("button", { type: "button", onClick: () => setExpanded((value) => !value), "aria-expanded": expanded }, expanded ? "Show less requested scope" : "Show full requested scope") : null, /* @__PURE__ */ React.createElement("h4", null, "Proposed component classes"), blueprint.proposed_component_classes.length > 0 ? /* @__PURE__ */ React.createElement("ul", null, blueprint.proposed_component_classes.map((component2) => /* @__PURE__ */ React.createElement("li", { key: component2 }, component2))) : /* @__PURE__ */ React.createElement("p", null, "No component class is requested.")), /* @__PURE__ */ React.createElement("section", { "aria-labelledby": "evo-blueprint-auth-heading" }, /* @__PURE__ */ React.createElement("h3", { id: "evo-blueprint-auth-heading" }, "Authorization history"), history.length === 0 ? /* @__PURE__ */ React.createElement("p", null, "No durable authorization history is recorded for this attempt.") : /* @__PURE__ */ React.createElement("ol", null, history.map((event3) => /* @__PURE__ */ React.createElement("li", { key: event3.event_id }, "#", event3.sequence, " \xB7 ", event3.summary)))));
+  }
+
+  // ../plugins/evolution/dashboard/src/components/PipelineStages.tsx
+  function PipelineStages({ stages }) {
+    return /* @__PURE__ */ React.createElement("ol", { className: "evo-pipeline-stages", "aria-label": "Evolution pipeline stages" }, stages.map((stage) => /* @__PURE__ */ React.createElement("li", { key: stage.id, "aria-disabled": stage.available ? void 0 : true }, /* @__PURE__ */ React.createElement("h3", null, stage.label), /* @__PURE__ */ React.createElement("p", null, stage.explanation))));
+  }
+
+  // ../plugins/evolution/dashboard/src/components/SuggestionInspector.tsx
+  var SUMMARY_LIMIT = 240;
+  function SuggestionInspector({
+    suggestion,
+    blueprints,
+    disabled,
+    onCreateBlueprint,
+    onResearch
+  }) {
+    const { useState } = SDK.hooks;
+    const [expanded, setExpanded] = useState(false);
+    if (suggestion === null) {
+      return /* @__PURE__ */ React.createElement("aside", { className: "evo-pipeline-inspector", "aria-label": "Suggestion inspector" }, /* @__PURE__ */ React.createElement("p", null, "Select a local suggestion to inspect it."));
+    }
+    const action = blueprintAction(suggestion, blueprints);
+    const summary = expanded || suggestion.summary.length <= SUMMARY_LIMIT ? suggestion.summary : `${suggestion.summary.slice(0, SUMMARY_LIMIT)}\u2026`;
+    return /* @__PURE__ */ React.createElement("aside", { className: "evo-pipeline-inspector", "aria-labelledby": "evo-suggestion-inspector-heading" }, /* @__PURE__ */ React.createElement("h2", { id: "evo-suggestion-inspector-heading" }, "Suggestion"), /* @__PURE__ */ React.createElement("dl", null, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("dt", null, "State"), /* @__PURE__ */ React.createElement("dd", null, suggestion.state)), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("dt", null, "Score"), /* @__PURE__ */ React.createElement("dd", null, suggestion.score.toFixed(2))), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("dt", null, "Telos alignment"), /* @__PURE__ */ React.createElement("dd", null, suggestion.telos_alignment.toFixed(2))), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("dt", null, "Evidence facts"), /* @__PURE__ */ React.createElement("dd", null, suggestion.observation_count, " observations across ", suggestion.distinct_session_count, " sessions"))), /* @__PURE__ */ React.createElement("section", { "aria-labelledby": "evo-suggestion-summary-heading" }, /* @__PURE__ */ React.createElement("h3", { id: "evo-suggestion-summary-heading" }, "Local summary"), /* @__PURE__ */ React.createElement("p", null, summary), suggestion.summary.length > SUMMARY_LIMIT ? /* @__PURE__ */ React.createElement("button", { type: "button", onClick: () => setExpanded((value) => !value), "aria-expanded": expanded }, expanded ? "Show less local summary" : "Show full local summary") : null), /* @__PURE__ */ React.createElement("section", { "aria-labelledby": "evo-public-research-heading" }, /* @__PURE__ */ React.createElement("h3", { id: "evo-public-research-heading" }, "Public research references"), /* @__PURE__ */ React.createElement("p", null, "No public research references are recorded for this suggestion yet."), /* @__PURE__ */ React.createElement("button", { type: "button", onClick: () => onResearch(suggestion), disabled }, "Research public documentation")), /* @__PURE__ */ React.createElement("section", { "aria-labelledby": "evo-blueprint-gate-heading" }, /* @__PURE__ */ React.createElement("h3", { id: "evo-blueprint-gate-heading" }, "Blueprint gate"), /* @__PURE__ */ React.createElement("p", null, action.message), action.kind === "create" ? /* @__PURE__ */ React.createElement("button", { type: "button", onClick: () => onCreateBlueprint(suggestion), disabled }, "Create immutable blueprint") : null));
+  }
+
+  // ../plugins/evolution/dashboard/src/components/PipelineView.tsx
+  var PIPELINE_LIMIT = 50;
+  var AUDIT_LIMIT2 = 100;
+  var CONFLICT_MESSAGE2 = "The organism changed elsewhere. Refresh manually before continuing.";
+  function errorMessage3(error3) {
+    return error3 instanceof Error ? error3.message : "The requested local pipeline data is unavailable.";
+  }
+  function isConflict2(error3) {
+    if (typeof error3 === "object" && error3 !== null && "status" in error3) return Reflect.get(error3, "status") === 409;
+    return error3 instanceof Error && /(^|\s)409(?::|\s|$)/.test(error3.message);
+  }
+  function selectedById(items, id2) {
+    return items.find((item) => item.suggestion_id === id2) ?? items[0] ?? null;
+  }
+  function selectedBlueprint(items, id2) {
+    return items.find((item) => item.blueprint_id === id2) ?? items[0] ?? null;
+  }
+  async function writeResearchBrief(text) {
+    if (typeof navigator === "undefined" || navigator.clipboard === void 0) {
+      throw new Error("Clipboard access is unavailable. Copy the public research brief manually.");
+    }
+    await navigator.clipboard.writeText(text);
+  }
+  function PipelineView({ snapshot, onRefresh }) {
+    const { useCallback, useEffect, useMemo, useState } = SDK.hooks;
+    const [attemptId, setAttemptId] = useState(null);
+    const [pipeline, setPipeline] = useState(null);
+    const [audit, setAudit] = useState(null);
+    const [selectedSuggestionId, setSelectedSuggestionId] = useState(null);
+    const [selectedBlueprintId, setSelectedBlueprintId] = useState(null);
+    const [loading, setLoading] = useState(true);
+    const [mutating, setMutating] = useState(false);
+    const [error3, setError] = useState(null);
+    const [toast, setToast] = useState(null);
+    const load = useCallback(async () => {
+      setLoading(true);
+      try {
+        const [nextPipeline, nextAudit] = await Promise.all([
+          evolutionApi.pipeline(attemptId ?? void 0, PIPELINE_LIMIT),
+          evolutionApi.audit(void 0, AUDIT_LIMIT2)
+        ]);
+        setPipeline(nextPipeline);
+        setAudit(nextAudit);
+        setSelectedSuggestionId((current) => selectedById(nextPipeline.suggestions, current)?.suggestion_id ?? null);
+        setSelectedBlueprintId((current) => selectedBlueprint(nextPipeline.blueprints, current)?.blueprint_id ?? null);
+        setError(null);
+      } catch (nextError) {
+        setError(errorMessage3(nextError));
+      } finally {
+        setLoading(false);
+      }
+    }, [attemptId]);
+    useEffect(() => {
+      void load();
+    }, [load, snapshot?.snapshot_digest]);
+    const unsafe = snapshot?.state === "blocked" || snapshot?.state === "corrupt" || snapshot?.pipeline.state === "blocked" || snapshot?.pipeline.state === "corrupt";
+    const suggestion = selectedById(pipeline?.suggestions ?? [], selectedSuggestionId);
+    const blueprint = selectedBlueprint(pipeline?.blueprints ?? [], selectedBlueprintId);
+    const stages = useMemo(() => pipeline === null ? [] : fixedPipelineStages(pipeline), [pipeline]);
+    const createBlueprint = useCallback(async (candidate) => {
+      if (mutating || unsafe) return;
+      setMutating(true);
+      setError(null);
+      try {
+        const context = await evolutionApi.mutationContext();
+        const created = await evolutionApi.createBlueprint(candidate.suggestion_id, {
+          ...context,
+          expected_suggestion_digest: candidate.suggestion_digest
+        });
+        setSelectedBlueprintId(created.blueprint_id);
+        await onRefresh();
+        await load();
+        setToast(created.status === "existing" ? "Existing immutable blueprint displayed." : "Immutable blueprint created and displayed.");
+      } catch (nextError) {
+        if (isConflict2(nextError)) {
+          await onRefresh();
+          await load();
+          setError(CONFLICT_MESSAGE2);
+        } else {
+          setError(errorMessage3(nextError));
+        }
+      } finally {
+        setMutating(false);
+      }
+    }, [load, mutating, onRefresh, unsafe]);
+    const research = useCallback(async (candidate) => {
+      setError(null);
+      try {
+        const brief = publicResearchBrief(candidate);
+        await writeResearchBrief(brief.text);
+        setToast(brief.toast);
+        window.location.assign(brief.destination);
+      } catch (nextError) {
+        setError(errorMessage3(nextError));
+      }
+    }, []);
+    if (snapshot === null || loading) return /* @__PURE__ */ React.createElement("section", { className: "evo-pipeline", "aria-busy": "true" }, /* @__PURE__ */ React.createElement("p", null, "Loading bounded local pipeline data\u2026"));
+    if (unsafe) return /* @__PURE__ */ React.createElement("section", { className: "evo-pipeline", "aria-live": "polite" }, /* @__PURE__ */ React.createElement("h2", null, "Pipeline is unavailable"), /* @__PURE__ */ React.createElement("p", null, "Pipeline details and mutable actions are hidden until local diagnostics are safe."));
+    if (pipeline === null) return /* @__PURE__ */ React.createElement("section", { className: "evo-pipeline" }, /* @__PURE__ */ React.createElement("p", { role: "alert" }, error3 ?? "Pipeline data is unavailable."));
+    return /* @__PURE__ */ React.createElement("section", { className: "evo-pipeline", "aria-labelledby": "evo-pipeline-heading" }, /* @__PURE__ */ React.createElement("header", null, /* @__PURE__ */ React.createElement("h2", { id: "evo-pipeline-heading" }, "Evolution pipeline"), /* @__PURE__ */ React.createElement("p", null, "All displayed records are bounded local projections. Blueprint documents are immutable.")), error3 !== null ? /* @__PURE__ */ React.createElement("p", { role: "alert" }, error3) : null, toast !== null ? /* @__PURE__ */ React.createElement("p", { role: "status", "aria-live": "polite" }, toast) : null, /* @__PURE__ */ React.createElement(PipelineStages, { stages }), /* @__PURE__ */ React.createElement("label", null, "Attempt", /* @__PURE__ */ React.createElement("select", { value: attemptId ?? "", onChange: (event3) => setAttemptId(event3.target.value || null) }, /* @__PURE__ */ React.createElement("option", { value: "" }, "Latest local attempt"), pipeline.attempts.map((attempt) => /* @__PURE__ */ React.createElement("option", { key: attempt.attempt_id, value: attempt.attempt_id }, attempt.attempt_id, " \xB7 ", attempt.state)))), pipeline.attempts_truncated ? /* @__PURE__ */ React.createElement("p", null, "Only the latest bounded attempts are available for selection.") : null, /* @__PURE__ */ React.createElement("div", { className: "evo-pipeline__content" }, /* @__PURE__ */ React.createElement("section", { "aria-labelledby": "evo-pipeline-suggestions-heading" }, /* @__PURE__ */ React.createElement("h3", { id: "evo-pipeline-suggestions-heading" }, "Suggestions"), pipeline.suggestions.length === 0 ? /* @__PURE__ */ React.createElement("p", null, "No local suggestions are available for this attempt.") : /* @__PURE__ */ React.createElement("ul", null, pipeline.suggestions.map((item) => /* @__PURE__ */ React.createElement("li", { key: item.suggestion_id }, /* @__PURE__ */ React.createElement("button", { type: "button", "aria-pressed": item.suggestion_id === suggestion?.suggestion_id, onClick: () => setSelectedSuggestionId(item.suggestion_id) }, item.state, " \xB7 score ", item.score.toFixed(2))))), pipeline.suggestions_truncated ? /* @__PURE__ */ React.createElement("p", null, "Suggestions are capped to this bounded local view.") : null), /* @__PURE__ */ React.createElement(SuggestionInspector, { suggestion, blueprints: pipeline.blueprints, disabled: mutating, onCreateBlueprint: (candidate) => void createBlueprint(candidate), onResearch: (candidate) => void research(candidate) }), /* @__PURE__ */ React.createElement("section", { "aria-labelledby": "evo-pipeline-blueprints-heading" }, /* @__PURE__ */ React.createElement("h3", { id: "evo-pipeline-blueprints-heading" }, "Blueprints"), pipeline.blueprints.length === 0 ? /* @__PURE__ */ React.createElement("p", null, "No immutable blueprint has been created for this attempt.") : /* @__PURE__ */ React.createElement("ul", null, pipeline.blueprints.map((item) => /* @__PURE__ */ React.createElement("li", { key: item.blueprint_id }, /* @__PURE__ */ React.createElement("button", { type: "button", "aria-pressed": item.blueprint_id === blueprint?.blueprint_id, onClick: () => setSelectedBlueprintId(item.blueprint_id) }, item.blueprint_id, " \xB7 ", item.state)))), pipeline.blueprints_truncated ? /* @__PURE__ */ React.createElement("p", null, "Blueprints are capped to this bounded local view.") : null), /* @__PURE__ */ React.createElement(BlueprintInspector, { blueprint, auditEvents: sortedAuditEvents(audit?.events ?? []) })), /* @__PURE__ */ React.createElement("section", { "aria-labelledby": "evo-pipeline-audit-heading" }, /* @__PURE__ */ React.createElement("h3", { id: "evo-pipeline-audit-heading" }, "Append-only audit history"), audit === null || audit.events.length === 0 ? /* @__PURE__ */ React.createElement("p", null, "No durable audit events are available.") : /* @__PURE__ */ React.createElement("ol", null, sortedAuditEvents(audit.events).map((event3) => /* @__PURE__ */ React.createElement("li", { key: event3.event_id }, "#", event3.sequence, " \xB7 ", event3.summary))), audit?.truncated ? /* @__PURE__ */ React.createElement("p", null, "Only a bounded append-only audit prefix is displayed.") : null));
+  }
+
   // ../plugins/evolution/dashboard/src/components/StatusRail.tsx
   function humanize(value) {
     return value.replaceAll("_", " ");
@@ -31455,7 +31647,7 @@
   }
 
   // ../plugins/evolution/dashboard/src/components/StrongConfirmationDialog.tsx
-  function errorMessage3(error3) {
+  function errorMessage4(error3) {
     if (error3 instanceof Error && /^422(?::|\s|$)/.test(error3.message)) return "The server rejected this Telos transition. Review the displayed values and refresh before preparing it again.";
     return error3 instanceof Error ? error3.message : "The Telos transition could not be completed.";
   }
@@ -31526,7 +31718,7 @@
         setPhrase("");
         setHasExpired(false);
       } catch (nextError) {
-        if (!await handleStale(nextError)) setError(errorMessage3(nextError));
+        if (!await handleStale(nextError)) setError(errorMessage4(nextError));
       } finally {
         setSubmitting(false);
       }
@@ -31549,7 +31741,7 @@
         await onConfirmed();
         onClose();
       } catch (nextError) {
-        if (!await handleStale(nextError)) setError(errorMessage3(nextError));
+        if (!await handleStale(nextError)) setError(errorMessage4(nextError));
       } finally {
         setSubmitting(false);
       }
@@ -31608,7 +31800,7 @@
 
   // ../plugins/evolution/dashboard/src/components/TelosView.tsx
   var HISTORY_LIMIT = 50;
-  function errorMessage4(error3) {
+  function errorMessage5(error3) {
     if (error3 instanceof Error && /^422(?::|\s|$)/.test(error3.message)) return "The server rejected the structured Telos document. Correct the highlighted fields and try again.";
     return error3 instanceof Error ? error3.message : "Local Telos data is unavailable.";
   }
@@ -31640,7 +31832,7 @@
         setSelectedDigest((current2) => current2 ?? next.active_digest);
         setError(null);
       } catch (nextError) {
-        setError(errorMessage4(nextError));
+        setError(errorMessage5(nextError));
       } finally {
         setLoading(false);
       }
@@ -31679,7 +31871,7 @@
       } catch (nextError) {
         const recovery = staleTransitionRecovery(nextError);
         if (recovery !== null) await recoverStale(recovery.warning);
-        else setError(errorMessage4(nextError));
+        else setError(errorMessage5(nextError));
       } finally {
         setSaving(false);
       }
@@ -31735,7 +31927,7 @@
         onTrackJob: store.trackJob,
         onNavigate: setView
       }
-    ) : view === "organism" ? /* @__PURE__ */ React.createElement(OrganismView, { snapshot: store.snapshot, onRefresh: store.refresh, onTrackJob: store.trackJob }) : view === "telos" ? /* @__PURE__ */ React.createElement(TelosView, { snapshot: store.snapshot, onRefresh: store.refresh }) : /* @__PURE__ */ React.createElement("p", null, VIEWS.find((item) => item.id === view)?.label, " view will appear here.")));
+    ) : view === "organism" ? /* @__PURE__ */ React.createElement(OrganismView, { snapshot: store.snapshot, onRefresh: store.refresh, onTrackJob: store.trackJob }) : view === "telos" ? /* @__PURE__ */ React.createElement(TelosView, { snapshot: store.snapshot, onRefresh: store.refresh }) : /* @__PURE__ */ React.createElement(PipelineView, { snapshot: store.snapshot, onRefresh: store.refresh })));
   }
 
   // ../plugins/evolution/dashboard/src/index.tsx

@@ -4,6 +4,7 @@ import type { EvolutionView } from "../types";
 import { initialView, organismFacet, scanJobProgress } from "../view-model";
 import { OverviewView } from "./OverviewView";
 import { OrganismView } from "./OrganismView";
+import { PipelineView } from "./PipelineView";
 import { StatusRail } from "./StatusRail";
 import { TelosView } from "./TelosView";
 
@@ -77,7 +78,7 @@ export function EvolutionShell(): React.ReactElement {
         ) : view === "telos" ? (
           <TelosView snapshot={store.snapshot} onRefresh={store.refresh} />
         ) : (
-          <p>{VIEWS.find(item => item.id === view)?.label} view will appear here.</p>
+          <PipelineView snapshot={store.snapshot} onRefresh={store.refresh} />
         )}
       </section>
     </main>
