@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import stat
 import shutil
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 import hermes_cli.evolution.dashboard_service as dashboard_module
-from hermes_cli.evolution.dashboard_service import EvolutionDashboardService
+from hermes_cli.evolution.dashboard_service import (
+    EvolutionDashboardConflict,
+    EvolutionDashboardService,
+)
 from hermes_cli.evolution.lifecycle_global import ensure_global_lifecycle_initialized
 from hermes_cli.evolution.organism_identity import (
     OrganismIdentity,
@@ -25,7 +31,7 @@ from hermes_cli.evolution.telos_contract import (
     SuccessIndicator,
     TelosRevision,
 )
-from hermes_cli.gnothi.contract import new_artifact
+from hermes_cli.gnothi.contract import add_edge, add_node, new_artifact
 from hermes_cli.gnothi.store import OrganismRevisionStore
 
 
@@ -61,6 +67,54 @@ def _current_coverage() -> dict[str, dict[str, object]]:
         name: {"status": "current", "fingerprint": f"sha256:{name}"}
         for name in ("source", "capabilities", "runtime", "contracts")
     }
+
+
+def _graph_artifact(
+    identity: OrganismIdentity,
+    *,
+    revision_id: str,
+    available: bool,
+) -> dict[str, object]:
+    artifact = new_artifact(
+        revision_id=revision_id,
+        generation_id=identity.lineage_root_digest,
+        generation_scope="stable",
+        head_commit="a" * 40,
+        collected_at="2026-07-28T12:00:00Z",
+    )
+    artifact["organism_contract"].update(
+        status="current",
+        coverage=_current_coverage(),
+    )
+    add_node(
+        artifact,
+        node_id="capability:alpha",
+        kind="capability",
+        label=f"Alpha {identity.organism_id}",
+        owner_class="core",
+        owner_id=identity.organism_id,
+        state={"available": available},
+        evidence_refs=["evidence:alpha"],
+    )
+    add_node(
+        artifact,
+        node_id="provider:terminal",
+        kind="provider",
+        label="Terminal provider",
+        owner_class="core",
+        owner_id="hermes",
+        state={"available": True},
+        evidence_refs=["evidence:provider"],
+    )
+    add_edge(
+        artifact,
+        edge_id="edge:provides",
+        kind="provides",
+        source="provider:terminal",
+        target="capability:alpha",
+        evidence_refs=["evidence:provider"],
+    )
+    return artifact
 
 
 def _write_telos(root: Path, identity: OrganismIdentity) -> str:
@@ -445,3 +499,134 @@ def test_snapshot_windows_fallback_rejects_nonregular_telos_leaf(
 
     assert result["telos"] == {"state": "corrupt", "active_digest_prefix": None}
     assert "telos_pointer_invalid" in result["diagnostics"]
+
+
+def test_graph_and_revision_reads_are_bounded_public_and_non_mutating(
+    tmp_path: Path,
+) -> None:
+    """Dashboard graph reads expose bounded public rows from immutable revisions."""
+    root = tmp_path / "organism"
+    identity = create_organism_identity(root)
+    first = _graph_artifact(identity, revision_id="rev-graph-1", available=False)
+    second = _graph_artifact(identity, revision_id="rev-graph-2", available=True)
+    store = OrganismRevisionStore(root / "gnothi_seauton")
+    store.publish(first, published_at="2026-07-28T12:00:00Z")
+    pointer = store.publish(second, published_at="2026-07-28T13:00:00Z")
+    before = copy.deepcopy(store.current())
+    service = EvolutionDashboardService(root)
+
+    graph = service.graph(root_id="capability:alpha", depth=1, limit=20)
+
+    assert graph["schema_version"] == 1
+    assert graph["revision_id"] == "rev-graph-2"
+    assert graph["revision_digest"] == pointer["sha256"]
+    assert [node["id"] for node in graph["nodes"]] == [
+        "capability:alpha",
+        "provider:terminal",
+    ]
+    assert graph["total_nodes"] == 2
+    assert graph["total_edges"] == 1
+    assert graph["truncated"] is False
+    assert identity.organism_id not in json.dumps(graph)
+    assert store.current() == before
+
+    revisions = service.revisions(limit=1)
+    assert revisions["schema_version"] == 1
+    assert revisions["total_revisions"] == 2
+    assert revisions["truncated"] is True
+    assert revisions["items"] == [
+        {
+            "revision_id": "rev-graph-2",
+            "revision_digest": pointer["sha256"],
+            "collected_at": "2026-07-28T12:00:00Z",
+            "status": "current",
+            "node_count": 2,
+            "edge_count": 1,
+        }
+    ]
+
+    diff = service.revision_diff("rev-graph-1", "rev-graph-2")
+    assert diff["schema_version"] == 1
+    assert diff["left_revision_id"] == "rev-graph-1"
+    assert diff["right_revision_id"] == "rev-graph-2"
+    assert diff["changed_state"] == [
+        {
+            "id": "capability:alpha",
+            "before": {"available": False},
+            "after": {"available": True},
+        }
+    ]
+    assert identity.organism_id not in json.dumps(diff)
+
+
+def test_graph_rejects_bad_bounds_and_stale_expected_revision(tmp_path: Path) -> None:
+    root = tmp_path / "organism"
+    identity = create_organism_identity(root)
+    store = OrganismRevisionStore(root / "gnothi_seauton")
+    store.publish(_graph_artifact(identity, revision_id="rev-current", available=True))
+    service = EvolutionDashboardService(root)
+
+    for depth in (-1, 5):
+        with pytest.raises(ValueError, match="invalid graph depth"):
+            service.graph(depth=depth)
+    for limit in (0, 201):
+        with pytest.raises(ValueError, match="invalid graph limit"):
+            service.graph(limit=limit)
+    with pytest.raises(EvolutionDashboardConflict) as conflict:
+        service.graph(expected_revision="rev-stale")
+    assert conflict.value.code == "gnothi_revision_changed"
+    assert str(conflict.value) == "gnothi_revision_changed"
+    for limit in (0, 51):
+        with pytest.raises(ValueError, match="invalid revision limit"):
+            service.revisions(limit=limit)
+
+
+def test_revision_diff_omits_non_scalar_private_evidence_refs(tmp_path: Path) -> None:
+    root = tmp_path / "organism"
+    identity = create_organism_identity(root)
+    first = _graph_artifact(identity, revision_id="rev-private-1", available=True)
+    second = _graph_artifact(identity, revision_id="rev-private-2", available=True)
+    add_node(
+        second,
+        node_id="capability:private-evidence",
+        kind="capability",
+        label="Private evidence capability",
+        owner_class="core",
+        owner_id="hermes",
+        state={"available": True, identity.organism_id: True},
+        evidence_refs=[{"private": identity.organism_id}],
+    )
+    store = OrganismRevisionStore(root / "gnothi_seauton")
+    store.publish(first)
+    store.publish(second)
+
+    result = EvolutionDashboardService(root).revision_diff(
+        "rev-private-1", "rev-private-2"
+    )
+
+    assert result["added_capabilities"][0]["evidence_refs"] == []
+    assert identity.organism_id not in json.dumps(result)
+
+
+def test_graph_and_revision_reads_leave_an_absent_root_absent(tmp_path: Path) -> None:
+    root = tmp_path / "organism"
+    service = EvolutionDashboardService(root)
+
+    assert service.graph() == {
+        "schema_version": 1,
+        "revision_id": None,
+        "revision_digest": None,
+        "nodes": [],
+        "edges": [],
+        "blockers": [],
+        "total_nodes": 0,
+        "total_edges": 0,
+        "truncated": False,
+    }
+    assert service.revisions() == {
+        "schema_version": 1,
+        "items": [],
+        "total_revisions": 0,
+        "truncated": False,
+    }
+    assert not root.exists()

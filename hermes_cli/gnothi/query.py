@@ -3,17 +3,78 @@ from __future__ import annotations
 from collections import defaultdict, deque
 from typing import Any
 
+from agent.redact import redact_sensitive_text
+from hermes_cli.gnothi.redaction import redact_value
 from hermes_cli.gnothi.store import (
     OrganismRevisionStore,
     legacy_profile_store_state,
 )
 
 MAX_RESULTS = 200
+MAX_GRAPH_DEPTH = 4
+MAX_GRAPH_EVIDENCE_REFS = 20
+GRAPH_EDGE_KINDS = frozenset({"provides", "requires", "depends_on"})
+
+
+def _public_text(value: object, *, limit: int = 500) -> str:
+    """Return bounded text suitable for a local dashboard response."""
+    safe, _ = redact_value(str(value if value is not None else ""))
+    return redact_sensitive_text(str(safe), force=True, file_read=True)[:limit]
+
+
+def _public_evidence_refs(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return sorted(
+        {
+            _public_text(ref, limit=256)
+            for ref in value
+            if isinstance(ref, (str, int, float)) and str(ref)
+        }
+    )[:MAX_GRAPH_EVIDENCE_REFS]
+
+
+def _public_node(node: dict[str, Any]) -> dict[str, Any]:
+    state = node.get("state")
+    public_state = (
+        {str(key): value for key, value in state.items() if isinstance(value, bool)}
+        if isinstance(state, dict)
+        else {}
+    )
+    owner = node.get("owner")
+    return {
+        "id": _public_text(node.get("id"), limit=256),
+        "kind": _public_text(node.get("kind"), limit=128),
+        "label": _public_text(node.get("label")),
+        "owner_class": _public_text(
+            owner.get("class") if isinstance(owner, dict) else None,
+            limit=128,
+        ),
+        "generation_scope": _public_text(node.get("generation_scope"), limit=64),
+        "state": public_state,
+        "evidence_refs": _public_evidence_refs(node.get("evidence_refs")),
+    }
+
+
+def _public_edge(edge: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": _public_text(edge.get("id"), limit=256),
+        "kind": _public_text(edge.get("kind"), limit=128),
+        "from": _public_text(edge.get("from"), limit=256),
+        "to": _public_text(edge.get("to"), limit=256),
+        "evidence_refs": _public_evidence_refs(edge.get("evidence_refs")),
+    }
 
 
 class OrganismQuery:
-    def __init__(self, store: OrganismRevisionStore):
+    def __init__(
+        self,
+        store: OrganismRevisionStore,
+        *,
+        artifact: dict[str, Any] | None = None,
+    ):
         self.store = store
+        self._artifact = artifact
 
     def status(self) -> dict[str, Any]:
         artifact = self.store.current()
@@ -84,6 +145,135 @@ class OrganismQuery:
         selected = [nodes[node_id] for node_id in sorted(seen)]
         blockers = [node for node in selected if node.get("state", {}).get("available") is False or node.get("state", {}).get("degraded") is True]
         return {"nodes": selected, "edges": chosen_edges, "blockers": blockers, "truncated": len(seen) >= MAX_RESULTS}
+
+    def subgraph(
+        self,
+        *,
+        root_id: str | None,
+        depth: int,
+        limit: int,
+        kinds: frozenset[str],
+        search: str,
+    ) -> dict[str, Any]:
+        """Return a deterministic, bounded public neighborhood of one revision."""
+        if type(depth) is not int or not 0 <= depth <= MAX_GRAPH_DEPTH:
+            raise ValueError("invalid graph depth")
+        if type(limit) is not int or not 1 <= limit <= MAX_RESULTS:
+            raise ValueError("invalid graph limit")
+        if not isinstance(kinds, frozenset) or not all(
+            isinstance(kind, str) for kind in kinds
+        ):
+            raise ValueError("invalid graph kinds")
+        if not isinstance(search, str):
+            raise ValueError("invalid graph search")
+
+        artifact = self._artifact if self._artifact is not None else self.store.current()
+        if not artifact:
+            return {
+                "nodes": [],
+                "edges": [],
+                "blockers": [],
+                "total_nodes": 0,
+                "total_edges": 0,
+                "truncated": False,
+            }
+
+        raw_nodes = artifact.get("nodes")
+        nodes = {
+            node_id: node
+            for node in (raw_nodes if isinstance(raw_nodes, list) else [])
+            if isinstance(node, dict)
+            if isinstance(node.get("id"), str)
+            if (node_id := str(node["id"]))
+        }
+        raw_edges = artifact.get("edges")
+        dependency_edges = sorted(
+            (
+                edge
+                for edge in (raw_edges if isinstance(raw_edges, list) else [])
+                if isinstance(edge, dict)
+                if edge.get("kind") in GRAPH_EDGE_KINDS
+                if isinstance(edge.get("from"), str)
+                if isinstance(edge.get("to"), str)
+                if str(edge["from"]) in nodes and str(edge["to"]) in nodes
+            ),
+            key=lambda edge: (
+                str(edge.get("id") or ""),
+                str(edge.get("kind") or ""),
+                str(edge.get("from") or ""),
+                str(edge.get("to") or ""),
+            ),
+        )
+
+        if root_id is None:
+            traversal = sorted(nodes)
+        elif root_id not in nodes:
+            traversal = []
+        else:
+            adjacency: dict[str, list[str]] = defaultdict(list)
+            for edge in dependency_edges:
+                source, target = str(edge["from"]), str(edge["to"])
+                adjacency[source].append(target)
+                adjacency[target].append(source)
+            for neighbours in adjacency.values():
+                neighbours.sort()
+
+            seen = {root_id}
+            queue = deque([(root_id, 0)])
+            traversal = []
+            while queue:
+                node_id, node_depth = queue.popleft()
+                traversal.append(node_id)
+                if node_depth >= depth:
+                    continue
+                for neighbour in adjacency[node_id]:
+                    if neighbour not in seen:
+                        seen.add(neighbour)
+                        queue.append((neighbour, node_depth + 1))
+
+        needle = search.casefold()
+
+        def matches(node_id: str) -> bool:
+            node = nodes[node_id]
+            if kinds and str(node.get("kind")) not in kinds:
+                return False
+            return not needle or (
+                needle in node_id.casefold()
+                or needle in str(node.get("label") or "").casefold()
+            )
+
+        matching_ids = [node_id for node_id in traversal if matches(node_id)]
+        matching_set = set(matching_ids)
+        matching_edges = [
+            edge
+            for edge in dependency_edges
+            if str(edge["from"]) in matching_set and str(edge["to"]) in matching_set
+        ]
+
+        chosen_ids = matching_ids[:limit]
+        chosen_set = set(chosen_ids)
+        chosen_edges = [
+            edge
+            for edge in matching_edges
+            if str(edge["from"]) in chosen_set and str(edge["to"]) in chosen_set
+        ][:limit]
+        public_nodes = [_public_node(nodes[node_id]) for node_id in sorted(chosen_ids)]
+        public_edges = [_public_edge(edge) for edge in chosen_edges]
+        blockers = [
+            node
+            for node in public_nodes
+            if node["state"].get("available") is False
+            or node["state"].get("degraded") is True
+        ]
+        return {
+            "nodes": public_nodes,
+            "edges": public_edges,
+            "blockers": blockers,
+            "total_nodes": len(matching_ids),
+            "total_edges": len(matching_edges),
+            "truncated": len(matching_ids) > len(chosen_ids)
+            or len(matching_edges) > len(chosen_edges),
+        }
 
     def diff(self, a: str, b: str) -> dict[str, Any]:
         left, right = self.store.get(a), self.store.get(b)

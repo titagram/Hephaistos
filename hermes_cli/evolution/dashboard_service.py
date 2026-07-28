@@ -11,8 +11,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, TypedDict, cast
 
+from agent.redact import redact_sensitive_text
 from hermes_constants import get_organism_home
 from hermes_cli.gnothi.contract import validate_artifact
+from hermes_cli.gnothi.query import OrganismQuery
+from hermes_cli.gnothi.redaction import redact_value
 from hermes_cli.gnothi.store import OrganismRevisionStore
 
 from .bootstrap import evolution_state_kind
@@ -37,6 +40,9 @@ _DOMAIN = re.compile(r"[a-z][a-z0-9_.-]{0,63}\Z", re.ASCII)
 _REQUIRED_GNOTHI_DOMAINS = ("source", "capabilities", "runtime", "contracts")
 _MAX_UNKNOWN_DOMAINS = 50
 _MAX_PUBLIC_FILE_BYTES = 1024 * 1024
+_MAX_GRAPH_DEPTH = 4
+_MAX_GRAPH_LIMIT = 200
+_MAX_REVISIONS = 50
 
 
 class PublicOrganism(TypedDict):
@@ -60,6 +66,18 @@ class EvolutionSnapshot(TypedDict):
 
 class _PublicReadError(RuntimeError):
     """A file cannot safely contribute to a public dashboard response."""
+
+
+class EvolutionDashboardError(RuntimeError):
+    """A stable public reason code for an unavailable dashboard read."""
+
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(code)
+
+
+class EvolutionDashboardConflict(EvolutionDashboardError):
+    """A dashboard request was bound to an obsolete immutable revision."""
 
 
 def _canonical_bytes(value: object) -> bytes:
@@ -377,6 +395,372 @@ class EvolutionDashboardService:
             pipeline=pipeline,
             diagnostics=diagnostics,
         )
+
+    def graph(
+        self,
+        *,
+        root_id: str | None = None,
+        depth: int = 2,
+        limit: int = _MAX_GRAPH_LIMIT,
+        kinds: frozenset[str] | None = None,
+        search: str = "",
+        expected_revision: str | None = None,
+    ) -> dict[str, Any]:
+        """Return a bounded public graph from one verified current revision."""
+        self._validate_graph_bounds(depth=depth, limit=limit)
+        if kinds is not None and (
+            not isinstance(kinds, frozenset)
+            or not all(isinstance(kind, str) for kind in kinds)
+        ):
+            raise ValueError("invalid graph kinds")
+        if not isinstance(search, str):
+            raise ValueError("invalid graph search")
+        if root_id is not None and not isinstance(root_id, str):
+            raise ValueError("invalid graph root")
+        if expected_revision is not None and not isinstance(expected_revision, str):
+            raise ValueError("invalid expected revision")
+
+        identity, store, artifact = self._current_gnothi_for_read()
+        if artifact is None or identity is None or store is None:
+            if expected_revision is not None:
+                raise EvolutionDashboardConflict("gnothi_revision_changed")
+            return self._empty_graph()
+
+        contract = cast(dict[str, Any], artifact["organism_contract"])
+        revision_id = cast(str, contract["revision_id"])
+        if expected_revision is not None and expected_revision != revision_id:
+            raise EvolutionDashboardConflict("gnothi_revision_changed")
+        try:
+            result = OrganismQuery(store, artifact=artifact).subgraph(
+                root_id=root_id,
+                depth=depth,
+                limit=limit,
+                kinds=kinds or frozenset(),
+                search=search,
+            )
+        except ValueError:
+            raise
+        except Exception:
+            raise EvolutionDashboardError("gnothi_unavailable") from None
+
+        return {
+            "schema_version": 1,
+            "revision_id": self._public_text(revision_id, identity, limit=128),
+            "revision_digest": hashlib.sha256(_canonical_bytes(artifact)).hexdigest(),
+            **self._public_graph_result(result, identity),
+        }
+
+    def revisions(self, limit: int = _MAX_REVISIONS) -> dict[str, Any]:
+        """Return a bounded public index of immutable Gnothi revisions."""
+        if type(limit) is not int or not 1 <= limit <= _MAX_REVISIONS:
+            raise ValueError("invalid revision limit")
+        identity, store = self._gnothi_store_for_read()
+        if identity is None or store is None:
+            return {
+                "schema_version": 1,
+                "items": [],
+                "total_revisions": 0,
+                "truncated": False,
+            }
+        try:
+            artifacts = store.list_revisions()
+        except Exception:
+            raise EvolutionDashboardError("gnothi_unavailable") from None
+
+        rows: list[dict[str, Any]] = []
+        for artifact in artifacts:
+            try:
+                self._validate_gnothi_artifact(artifact)
+                contract = cast(dict[str, Any], artifact["organism_contract"])
+                revision_id = cast(str, contract["revision_id"])
+                rows.append(
+                    {
+                        "revision_id": self._public_text(
+                            revision_id, identity, limit=128
+                        ),
+                        "revision_digest": hashlib.sha256(
+                            _canonical_bytes(artifact)
+                        ).hexdigest(),
+                        "collected_at": self._public_text(
+                            contract.get("collected_at"), identity, limit=64
+                        ),
+                        "status": self._public_text(
+                            contract.get("status"), identity, limit=32
+                        ),
+                        "node_count": self._row_count(artifact.get("nodes")),
+                        "edge_count": self._row_count(artifact.get("edges")),
+                    }
+                )
+            except EvolutionDashboardError:
+                raise
+            except Exception:
+                raise EvolutionDashboardError("gnothi_unavailable") from None
+        return {
+            "schema_version": 1,
+            "items": rows[:limit],
+            "total_revisions": len(rows),
+            "truncated": len(rows) > limit,
+        }
+
+    def revision_diff(self, left: str, right: str) -> dict[str, Any]:
+        """Return one bounded, sanitized semantic diff between immutable revisions."""
+        if not isinstance(left, str) or not isinstance(right, str):
+            raise ValueError("invalid revision id")
+        identity, store = self._gnothi_store_for_read()
+        if identity is None or store is None:
+            raise EvolutionDashboardError("gnothi_revision_unavailable")
+        try:
+            result = OrganismQuery(store).diff(left, right)
+        except ValueError:
+            raise EvolutionDashboardError("gnothi_revision_unavailable") from None
+        except Exception:
+            raise EvolutionDashboardError("gnothi_unavailable") from None
+        return {
+            "schema_version": 1,
+            "left_revision_id": self._public_text(left, identity, limit=128),
+            "right_revision_id": self._public_text(right, identity, limit=128),
+            **self._public_diff_result(result, identity),
+        }
+
+    @staticmethod
+    def _validate_graph_bounds(*, depth: int, limit: int) -> None:
+        if type(depth) is not int or not 0 <= depth <= _MAX_GRAPH_DEPTH:
+            raise ValueError("invalid graph depth")
+        if type(limit) is not int or not 1 <= limit <= _MAX_GRAPH_LIMIT:
+            raise ValueError("invalid graph limit")
+
+    @staticmethod
+    def _empty_graph() -> dict[str, Any]:
+        return {
+            "schema_version": 1,
+            "revision_id": None,
+            "revision_digest": None,
+            "nodes": [],
+            "edges": [],
+            "blockers": [],
+            "total_nodes": 0,
+            "total_edges": 0,
+            "truncated": False,
+        }
+
+    def _gnothi_store_for_read(
+        self,
+    ) -> tuple[OrganismIdentity | None, OrganismRevisionStore | None]:
+        try:
+            identity = probe_organism_identity(self.root)
+        except Exception:
+            raise EvolutionDashboardError("organism_identity_corrupt") from None
+        if identity is None or not self._root_is_directory():
+            return identity, None
+        return identity, OrganismRevisionStore(self.root / "gnothi_seauton")
+
+    def _current_gnothi_for_read(
+        self,
+    ) -> tuple[
+        OrganismIdentity | None,
+        OrganismRevisionStore | None,
+        dict[str, Any] | None,
+    ]:
+        identity, store = self._gnothi_store_for_read()
+        if identity is None or store is None:
+            return identity, store, None
+        try:
+            artifact = store.current()
+        except Exception:
+            raise EvolutionDashboardError("gnothi_unavailable") from None
+        if artifact is None:
+            return identity, store, None
+        self._validate_gnothi_artifact(artifact)
+        return identity, store, artifact
+
+    @staticmethod
+    def _validate_gnothi_artifact(artifact: dict[str, Any]) -> None:
+        if validate_artifact(artifact):
+            raise EvolutionDashboardError("gnothi_unavailable")
+        contract = artifact.get("organism_contract")
+        if not isinstance(contract, dict) or not isinstance(
+            contract.get("revision_id"), str
+        ):
+            raise EvolutionDashboardError("gnothi_unavailable")
+
+    @staticmethod
+    def _public_text(
+        value: object,
+        identity: OrganismIdentity,
+        *,
+        limit: int,
+    ) -> str:
+        safe, _ = redact_value(str(value if value is not None else ""))
+        text = redact_sensitive_text(str(safe), force=True, file_read=True)
+        for private_value in (
+            identity.organism_id,
+            identity.lineage_root_digest,
+        ):
+            text = text.replace(private_value, "[REDACTED]")
+        return text[:limit]
+
+    def _public_node(
+        self, node: object, identity: OrganismIdentity
+    ) -> dict[str, Any]:
+        row = node if isinstance(node, dict) else {}
+        state = row.get("state")
+        public_state = (
+            {
+                self._public_text(key, identity, limit=128): value
+                for key, value in state.items()
+                if isinstance(value, bool)
+            }
+            if isinstance(state, dict)
+            else {}
+        )
+        refs = row.get("evidence_refs")
+        return {
+            "id": self._public_text(row.get("id"), identity, limit=256),
+            "kind": self._public_text(row.get("kind"), identity, limit=128),
+            "label": self._public_text(row.get("label"), identity, limit=500),
+            "owner_class": self._public_text(
+                row.get("owner_class"), identity, limit=128
+            ),
+            "generation_scope": self._public_text(
+                row.get("generation_scope"), identity, limit=64
+            ),
+            "state": public_state,
+            "evidence_refs": [
+                self._public_text(ref, identity, limit=256)
+                for ref in (refs[:20] if isinstance(refs, list) else [])
+                if isinstance(ref, (str, int, float))
+            ],
+        }
+
+    def _public_graph_result(
+        self, result: dict[str, Any], identity: OrganismIdentity
+    ) -> dict[str, Any]:
+        raw_nodes = result.get("nodes")
+        nodes = [
+            self._public_node(node, identity)
+            for node in (
+                raw_nodes[:_MAX_GRAPH_LIMIT] if isinstance(raw_nodes, list) else []
+            )
+        ]
+        node_ids = {node["id"] for node in nodes}
+        edges: list[dict[str, Any]] = []
+        raw_edges = result.get("edges")
+        for edge in raw_edges[:_MAX_GRAPH_LIMIT] if isinstance(raw_edges, list) else []:
+            if not isinstance(edge, dict):
+                continue
+            refs = edge.get("evidence_refs")
+            public_edge = {
+                "id": self._public_text(edge.get("id"), identity, limit=256),
+                "kind": self._public_text(edge.get("kind"), identity, limit=128),
+                "from": self._public_text(edge.get("from"), identity, limit=256),
+                "to": self._public_text(edge.get("to"), identity, limit=256),
+                "evidence_refs": [
+                    self._public_text(ref, identity, limit=256)
+                    for ref in (refs[:20] if isinstance(refs, list) else [])
+                    if isinstance(ref, (str, int, float))
+                ],
+            }
+            if public_edge["from"] in node_ids and public_edge["to"] in node_ids:
+                edges.append(public_edge)
+        blockers = [
+            node
+            for node in nodes
+            if node["state"].get("available") is False
+            or node["state"].get("degraded") is True
+        ]
+        return {
+            "nodes": nodes,
+            "edges": edges,
+            "blockers": blockers,
+            "total_nodes": int(result.get("total_nodes", 0)),
+            "total_edges": int(result.get("total_edges", 0)),
+            "truncated": bool(result.get("truncated", False)),
+        }
+
+    def _public_diff_result(
+        self, result: dict[str, Any], identity: OrganismIdentity
+    ) -> dict[str, Any]:
+        def nodes(name: str) -> list[dict[str, Any]]:
+            value = result.get(name)
+            return [
+                self._public_node(node, identity)
+                for node in (value[:_MAX_GRAPH_LIMIT] if isinstance(value, list) else [])
+            ]
+
+        def state(value: object) -> dict[str, bool]:
+            return (
+                {
+                    self._public_text(key, identity, limit=128): item
+                    for key, item in value.items()
+                    if isinstance(item, bool)
+                }
+                if isinstance(value, dict)
+                else {}
+            )
+
+        changed_rows = result.get("changed_state")
+        changed_state = [
+            {
+                "id": self._public_text(row.get("id"), identity, limit=256),
+                "before": state(row.get("before")),
+                "after": state(row.get("after")),
+            }
+            for row in (
+                changed_rows[:_MAX_GRAPH_LIMIT]
+                if isinstance(changed_rows, list)
+                else []
+            )
+            if isinstance(row, dict)
+        ]
+        dependencies = result.get("dependency_changes")
+        dependency_changes = [
+            {
+                "kind": self._public_text(row[0], identity, limit=128),
+                "from": self._public_text(row[1], identity, limit=256),
+                "to": self._public_text(row[2], identity, limit=256),
+            }
+            for row in (
+                dependencies[:_MAX_GRAPH_LIMIT]
+                if isinstance(dependencies, list)
+                else []
+            )
+            if isinstance(row, tuple)
+            and len(row) == 3
+        ]
+        coverage = result.get("coverage_changes")
+        coverage_changes = [
+            {
+                "domain": self._public_text(row.get("domain"), identity, limit=64),
+                "before": self._public_text(row.get("before"), identity, limit=32),
+                "after": self._public_text(row.get("after"), identity, limit=32),
+            }
+            for row in (
+                coverage[:_MAX_GRAPH_LIMIT] if isinstance(coverage, list) else []
+            )
+            if isinstance(row, dict)
+        ]
+        quality = result.get("quality_changes")
+        quality_changes = [
+            {
+                "before": self._public_text(row.get("before"), identity, limit=32),
+                "after": self._public_text(row.get("after"), identity, limit=32),
+            }
+            for row in (
+                quality[:_MAX_GRAPH_LIMIT] if isinstance(quality, list) else []
+            )
+            if isinstance(row, dict)
+        ]
+        return {
+            "added_capabilities": nodes("added_capabilities"),
+            "removed_capabilities": nodes("removed_capabilities"),
+            "changed_state": changed_state,
+            "dependency_changes": dependency_changes,
+            "invariant_impact": nodes("invariant_impact"),
+            "runtime_changes": nodes("runtime_changes"),
+            "quality_changes": quality_changes,
+            "coverage_changes": coverage_changes,
+            "truncated": bool(result.get("truncated", False)),
+        }
 
     @staticmethod
     def _missing_gnothi() -> dict[str, Any]:
