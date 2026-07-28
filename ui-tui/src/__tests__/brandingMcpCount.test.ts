@@ -108,4 +108,14 @@ describe('branding MCP headline count', () => {
     expect(frame).toContain('2 MCP')
     expect(frame).not.toContain('3 MCP')
   })
+
+  it('uses the Hades CLI in the update fallback shown to users', async () => {
+    const frame = await renderFooter({
+      ...baseInfo([]),
+      update_behind: 1
+    })
+
+    expect(frame).toContain('hades update')
+    expect(frame).not.toContain('hermes update')
+  })
 })

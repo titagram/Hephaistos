@@ -4238,7 +4238,8 @@ def test_session_status_reads_live_gateway_agent(monkeypatch):
         server._sessions.pop("sid", None)
 
     out = resp["result"]["output"]
-    assert "Hermes TUI Status" in out
+    assert "Hades TUI Status" in out
+    assert "Hermes TUI Status" not in out
     assert "Session ID: session-key" in out
     assert "Title: Live TUI" in out
     assert "Model: live-model (live-provider)" in out

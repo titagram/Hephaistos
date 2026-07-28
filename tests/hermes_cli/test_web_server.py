@@ -1202,6 +1202,30 @@ class TestWebServerEndpoints:
         assert resp.json() == {"ok": True, "pid": 12345, "name": "hermes-update"}
         assert calls == [(["update"], "hermes-update")]
 
+    def test_action_status_rebrands_legacy_update_log_identifier(
+        self, monkeypatch, tmp_path
+    ):
+        import hermes_cli.web_server as web_server
+
+        monkeypatch.setattr(web_server, "_ACTION_LOG_DIR", tmp_path)
+        (tmp_path / "hermes-update.log").write_text(
+            "=== hermes-update started 2026-07-28 09:00:00 ===\n"
+            "Update complete\n",
+            encoding="utf-8",
+        )
+        web_server._ACTION_PROCS.pop("hermes-update", None)
+        web_server._ACTION_RESULTS.pop("hermes-update", None)
+
+        response = self.client.get("/api/actions/hermes-update/status")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["name"] == "hermes-update"
+        assert body["lines"] == [
+            "=== hades-update started 2026-07-28 09:00:00 ===",
+            "Update complete",
+        ]
+
     def test_action_status_reaps_completed_process(self, monkeypatch):
         import hermes_cli.web_server as web_server
 

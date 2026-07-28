@@ -120,4 +120,11 @@ describe('slash parity matrix', () => {
     expect(cmd, '/q must resolve to a command').toBeDefined()
     expect(cmd!.name).toBe('queue')
   })
+
+  it('exposes Hades branding in local slash-command help', () => {
+    const cmd = findSlashCommand('quit')
+
+    expect(cmd, '/quit must resolve to a command').toBeDefined()
+    expect(cmd!.help).toBe('exit Hades')
+  })
 })

@@ -3574,6 +3574,10 @@ async def get_action_status(name: str, lines: int = 200):
 
     log_path = _ACTION_LOG_DIR / log_file_name
     tail = _tail_lines(log_path, min(max(lines, 1), 2000))
+    if name == "hermes-update":
+        # ``hermes-update`` remains the stable internal action identifier and
+        # log filename, but it is legacy branding when rendered in Sessions.
+        tail = [line.replace("hermes-update", "hades-update") for line in tail]
 
     proc = _ACTION_PROCS.get(name)
     if proc is None:

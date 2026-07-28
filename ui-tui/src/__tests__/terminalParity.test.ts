@@ -12,6 +12,9 @@ describe('terminalParityHints', () => {
     } as NodeJS.ProcessEnv)
 
     expect(hints.map(h => h.key)).toEqual(expect.arrayContaining(['apple-terminal', 'remote', 'tmux']))
+    const remoteHint = hints.find(h => h.key === 'remote')
+    expect(remoteHint?.message).toContain('machine running Hades')
+    expect(remoteHint?.message).not.toContain('machine running Hermes')
   })
 
   it('suggests IDE setup only for VS Code-family terminals that still need bindings', async () => {

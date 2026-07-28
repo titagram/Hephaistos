@@ -8,6 +8,7 @@ headers still use Hermes names by contract.
 from __future__ import annotations
 
 from pathlib import Path
+from xml.etree import ElementTree
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -126,3 +127,14 @@ def test_dashboard_compatibility_identifiers_stay_hermes_named():
     assert '"X-Hermes-Session-Token"' in _read("web/src/lib/api.ts")
     assert '"hermes-sidebar-collapsed"' in _read("web/src/App.tsx")
     assert '"hermes-update"' in _read("web/src/pages/SystemPage.tsx")
+
+
+def test_dashboard_favicon_uses_the_hades_symbol():
+    index = _read("web/index.html")
+    favicon_path = ROOT / "web/public/favicon.svg"
+
+    assert 'rel="icon" type="image/svg+xml" href="/favicon.svg"' in index
+    root = ElementTree.parse(favicon_path).getroot()
+    visible_text = "".join(root.itertext())
+    assert "♇" in visible_text
+    assert "⚕" not in visible_text
