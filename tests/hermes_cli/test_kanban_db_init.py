@@ -16,6 +16,10 @@ def _make_legacy_db(path: Path) -> None:
     conn.executescript(kb.SCHEMA_SQL)
     conn.executescript(
         """
+        DROP TABLE IF EXISTS kanban_org_runs;
+        DROP TABLE IF EXISTS kanban_org_plan_versions;
+        DROP TABLE IF EXISTS kanban_org_nodes;
+        DROP TABLE IF EXISTS kanban_reports;
         DROP TABLE task_events;
         DROP TABLE task_comments;
         DROP TABLE task_runs;
@@ -67,6 +71,45 @@ def _table_struct(conn: sqlite3.Connection, table: str):
         if not r["name"].startswith("sqlite_")
     )
     return cols, idx
+
+
+_ORG_TABLES = {
+    "kanban_org_runs",
+    "kanban_org_plan_versions",
+    "kanban_org_nodes",
+    "kanban_reports",
+}
+
+
+def _table_names(conn: sqlite3.Connection) -> set[str]:
+    return {
+        row["name"]
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+
+
+def test_fresh_db_contains_org_run_and_report_tables(tmp_path):
+    db_path = tmp_path / "fresh.db"
+
+    with kb.connect(db_path) as conn:
+        assert _ORG_TABLES <= _table_names(conn)
+
+
+def test_reopened_legacy_db_adds_org_tables_without_losing_audit_data(
+    tmp_path, monkeypatch
+):
+    db_path = _setup_home(tmp_path, monkeypatch)
+    _make_legacy_db(db_path)
+
+    with kb.connect(db_path) as conn:
+        assert _ORG_TABLES <= _table_names(conn)
+        assert conn.execute("SELECT title FROM tasks WHERE id='task-1'").fetchone()["title"] == "T"
+        assert conn.execute("SELECT COUNT(*) AS n FROM task_events").fetchone()["n"] == 2
+
+    kb._INITIALIZED_PATHS.discard(str(db_path.resolve()))
+    with kb.connect(db_path) as conn:
+        assert _ORG_TABLES <= _table_names(conn)
+        assert conn.execute("SELECT COUNT(*) AS n FROM task_events").fetchone()["n"] == 2
 
 
 def test_connect_initialization_is_thread_safe(tmp_path, monkeypatch):

@@ -1380,8 +1380,65 @@ CREATE TABLE IF NOT EXISTS kanban_sync_locks (
     updated_at           INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS kanban_org_runs (
+    run_id TEXT PRIMARY KEY,
+    board_slug TEXT NOT NULL,
+    plan_version INTEGER NOT NULL,
+    plan_hash TEXT NOT NULL,
+    base_commit TEXT NOT NULL,
+    origin TEXT NOT NULL CHECK(origin IN ('local','backend')),
+    state TEXT NOT NULL,
+    anchor_task_id TEXT NOT NULL UNIQUE,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS kanban_org_plan_versions (
+    run_id TEXT NOT NULL,
+    plan_version INTEGER NOT NULL,
+    plan_hash TEXT NOT NULL,
+    plan_json TEXT NOT NULL,
+    reason TEXT,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY(run_id, plan_version)
+);
+
+CREATE TABLE IF NOT EXISTS kanban_org_nodes (
+    run_id TEXT NOT NULL,
+    node_id TEXT NOT NULL,
+    task_id TEXT NOT NULL UNIQUE,
+    node_kind TEXT NOT NULL,
+    plan_version INTEGER NOT NULL,
+    contract_hash TEXT NOT NULL,
+    logical_role TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'active',
+    PRIMARY KEY(run_id, node_id)
+);
+
+CREATE TABLE IF NOT EXISTS kanban_reports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    board_slug TEXT NOT NULL,
+    report_type TEXT NOT NULL,
+    subject_id TEXT NOT NULL,
+    terminal_run_id INTEGER,
+    source_version INTEGER NOT NULL,
+    report_json TEXT NOT NULL,
+    report_markdown TEXT NOT NULL,
+    generated_at INTEGER NOT NULL,
+    idempotency_key TEXT NOT NULL UNIQUE
+);
+
 CREATE INDEX IF NOT EXISTS idx_sync_outbox_due
 ON kanban_sync_outbox(status, next_attempt_at, id);
+
+CREATE INDEX IF NOT EXISTS idx_org_runs_state
+ON kanban_org_runs(board_slug, state, updated_at);
+
+CREATE INDEX IF NOT EXISTS idx_org_nodes_task
+ON kanban_org_nodes(task_id);
+
+CREATE INDEX IF NOT EXISTS idx_reports_subject_time
+ON kanban_reports(board_slug, report_type, subject_id, generated_at);
 
 CREATE INDEX IF NOT EXISTS idx_tasks_assignee_status ON tasks(assignee, status);
 CREATE INDEX IF NOT EXISTS idx_tasks_status          ON tasks(status);
