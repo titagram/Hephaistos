@@ -20,7 +20,7 @@ recurses through a stale temporary tree.
 | Bounded verifier | `test_bounded_chain_verifier_rejects_an_oversized_valid_chain` failed with missing `verify_chain_bounded`. |
 | Oversized valid chain | `test_dashboard_blocks_an_oversized_valid_lifecycle_chain` returned pipeline state `ready`, proving the dashboard used the unbounded verifier. |
 | Blueprint event proof | `test_blueprint_event_checks_cap_the_one_event_proof_at_one_plus_one_rows` observed two unrestricted `SELECT * FROM lifecycle_events WHERE attempt_id = ?` queries. |
-| Evolution directory | `test_dashboard_bounds_the_evolution_directory_probe_before_materialization` reported `not_ready` after enumerating all 66 entries. |
+| Evolution directory | `test_dashboard_bounds_the_evolution_directory_probe_before_materialization` showed that `Path.iterdir()` materialized all 66 entries through `os.listdir()` before the bounded loop returned `blocked`. |
 
 ## GREEN implementation
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -77,27 +78,28 @@ def evolution_state_kind(root: Path, *, max_members: int | None = None) -> str:
         return "blocked"
     try:
         _validate_directory(root_info)
-        iterator = iter(root.iterdir())
-        if max_members is None:
-            try:
-                first_member = next(iterator)
-            except StopIteration:
-                return "uninitialized"
-            try:
-                next(iterator)
-            except StopIteration:
-                members = [first_member]
-            else:
-                return "existing"
-        else:
-            members = []
-            for _ in range(max_members + 1):
+        with os.scandir(root) as entries:
+            iterator = iter(entries)
+            if max_members is None:
                 try:
-                    members.append(next(iterator))
+                    first_member = root / next(iterator).name
                 except StopIteration:
-                    break
-            if len(members) > max_members:
-                return "blocked"
+                    return "uninitialized"
+                try:
+                    next(iterator)
+                except StopIteration:
+                    members = [first_member]
+                else:
+                    return "existing"
+            else:
+                members = []
+                for _ in range(max_members + 1):
+                    try:
+                        members.append(root / next(iterator).name)
+                    except StopIteration:
+                        break
+                if len(members) > max_members:
+                    return "blocked"
     except (
         LifecycleLockError,
         OSError,

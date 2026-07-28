@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import stat
 import shutil
 from dataclasses import replace
@@ -1222,10 +1223,10 @@ def test_dashboard_blocks_an_oversized_valid_lifecycle_chain(
     ledger.connection.close()
 
 
-def test_dashboard_bounds_the_evolution_directory_probe_before_materialization(
+def test_dashboard_bounds_the_evolution_directory_probe_without_materializing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An oversized evolution directory is unavailable, not a partial lifecycle."""
+    """An oversized directory consumes only the cap plus one scanner entries."""
     root = tmp_path / "organism"
     create_organism_identity(root)
     evolution_root = root / "evolution"
@@ -1234,22 +1235,53 @@ def test_dashboard_bounds_the_evolution_directory_probe_before_materialization(
             "untrusted", encoding="utf-8"
         )
 
-    seen_members: list[str] = []
-    original_iterdir = Path.iterdir
+    original_scandir = os.scandir
+    scans: list[object] = []
 
-    def tracked_iterdir(path: Path):
-        for child in original_iterdir(path):
-            if path == evolution_root:
-                seen_members.append(child.name)
-            yield child
+    class _TrackedScandir:
+        def __init__(self, iterator: object) -> None:
+            self.iterator = iterator
+            self.next_calls = 0
+            self.closed = False
 
-    monkeypatch.setattr(Path, "iterdir", tracked_iterdir)
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback) -> None:
+            self.close()
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            self.next_calls += 1
+            return next(self.iterator)
+
+        def close(self) -> None:
+            self.closed = True
+            self.iterator.close()
+
+    def tracked_scandir(path: str | bytes | os.PathLike[str] | os.PathLike[bytes]):
+        assert Path(path) == evolution_root
+        scan = _TrackedScandir(original_scandir(path))
+        scans.append(scan)
+        return scan
+
+    def eager_listdir(*args: object, **kwargs: object) -> list[str]:
+        raise AssertionError("bounded probe must not materialize os.listdir()")
+
+    monkeypatch.setattr(os, "scandir", tracked_scandir)
+    monkeypatch.setattr(os, "listdir", eager_listdir)
 
     result = EvolutionDashboardService(root).pipeline()
 
     assert result["state"] == "blocked"
     assert result["mutable_actions"] == []
-    assert len(seen_members) == 65
+    assert len(scans) == 1
+    scan = scans[0]
+    assert isinstance(scan, _TrackedScandir)
+    assert scan.next_calls == 65
+    assert scan.closed is True
 
 
 def test_governance_reads_leave_an_absent_root_absent(tmp_path: Path) -> None:
