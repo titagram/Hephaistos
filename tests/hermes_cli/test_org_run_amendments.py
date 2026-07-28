@@ -163,6 +163,7 @@ def _snapshot(conn) -> dict:
     tables = (
         "tasks",
         "task_links",
+        "task_events",
         "kanban_org_runs",
         "kanban_org_plan_versions",
         "kanban_org_nodes",
@@ -283,6 +284,110 @@ def test_additive_amendment_versions_full_plan_and_replays_idempotently(tmp_path
         assert _snapshot(conn) == first_snapshot
 
 
+@pytest.mark.parametrize(
+    ("node_name", "status"),
+    [
+        ("integration_id", "running"),
+        ("integration_id", "done"),
+        ("review_id", "running"),
+        ("review_id", "done"),
+        ("finalization_id", "running"),
+        ("finalization_id", "done"),
+    ],
+)
+def test_amendment_rejects_started_downstream_phase_without_writes(
+    tmp_path,
+    node_name,
+    status,
+):
+    repository = Path(__file__).resolve().parents[2]
+    plan = _plan(repository)
+    plan = replace(plan, tasks=(replace(plan.tasks[0], risk="high"),))
+    amendment = parse_implementation_amendment(
+        _amendment_payload(add_tasks=[_task_payload("regression")])
+    )
+    with kb.connect(tmp_path / "kanban.db") as conn:
+        topology = materialize_org_run(
+            conn,
+            plan,
+            _validation(plan),
+            board="default",
+            activate=False,
+        )
+        downstream_id = getattr(topology, node_name)
+        assert downstream_id is not None
+        conn.execute(
+            "UPDATE tasks SET status=? WHERE id=?",
+            (status, downstream_id),
+        )
+        conn.commit()
+        before = _snapshot(conn)
+
+        with pytest.raises(ValueError, match="downstream.*started"):
+            apply_org_run_amendment(
+                conn,
+                amendment,
+                board="default",
+                repository=repository,
+                profile_exists=lambda _role: True,
+            )
+
+        assert _snapshot(conn) == before
+        assert get_org_run(conn, amendment.run_id).plan_version == 1
+
+
+@pytest.mark.parametrize("mismatch", ["reason", "operation"])
+def test_stale_replay_requires_exact_amendment_provenance(tmp_path, mismatch):
+    repository = Path(__file__).resolve().parents[2]
+    original = parse_implementation_amendment(
+        _amendment_payload(
+            replace_tasks=[
+                {
+                    "replaces": "runtime",
+                    "task": _task_payload("runtime-v2"),
+                }
+            ]
+        )
+    )
+    if mismatch == "reason":
+        replay = replace(original, reason="A different reason")
+    else:
+        replay = parse_implementation_amendment(
+            _amendment_payload(
+                add_tasks=[_task_payload("runtime-v2")],
+                cancel_task_ids=["runtime"],
+            )
+        )
+
+    with kb.connect(tmp_path / "kanban.db") as conn:
+        _materialized(conn, repository)
+        apply_org_run_amendment(
+            conn,
+            original,
+            board="default",
+            repository=repository,
+            profile_exists=lambda _role: True,
+        )
+        before = _snapshot(conn)
+
+        with pytest.raises(ValueError, match="stale base_plan_version"):
+            apply_org_run_amendment(
+                conn,
+                replay,
+                board="default",
+                repository=repository,
+                profile_exists=lambda _role: True,
+            )
+
+        assert _snapshot(conn) == before
+        version = conn.execute(
+            "SELECT reason FROM kanban_org_plan_versions "
+            "WHERE run_id=? AND plan_version=2",
+            (original.run_id,),
+        ).fetchone()
+        assert version["reason"] == original.reason
+
+
 def test_replacement_archives_unfinished_task_and_rewires_integration(tmp_path):
     repository = Path(__file__).resolve().parents[2]
     amendment = parse_implementation_amendment(
@@ -367,6 +472,86 @@ def test_load_rejects_cancelled_node_without_historical_provenance(tmp_path):
         )
         conn.execute(
             "UPDATE kanban_org_nodes SET plan_version=99 "
+            "WHERE run_id=? AND node_id LIKE '%:task:docs'",
+            (amendment.run_id,),
+        )
+        conn.commit()
+
+        with pytest.raises(ValueError, match="incomplete stored topology"):
+            load_org_run_topology(conn, amendment.run_id)
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    ["plan_hash", "plan_json", "active_contract_hash"],
+)
+def test_load_rejects_tampered_current_plan_or_contract(tmp_path, tamper):
+    repository = Path(__file__).resolve().parents[2]
+    with kb.connect(tmp_path / "kanban.db") as conn:
+        plan, topology = _materialized(conn, repository)
+        if tamper == "plan_hash":
+            conn.execute(
+                "UPDATE kanban_org_plan_versions SET plan_hash='tampered' "
+                "WHERE run_id=? AND plan_version=1",
+                (plan.run_id,),
+            )
+            conn.execute(
+                "UPDATE kanban_org_runs SET plan_hash='tampered' WHERE run_id=?",
+                (plan.run_id,),
+            )
+        elif tamper == "plan_json":
+            row = conn.execute(
+                "SELECT plan_json FROM kanban_org_plan_versions "
+                "WHERE run_id=? AND plan_version=1",
+                (plan.run_id,),
+            ).fetchone()
+            payload = json.loads(row["plan_json"])
+            payload["objective"] = "Tampered objective"
+            plan_json = json.dumps(
+                payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            )
+            plan_hash = hashlib.sha256(plan_json.encode()).hexdigest()
+            conn.execute(
+                "UPDATE kanban_org_plan_versions "
+                "SET plan_json=?, plan_hash=? "
+                "WHERE run_id=? AND plan_version=1",
+                (plan_json, plan_hash, plan.run_id),
+            )
+            conn.execute(
+                "UPDATE kanban_org_runs SET plan_hash=? WHERE run_id=?",
+                (plan_hash, plan.run_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE kanban_org_nodes SET contract_hash='tampered' "
+                "WHERE run_id=? AND task_id=?",
+                (plan.run_id, topology.tasks["runtime"].execution_id),
+            )
+        conn.commit()
+
+        with pytest.raises(ValueError, match="incomplete stored topology"):
+            load_org_run_topology(conn, plan.run_id)
+
+
+def test_load_rejects_tampered_historical_cancelled_contract(tmp_path):
+    repository = Path(__file__).resolve().parents[2]
+    amendment = parse_implementation_amendment(
+        _amendment_payload(cancel_task_ids=["docs"])
+    )
+    with kb.connect(tmp_path / "kanban.db") as conn:
+        _materialized(conn, repository, two_tasks=True)
+        apply_org_run_amendment(
+            conn,
+            amendment,
+            board="default",
+            repository=repository,
+            profile_exists=lambda _role: True,
+        )
+        conn.execute(
+            "UPDATE kanban_org_nodes SET contract_hash='tampered' "
             "WHERE run_id=? AND node_id LIKE '%:task:docs'",
             (amendment.run_id,),
         )

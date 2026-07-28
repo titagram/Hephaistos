@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import hashlib
 import json
 
 import pytest
@@ -59,9 +60,15 @@ def _plan(
     )
 
 
-def _validation(plan: ImplementationPlan, *, plan_hash: str = "plan-hash-1") -> PlanValidation:
+def _validation(
+    plan: ImplementationPlan,
+    *,
+    plan_hash: str | None = None,
+) -> PlanValidation:
     return PlanValidation(
-        plan_hash=plan_hash,
+        plan_hash=plan_hash or hashlib.sha256(
+            canonical_plan_json(plan).encode("utf-8")
+        ).hexdigest(),
         ordered_dependencies={task.id: task.depends_on for task in plan.tasks},
         conflicts=(),
         resolved_profiles={
@@ -478,6 +485,20 @@ def test_refresh_org_run_state_uses_durable_statuses_with_exact_precedence(
             (topology.finalization_id,),
         )
         conn.commit()
+        assert refresh_org_run_state(conn, plan.run_id) == "reviewing"
+
+        insert_report(
+            conn,
+            board_slug="default",
+            report_type="org_run",
+            subject_id=plan.run_id,
+            terminal_run_id=None,
+            source_version=1,
+            report_json="{}",
+            report_markdown="# Generic",
+            generated_at=122,
+            idempotency_key=f"org-run:{plan.run_id}:generic-report:v1",
+        )
         assert refresh_org_run_state(conn, plan.run_id) == "reviewing"
 
         insert_report(

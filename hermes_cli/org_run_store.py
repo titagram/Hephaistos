@@ -264,7 +264,7 @@ def refresh_org_run_state(conn: sqlite3.Connection, run_id: str) -> str:
             "SELECT 1 FROM kanban_reports "
             "WHERE board_slug = ? AND subject_id = ? "
             "AND source_version = ? "
-            "AND report_type IN ('org_run', 'org_run_final') LIMIT 1",
+            "AND report_type = 'org_run_final' LIMIT 1",
             (run.board_slug, run_id, run.plan_version),
         ).fetchone() is not None
         global_review_started = any(

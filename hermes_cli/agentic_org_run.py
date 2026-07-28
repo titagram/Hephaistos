@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, replace
 import hashlib
+import itertools
 import json
 from pathlib import Path
 import re
@@ -192,6 +193,131 @@ def _expected_plan_node_roles(
             "orchestrator",
         ),
     )
+
+
+def _ordered_plan_dependencies(
+    plan: ImplementationPlan,
+) -> dict[str, tuple[str, ...]]:
+    tasks = {task.id: task for task in plan.tasks}
+    dependencies = {
+        task.id: set(task.depends_on)
+        for task in plan.tasks
+    }
+    for first_id, second_id in itertools.combinations(sorted(tasks), 2):
+        if set(tasks[first_id].write_scope) & set(tasks[second_id].write_scope):
+            dependencies[second_id].add(first_id)
+    return {
+        task_id: tuple(sorted(parent_ids))
+        for task_id, parent_ids in dependencies.items()
+    }
+
+
+def _expected_plan_node_specs(plan: ImplementationPlan) -> dict[str, _NodeSpec]:
+    anchor_node_id = f"org-run:{plan.run_id}:anchor"
+    specs = [
+        _NodeSpec(
+            node_id=anchor_node_id,
+            task_id="",
+            node_kind="anchor",
+            logical_role="orchestrator",
+            task_contract={
+                "objective": plan.objective,
+                "acceptance_criteria": list(plan.acceptance_criteria),
+            },
+            dependency_node_ids=(),
+        )
+    ]
+    terminal_node_ids = {
+        task.id: (
+            f"{_task_node_key(plan.run_id, task.id)}:review"
+            if _review_required(task)
+            else _task_node_key(plan.run_id, task.id)
+        )
+        for task in plan.tasks
+    }
+    dependencies = _ordered_plan_dependencies(plan)
+    for task in plan.tasks:
+        execution_node_id = _task_node_key(plan.run_id, task.id)
+        specs.append(
+            _NodeSpec(
+                node_id=execution_node_id,
+                task_id="",
+                node_kind="execution",
+                logical_role=task.role,
+                task_contract=_task_contract(task),
+                dependency_node_ids=(
+                    anchor_node_id,
+                    *(
+                        terminal_node_ids[parent_id]
+                        for parent_id in dependencies[task.id]
+                    ),
+                ),
+            )
+        )
+        if _review_required(task):
+            specs.append(
+                _NodeSpec(
+                    node_id=f"{execution_node_id}:review",
+                    task_id="",
+                    node_kind="task_review",
+                    logical_role="reviewer",
+                    task_contract={
+                        "task_id": task.id,
+                        "acceptance_criteria": list(task.acceptance_criteria),
+                        "verification": list(task.verification),
+                    },
+                    dependency_node_ids=(execution_node_id,),
+                )
+            )
+    integration_node_id = f"org-run:{plan.run_id}:integration"
+    specs.append(
+        _NodeSpec(
+            node_id=integration_node_id,
+            task_id="",
+            node_kind="integration",
+            logical_role="orchestrator",
+            task_contract={
+                "objective": plan.objective,
+                "acceptance_criteria": list(plan.acceptance_criteria),
+            },
+            dependency_node_ids=tuple(
+                terminal_node_ids[task_id]
+                for task_id in sorted(terminal_node_ids)
+            ),
+        )
+    )
+    final_parent_node_id = integration_node_id
+    if _global_review_required(plan):
+        review_node_id = f"org-run:{plan.run_id}:review"
+        specs.append(
+            _NodeSpec(
+                node_id=review_node_id,
+                task_id="",
+                node_kind="global_review",
+                logical_role="reviewer",
+                task_contract={
+                    "objective": plan.objective,
+                    "acceptance_criteria": list(plan.acceptance_criteria),
+                },
+                dependency_node_ids=(integration_node_id,),
+            )
+        )
+        final_parent_node_id = review_node_id
+    finalization_node_id = f"org-run:{plan.run_id}:finalize"
+    specs.append(
+        _NodeSpec(
+            node_id=finalization_node_id,
+            task_id="",
+            node_kind="finalization",
+            logical_role="orchestrator",
+            task_contract={
+                "objective": plan.objective,
+                "acceptance_criteria": list(plan.acceptance_criteria),
+            },
+            dependency_node_ids=(final_parent_node_id,),
+        )
+    )
+    return {spec.node_id: spec for spec in specs}
 
 
 def _reject_unowned_task_keys(
@@ -571,21 +697,49 @@ def materialize_org_run(
     return topology
 
 
-def _load_plan_version(
+def _verified_plan_version(
     conn: sqlite3.Connection,
     run_id: str,
     plan_version: int,
-) -> ImplementationPlan:
+) -> tuple[dict[str, Any], str]:
     row = conn.execute(
-        "SELECT plan_json FROM kanban_org_plan_versions "
+        "SELECT plan_hash, plan_json FROM kanban_org_plan_versions "
         "WHERE run_id = ? AND plan_version = ?",
         (run_id, int(plan_version)),
     ).fetchone()
     if row is None:
         raise ValueError(f"OrgRun {run_id} has no plan version {plan_version}")
     try:
-        plan = parse_implementation_plan(json.loads(row["plan_json"]))
+        payload = json.loads(row["plan_json"])
+        if not isinstance(payload, dict):
+            raise ValueError("stored plan must be an object")
+        if payload.get("schema") == IMPLEMENTATION_PLAN_SCHEMA:
+            canonical_json = canonical_plan_json(
+                parse_implementation_plan(payload)
+            )
+        elif payload.get("schema") == "hades.legacy-org-run-adoption.v1":
+            canonical_json = _canonical_json(payload)
+        else:
+            raise ValueError("unsupported stored plan schema")
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError(
+            f"OrgRun {run_id} has invalid plan version {plan_version}"
+        ) from exc
+    expected_hash = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
+    if row["plan_json"] != canonical_json or row["plan_hash"] != expected_hash:
+        raise ValueError(f"OrgRun {run_id} has invalid plan version {plan_version}")
+    return payload, expected_hash
+
+
+def _load_plan_version(
+    conn: sqlite3.Connection,
+    run_id: str,
+    plan_version: int,
+) -> ImplementationPlan:
+    payload, _plan_hash = _verified_plan_version(conn, run_id, plan_version)
+    try:
+        plan = parse_implementation_plan(payload)
+    except ValueError as exc:
         raise ValueError(
             f"OrgRun {run_id} has invalid plan version {plan_version}"
         ) from exc
@@ -639,6 +793,43 @@ def _apply_amendment_to_plan(
     return replace(plan, tasks=tuple(tasks))
 
 
+def _amendment_operation_hash(amendment: ImplementationAmendment) -> str:
+    payload = asdict(amendment)
+    payload.pop("reason")
+    return hashlib.sha256(
+        _canonical_json(payload).encode("utf-8")
+    ).hexdigest()
+
+
+def _amendment_event_matches(
+    conn: sqlite3.Connection,
+    *,
+    anchor_task_id: str,
+    plan_version: int,
+    amendment: ImplementationAmendment,
+) -> bool:
+    rows = conn.execute(
+        "SELECT payload FROM task_events "
+        "WHERE task_id = ? AND kind = 'org_run_amended' "
+        "ORDER BY id DESC",
+        (anchor_task_id,),
+    ).fetchall()
+    for row in rows:
+        try:
+            payload = json.loads(row["payload"])
+        except (TypeError, ValueError):
+            continue
+        if payload.get("plan_version") != plan_version:
+            continue
+        return (
+            payload.get("base_plan_version") == amendment.base_plan_version
+            and payload.get("reason") == amendment.reason
+            and payload.get("operation_hash")
+            == _amendment_operation_hash(amendment)
+        )
+    return False
+
+
 def _amendment_replay_topology(
     conn: sqlite3.Connection,
     run,
@@ -658,7 +849,15 @@ def _amendment_replay_topology(
     candidate_hash = hashlib.sha256(
         canonical_plan_json(candidate).encode("utf-8")
     ).hexdigest()
-    if candidate_hash != run.plan_hash:
+    if (
+        candidate_hash != run.plan_hash
+        or not _amendment_event_matches(
+            conn,
+            anchor_task_id=run.anchor_task_id,
+            plan_version=run.plan_version,
+            amendment=amendment,
+        )
+    ):
         return None
     return load_org_run_topology(conn, amendment.run_id)
 
@@ -763,6 +962,33 @@ def _assert_amendment_targets_unstarted(
             )
 
 
+def _assert_downstream_phases_unstarted(
+    conn: sqlite3.Connection,
+    topology: OrgRunTopology,
+) -> None:
+    downstream = {
+        "integration": topology.integration_id,
+        "global_review": topology.review_id,
+        "finalization": topology.finalization_id,
+    }
+    started: list[str] = []
+    for node_kind, task_id in downstream.items():
+        if task_id is None:
+            continue
+        task = kb.get_task(conn, task_id)
+        if task is None:
+            raise ValueError(
+                f"OrgRun {topology.run_id} has incomplete stored topology"
+            )
+        if task.status in {"running", "done"}:
+            started.append(f"{node_kind}={task.status}")
+    if started:
+        raise ValueError(
+            "cannot amend OrgRun after downstream phase started: "
+            + ", ".join(started)
+        )
+
+
 def _reconcile_parent_links(
     conn: sqlite3.Connection,
     child_id: str,
@@ -820,6 +1046,7 @@ def apply_org_run_amendment(
             raise ValueError(
                 f"OrgRun {amendment.run_id} has incomplete stored topology"
             )
+        _assert_downstream_phases_unstarted(conn, current_topology)
         targets = {
             *(replacement.replaces for replacement in amendment.replace_tasks),
             *amendment.cancel_task_ids,
@@ -1088,6 +1315,17 @@ def apply_org_run_amendment(
             plan_version=new_version,
             plan_hash=validation.plan_hash,
         )
+        kb._append_event(
+            conn,
+            current_topology.anchor_id,
+            "org_run_amended",
+            {
+                "plan_version": new_version,
+                "base_plan_version": amendment.base_plan_version,
+                "reason": amendment.reason,
+                "operation_hash": _amendment_operation_hash(amendment),
+            },
+        )
         topology = load_org_run_topology(conn, amendment.run_id)
         if topology is None:
             raise ValueError(
@@ -1120,19 +1358,18 @@ def _validate_stored_node_provenance(
     plan_hash: str,
     nodes: list,
 ) -> None:
-    stored = conn.execute(
-        "SELECT plan_hash, plan_json FROM kanban_org_plan_versions "
-        "WHERE run_id=? AND plan_version=?",
-        (run_id, int(plan_version)),
-    ).fetchone()
-    if stored is None or stored["plan_hash"] != plan_hash:
-        raise ValueError(f"OrgRun {run_id} has incomplete stored topology")
     try:
-        plan_payload = json.loads(stored["plan_json"])
-    except (TypeError, ValueError) as exc:
+        plan_payload, verified_plan_hash = _verified_plan_version(
+            conn,
+            run_id,
+            plan_version,
+        )
+    except ValueError as exc:
         raise ValueError(
             f"OrgRun {run_id} has incomplete stored topology"
         ) from exc
+    if verified_plan_hash != plan_hash:
+        raise ValueError(f"OrgRun {run_id} has incomplete stored topology")
 
     expected_records: set[tuple[str, str, str, str]]
     current_plan: ImplementationPlan | None = None
@@ -1189,29 +1426,35 @@ def _validate_stored_node_provenance(
         raise ValueError(f"OrgRun {run_id} has incomplete stored topology")
     if current_plan is not None:
         for node in nodes:
-            if node.state != "cancelled":
-                continue
-            historical = conn.execute(
-                "SELECT plan_json FROM kanban_org_plan_versions "
-                "WHERE run_id = ? AND plan_version = ?",
-                (run_id, node.plan_version),
-            ).fetchone()
             try:
-                historical_plan = parse_implementation_plan(
-                    json.loads(historical["plan_json"])
+                historical_payload, _historical_hash = _verified_plan_version(
+                    conn,
+                    run_id,
+                    node.plan_version,
                 )
-            except (KeyError, TypeError, ValueError):
+                historical_plan = parse_implementation_plan(historical_payload)
+            except ValueError:
                 raise ValueError(
                     f"OrgRun {run_id} has incomplete stored topology"
                 ) from None
-            historical_specs = {
-                node_id: (node_kind, logical_role)
-                for node_id, node_kind, logical_role
-                in _expected_plan_node_roles(historical_plan)
-            }
-            if historical_specs.get(node.node_id) != (
-                node.node_kind,
-                node.logical_role,
+            if historical_plan.run_id != run_id:
+                raise ValueError(
+                    f"OrgRun {run_id} has incomplete stored topology"
+                )
+            spec = _expected_plan_node_specs(historical_plan).get(node.node_id)
+            if (
+                spec is None
+                or spec.node_kind != node.node_kind
+                or spec.logical_role != node.logical_role
+                or node.contract_hash
+                != _contract_hash(
+                    node_kind=spec.node_kind,
+                    logical_role=spec.logical_role,
+                    task_contract=spec.task_contract,
+                    dependency_node_ids=spec.dependency_node_ids,
+                    plan_version=node.plan_version,
+                    base_commit=historical_plan.base_commit,
+                )
             ):
                 raise ValueError(
                     f"OrgRun {run_id} has incomplete stored topology"
