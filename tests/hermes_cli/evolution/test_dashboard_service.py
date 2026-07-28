@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import stat
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
 
+import hermes_cli.evolution.dashboard_service as dashboard_module
 from hermes_cli.evolution.dashboard_service import EvolutionDashboardService
 from hermes_cli.evolution.lifecycle_global import ensure_global_lifecycle_initialized
 from hermes_cli.evolution.organism_identity import (
@@ -259,6 +262,186 @@ def test_snapshot_rejects_non_directory_telos_revisions_parent(tmp_path: Path) -
     (telos / "revisions").write_text("not a directory", encoding="utf-8")
 
     result = EvolutionDashboardService(root).snapshot()
+
+    assert result["telos"] == {"state": "corrupt", "active_digest_prefix": None}
+    assert "telos_pointer_invalid" in result["diagnostics"]
+
+
+def test_snapshot_reads_valid_telos_without_posix_openat_flags(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A Windows-style reader still exposes valid local Telos data."""
+    root = tmp_path / "organism"
+    identity = create_organism_identity(root)
+    shutil.rmtree(root / "telos")
+    digest = _write_telos(root / "telos", identity)
+    service = EvolutionDashboardService(root)
+    monkeypatch.delattr(dashboard_module.os, "O_DIRECTORY", raising=False)
+    monkeypatch.delattr(dashboard_module.os, "O_NOFOLLOW", raising=False)
+
+    result = service.snapshot()
+
+    assert result["telos"] == {
+        "state": "ready",
+        "active_digest_prefix": digest[:12],
+    }
+    assert "telos_pointer_invalid" not in result["diagnostics"]
+
+
+def test_snapshot_windows_fallback_rejects_telos_reparse_parent(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A Windows reparse-point parent cannot make Telos data appear ready."""
+    root = tmp_path / "organism"
+    identity = create_organism_identity(root)
+    shutil.rmtree(root / "telos")
+    _write_telos(root / "telos", identity)
+    service = EvolutionDashboardService(root)
+    reparse_path = root / "telos"
+    original_lstat = Path.lstat
+
+    def lstat_with_reparse(path: Path):
+        info = original_lstat(path)
+        if path == reparse_path:
+            return SimpleNamespace(
+                st_mode=info.st_mode,
+                st_dev=info.st_dev,
+                st_ino=info.st_ino,
+                st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT,
+            )
+        return info
+
+    monkeypatch.setattr(Path, "lstat", lstat_with_reparse)
+    monkeypatch.setattr(
+        dashboard_module, "_supports_posix_descriptor_reads", lambda: False
+    )
+
+    result = service.snapshot()
+
+    assert result["telos"] == {"state": "corrupt", "active_digest_prefix": None}
+    assert "telos_pointer_invalid" in result["diagnostics"]
+
+
+def test_snapshot_windows_fallback_rejects_telos_directory_symlink(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A Windows-style reader rejects a substituted Telos parent."""
+    root = tmp_path / "organism"
+    identity = create_organism_identity(root)
+    external_telos = tmp_path / "external-telos"
+    _write_telos(external_telos, identity)
+    shutil.rmtree(root / "telos")
+    (root / "telos").symlink_to(external_telos, target_is_directory=True)
+    service = EvolutionDashboardService(root)
+    monkeypatch.setattr(
+        dashboard_module, "_supports_posix_descriptor_reads", lambda: False
+    )
+
+    result = service.snapshot()
+
+    assert result["telos"] == {"state": "corrupt", "active_digest_prefix": None}
+    assert "telos_pointer_invalid" in result["diagnostics"]
+
+
+def test_snapshot_windows_fallback_rejects_telos_revisions_directory_symlink(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A Windows-style reader rejects a substituted revisions parent."""
+    root = tmp_path / "organism"
+    identity = create_organism_identity(root)
+    external_telos = tmp_path / "external-telos"
+    digest = _write_telos(external_telos, identity)
+    telos = root / "telos"
+    shutil.rmtree(telos / "revisions")
+    (telos / "active.json").write_text(json.dumps({"digest": digest}), encoding="utf-8")
+    (telos / "revisions").symlink_to(
+        external_telos / "revisions", target_is_directory=True
+    )
+    service = EvolutionDashboardService(root)
+    monkeypatch.setattr(
+        dashboard_module, "_supports_posix_descriptor_reads", lambda: False
+    )
+
+    result = service.snapshot()
+
+    assert result["telos"] == {"state": "corrupt", "active_digest_prefix": None}
+    assert "telos_pointer_invalid" in result["diagnostics"]
+
+
+def test_snapshot_windows_fallback_rejects_non_directory_revisions_parent(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A Windows-style reader rejects a non-directory revisions parent."""
+    root = tmp_path / "organism"
+    identity = create_organism_identity(root)
+    external_telos = tmp_path / "external-telos"
+    digest = _write_telos(external_telos, identity)
+    telos = root / "telos"
+    shutil.rmtree(telos / "revisions")
+    (telos / "active.json").write_text(json.dumps({"digest": digest}), encoding="utf-8")
+    (telos / "revisions").write_text("not a directory", encoding="utf-8")
+    service = EvolutionDashboardService(root)
+    monkeypatch.setattr(
+        dashboard_module, "_supports_posix_descriptor_reads", lambda: False
+    )
+
+    result = service.snapshot()
+
+    assert result["telos"] == {"state": "corrupt", "active_digest_prefix": None}
+    assert "telos_pointer_invalid" in result["diagnostics"]
+
+
+def test_snapshot_windows_fallback_rejects_telos_reparse_leaf(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A Windows reparse-point pointer cannot make Telos data appear ready."""
+    root = tmp_path / "organism"
+    identity = create_organism_identity(root)
+    shutil.rmtree(root / "telos")
+    _write_telos(root / "telos", identity)
+    service = EvolutionDashboardService(root)
+    reparse_path = root / "telos" / "active.json"
+    original_lstat = Path.lstat
+
+    def lstat_with_reparse(path: Path):
+        info = original_lstat(path)
+        if path == reparse_path:
+            return SimpleNamespace(
+                st_mode=info.st_mode,
+                st_dev=info.st_dev,
+                st_ino=info.st_ino,
+                st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT,
+            )
+        return info
+
+    monkeypatch.setattr(Path, "lstat", lstat_with_reparse)
+    monkeypatch.setattr(
+        dashboard_module, "_supports_posix_descriptor_reads", lambda: False
+    )
+
+    result = service.snapshot()
+
+    assert result["telos"] == {"state": "corrupt", "active_digest_prefix": None}
+    assert "telos_pointer_invalid" in result["diagnostics"]
+
+
+def test_snapshot_windows_fallback_rejects_nonregular_telos_leaf(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A Windows-style reader rejects a directory substituted for the pointer."""
+    root = tmp_path / "organism"
+    identity = create_organism_identity(root)
+    shutil.rmtree(root / "telos")
+    _write_telos(root / "telos", identity)
+    pointer = root / "telos" / "active.json"
+    pointer.unlink()
+    pointer.mkdir()
+    service = EvolutionDashboardService(root)
+    monkeypatch.setattr(
+        dashboard_module, "_supports_posix_descriptor_reads", lambda: False
+    )
+
+    result = service.snapshot()
 
     assert result["telos"] == {"state": "corrupt", "active_digest_prefix": None}
     assert "telos_pointer_invalid" in result["diagnostics"]

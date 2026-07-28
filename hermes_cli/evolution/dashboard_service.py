@@ -85,48 +85,75 @@ def _same_inode(left: os.stat_result, right: os.stat_result) -> bool:
     return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
 
 
-def _directory_read_flags() -> int:
-    try:
-        return os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-    except AttributeError as exc:
-        raise _PublicReadError("unsafe") from exc
+def _is_link_or_reparse_point(info: os.stat_result) -> bool:
+    """Reject symbolic links and every Windows reparse point."""
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    return stat.S_ISLNK(info.st_mode) or bool(
+        getattr(info, "st_file_attributes", 0) & reparse_flag
+    )
 
 
-def _file_read_flags() -> int:
-    try:
-        return os.O_RDONLY | os.O_NOFOLLOW
-    except AttributeError as exc:
-        raise _PublicReadError("unsafe") from exc
+def _supports_posix_descriptor_reads() -> bool:
+    """Whether retained directory descriptors can provide the POSIX guarantee."""
+    supports_dir_fd = getattr(os, "supports_dir_fd", frozenset())
+    supports_follow_symlinks = getattr(os, "supports_follow_symlinks", frozenset())
+    return (
+        os.name == "posix"
+        and hasattr(os, "O_DIRECTORY")
+        and hasattr(os, "O_NOFOLLOW")
+        and os.open in supports_dir_fd
+        and os.stat in supports_dir_fd
+        and os.stat in supports_follow_symlinks
+    )
 
 
-def _open_regular_file_beneath_root(root: Path, path: Path) -> int | None:
-    """Open a regular file through retained, non-symlink directory descriptors."""
+def _posix_directory_read_flags() -> int:
+    return os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+
+
+def _posix_file_read_flags() -> int:
+    return os.O_RDONLY | os.O_NOFOLLOW
+
+
+def _portable_file_read_flags() -> int:
+    return os.O_RDONLY | getattr(os, "O_BINARY", 0)
+
+
+def _validate_path_info(info: os.stat_result, *, directory: bool) -> None:
+    required_kind = stat.S_ISDIR if directory else stat.S_ISREG
+    if _is_link_or_reparse_point(info) or not required_kind(info.st_mode):
+        raise _PublicReadError("unsafe")
+
+
+def _relative_path_parts(root: Path, path: Path) -> tuple[str, ...]:
     try:
         relative = path.relative_to(root)
     except ValueError as exc:
         raise _PublicReadError("unsafe") from exc
     if not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
         raise _PublicReadError("unsafe")
+    return relative.parts
+
+
+def _open_regular_file_beneath_root(root: Path, path: Path) -> int | None:
+    """Open a regular file through retained, non-symlink directory descriptors."""
+    relative_parts = _relative_path_parts(root, path)
 
     descriptor: int | None = None
     try:
         expected_root = root.lstat()
-        if stat.S_ISLNK(expected_root.st_mode) or not stat.S_ISDIR(
-            expected_root.st_mode
-        ):
-            raise _PublicReadError("unsafe")
-        descriptor = os.open(root, _directory_read_flags())
+        _validate_path_info(expected_root, directory=True)
+        descriptor = os.open(root, _posix_directory_read_flags())
         opened_root = os.fstat(descriptor)
         if not stat.S_ISDIR(opened_root.st_mode) or not _same_inode(
             expected_root, opened_root
         ):
             raise _PublicReadError("unsafe")
 
-        for part in relative.parts[:-1]:
+        for part in relative_parts[:-1]:
             expected = os.stat(part, dir_fd=descriptor, follow_symlinks=False)
-            if stat.S_ISLNK(expected.st_mode) or not stat.S_ISDIR(expected.st_mode):
-                raise _PublicReadError("unsafe")
-            child = os.open(part, _directory_read_flags(), dir_fd=descriptor)
+            _validate_path_info(expected, directory=True)
+            child = os.open(part, _posix_directory_read_flags(), dir_fd=descriptor)
             try:
                 opened = os.fstat(child)
                 if not stat.S_ISDIR(opened.st_mode) or not _same_inode(
@@ -140,11 +167,10 @@ def _open_regular_file_beneath_root(root: Path, path: Path) -> int | None:
             descriptor = child
             os.close(parent_descriptor)
 
-        leaf = relative.name
+        leaf = relative_parts[-1]
         expected = os.stat(leaf, dir_fd=descriptor, follow_symlinks=False)
-        if stat.S_ISLNK(expected.st_mode) or not stat.S_ISREG(expected.st_mode):
-            raise _PublicReadError("unsafe")
-        file_descriptor = os.open(leaf, _file_read_flags(), dir_fd=descriptor)
+        _validate_path_info(expected, directory=False)
+        file_descriptor = os.open(leaf, _posix_file_read_flags(), dir_fd=descriptor)
         try:
             opened = os.fstat(file_descriptor)
             if not stat.S_ISREG(opened.st_mode) or not _same_inode(expected, opened):
@@ -164,33 +190,103 @@ def _open_regular_file_beneath_root(root: Path, path: Path) -> int | None:
             os.close(descriptor)
 
 
-def _open_regular_file(path: Path, root: Path | None) -> int | None:
-    if root is not None:
-        return _open_regular_file_beneath_root(root, path)
+def _open_regular_file_portably_beneath_root(root: Path, path: Path) -> int | None:
+    """Open after lstat validation and post-open revalidation without openat.
+
+    This is intentionally a fail-closed fallback for platforms such as Windows.
+    Unlike the POSIX branch, it cannot retain parent directory handles, so it
+    does not provide an atomic parent-chain guarantee.
+    """
+    relative_parts = _relative_path_parts(root, path)
+    checked_paths: list[tuple[Path, os.stat_result, bool]] = []
+    current = root
     try:
-        expected = path.lstat()
+        root_info = root.lstat()
     except FileNotFoundError:
         return None
-    except OSError as exc:
+    except (OSError, TypeError, NotImplementedError) as exc:
         raise _PublicReadError("unreadable") from exc
-    if stat.S_ISLNK(expected.st_mode) or not stat.S_ISREG(expected.st_mode):
-        raise _PublicReadError("unsafe")
+    _validate_path_info(root_info, directory=True)
+    checked_paths.append((root, root_info, True))
 
     try:
-        descriptor = os.open(path, _file_read_flags())
-    except OSError as exc:
+        for part in relative_parts[:-1]:
+            current = current / part
+            info = current.lstat()
+            _validate_path_info(info, directory=True)
+            checked_paths.append((current, info, True))
+        leaf_path = current / relative_parts[-1]
+        expected_leaf = leaf_path.lstat()
+        _validate_path_info(expected_leaf, directory=False)
+    except FileNotFoundError:
+        return None
+    except _PublicReadError:
+        raise
+    except (OSError, TypeError, NotImplementedError) as exc:
+        raise _PublicReadError("unreadable") from exc
+
+    try:
+        descriptor = os.open(leaf_path, _portable_file_read_flags())
+    except (OSError, TypeError, NotImplementedError) as exc:
         raise _PublicReadError("unreadable") from exc
     try:
-        current = os.fstat(descriptor)
-        if not stat.S_ISREG(current.st_mode) or (current.st_dev, current.st_ino) != (
-            expected.st_dev,
-            expected.st_ino,
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or not _same_inode(expected_leaf, opened):
+            raise _PublicReadError("unsafe")
+        for checked_path, expected, directory in checked_paths:
+            current_info = checked_path.lstat()
+            _validate_path_info(current_info, directory=directory)
+            if not _same_inode(expected, current_info):
+                raise _PublicReadError("unsafe")
+        current_leaf = leaf_path.lstat()
+        _validate_path_info(current_leaf, directory=False)
+        if not _same_inode(expected_leaf, current_leaf) or not _same_inode(
+            opened, current_leaf
         ):
             raise _PublicReadError("unsafe")
         return descriptor
     except BaseException:
         os.close(descriptor)
         raise
+
+
+def _open_unanchored_regular_file(path: Path) -> int | None:
+    try:
+        expected = path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise _PublicReadError("unreadable") from exc
+    _validate_path_info(expected, directory=False)
+
+    flags = _posix_file_read_flags() if _supports_posix_descriptor_reads() else _portable_file_read_flags()
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise _PublicReadError("unreadable") from exc
+    try:
+        current = os.fstat(descriptor)
+        linked = path.lstat()
+        if (
+            not stat.S_ISREG(current.st_mode)
+            or not _same_inode(expected, current)
+            or not _same_inode(expected, linked)
+            or not _same_inode(current, linked)
+        ):
+            raise _PublicReadError("unsafe")
+        _validate_path_info(linked, directory=False)
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _open_regular_file(path: Path, root: Path | None) -> int | None:
+    if root is not None:
+        if _supports_posix_descriptor_reads():
+            return _open_regular_file_beneath_root(root, path)
+        return _open_regular_file_portably_beneath_root(root, path)
+    return _open_unanchored_regular_file(path)
 
 
 def _read_regular_json(
