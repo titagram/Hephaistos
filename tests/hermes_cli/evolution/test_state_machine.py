@@ -164,7 +164,7 @@ def test_allowed_transitions_require_the_designated_actor(
         ("promotion_ready", "active", "supervisor"),
     ],
 )
-def test_approval_bound_entries_require_authorization(
+def test_research_build_and_promotion_lifecycle_entries_require_separate_authorization(
     prior_state: AttemptState, next_state: AttemptState, actor: str
 ) -> None:
     with pytest.raises(EvolutionContractError) as error:
