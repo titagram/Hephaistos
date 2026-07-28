@@ -209,6 +209,43 @@ def test_mutation_initialization_refuses_a_root_swap_before_descriptor_anchoring
     assert not (external / "telos").exists()
 
 
+def test_store_rejects_an_ordinary_root_replacement_before_revision_write(
+    tmp_path: Path,
+) -> None:
+    """A store bound to one organism must not initialise a replacement root."""
+    root = tmp_path / "organism"
+    root.mkdir(mode=0o700)
+    store = TelosStore(root)
+    retained_root = tmp_path / "retained-organism"
+
+    root.rename(retained_root)
+    root.mkdir(mode=0o700)
+
+    with pytest.raises(TelosStoreError, match="telos_root_changed"):
+        store.save_revision(create_sample_telos())
+
+    assert not (root / "telos").exists()
+    assert not (retained_root / "telos").exists()
+
+
+def test_store_constructed_before_root_requires_explicit_mutation_binding(
+    tmp_path: Path,
+) -> None:
+    """A later directory cannot become a write target without an explicit bind."""
+    root = tmp_path / "organism"
+    store = TelosStore(root)
+    root.mkdir(mode=0o700)
+    revision = create_sample_telos()
+
+    with pytest.raises(TelosStoreError, match="telos_root_unbound"):
+        store.save_revision(revision)
+    assert not (root / "telos").exists()
+
+    store.bind_mutation_root()
+    store.save_revision(revision)
+    assert (root / "telos" / "revisions" / f"{revision.canonical_digest}.json").exists()
+
+
 def test_unsupported_anchoring_primitives_fail_before_telos_filesystem_mutation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

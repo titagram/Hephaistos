@@ -26,6 +26,10 @@ def _same_inode(left: os.stat_result, right: os.stat_result) -> bool:
     return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
 
 
+def _root_inode(info: os.stat_result) -> tuple[int, int]:
+    return (info.st_dev, info.st_ino)
+
+
 def _validate_directory(info: os.stat_result) -> None:
     if (
         stat.S_ISLNK(info.st_mode)
@@ -176,9 +180,11 @@ class _TelosMutation:
 
     def _open(self) -> None:
         try:
+            self.store._require_bound_mutation_root()
             self.root_descriptor = self._open_directory(
                 None, self.store.organism_root, None
             )
+            self.store._verify_bound_mutation_root(self.root_descriptor)
             self.telos_descriptor = self._open_directory(
                 self.root_descriptor, self.store.telos_dir, "telos"
             )
@@ -217,6 +223,7 @@ class _TelosMutation:
         ):
             raise TelosStoreError("telos_unsafe_path")
         try:
+            self.store._verify_bound_mutation_root(self.root_descriptor)
             root_link = self.store.organism_root.lstat()
             telos_link = os.stat(
                 "telos", dir_fd=self.root_descriptor, follow_symlinks=False
@@ -489,6 +496,100 @@ class TelosStore:
         self.revisions_dir = self.telos_dir / "revisions"
         self.active_pointer = self.telos_dir / "active.json"
         self.lkg_pointer = self.telos_dir / "last-known-good.json"
+        self._mutation_root_inode = self._read_root_inode()
+
+    def _read_root_inode(self) -> tuple[int, int] | None:
+        """Safely capture an existing root's identity without mutation."""
+        try:
+            linked = self.organism_root.lstat()
+            if (
+                stat.S_ISLNK(linked.st_mode)
+                or not stat.S_ISDIR(linked.st_mode)
+                or not hasattr(os, "O_DIRECTORY")
+                or not hasattr(os, "O_NOFOLLOW")
+            ):
+                return None
+            descriptor = os.open(
+                self.organism_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+            )
+            try:
+                opened = os.fstat(descriptor)
+                relinked = self.organism_root.lstat()
+            finally:
+                os.close(descriptor)
+        except (FileNotFoundError, OSError, TypeError, NotImplementedError):
+            return None
+        if (
+            stat.S_ISLNK(opened.st_mode)
+            or not stat.S_ISDIR(opened.st_mode)
+            or stat.S_ISLNK(relinked.st_mode)
+            or not stat.S_ISDIR(relinked.st_mode)
+            or not _same_inode(linked, opened)
+            or not _same_inode(opened, relinked)
+        ):
+            return None
+        return _root_inode(opened)
+
+    def bind_mutation_root(self) -> None:
+        """Explicitly bind an initially absent store to an existing safe root.
+
+        Construction is intentionally read-only.  A store made before its root
+        exists cannot infer which later directory it is allowed to mutate, so a
+        caller must request this binding after the organism has been created.
+        """
+        _require_atomic_anchoring()
+        try:
+            linked = self.organism_root.lstat()
+            _validate_directory(linked)
+            descriptor = os.open(
+                self.organism_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+            )
+            try:
+                opened = os.fstat(descriptor)
+                _validate_directory(opened)
+                relinked = self.organism_root.lstat()
+                _validate_directory(relinked)
+                if (
+                    not _same_inode(linked, opened)
+                    or not _same_inode(opened, relinked)
+                ):
+                    raise TelosStoreError("telos_root_changed")
+                current_inode = _root_inode(opened)
+            finally:
+                os.close(descriptor)
+        except TelosStoreError:
+            raise
+        except (OSError, TypeError, NotImplementedError, AttributeError) as exc:
+            raise TelosStoreError("telos_unsafe_path") from exc
+
+        if (
+            self._mutation_root_inode is not None
+            and self._mutation_root_inode != current_inode
+        ):
+            raise TelosStoreError("telos_root_changed")
+        self._mutation_root_inode = current_inode
+
+    def _require_bound_mutation_root(self) -> None:
+        if self._mutation_root_inode is None:
+            raise TelosStoreError("telos_root_unbound")
+
+    def _verify_bound_mutation_root(self, descriptor: int) -> None:
+        """Reject a path whose current directory differs from this store's root."""
+        self._require_bound_mutation_root()
+        try:
+            linked = self.organism_root.lstat()
+            opened = os.fstat(descriptor)
+        except (FileNotFoundError, OSError) as exc:
+            raise TelosStoreError("telos_root_changed") from exc
+        expected = self._mutation_root_inode
+        if (
+            expected is None
+            or _root_inode(linked) != expected
+            or _root_inode(opened) != expected
+        ):
+            raise TelosStoreError("telos_root_changed")
+        _validate_directory(linked)
+        _validate_directory(opened)
 
     @classmethod
     def from_verified_read_root(cls, organism_root: Path) -> "TelosStore":
@@ -498,13 +599,7 @@ class TelosStore:
         never create Telos directories before every requested condition is
         proven current.
         """
-        store = cls.__new__(cls)
-        store.organism_root = Path(organism_root)
-        store.telos_dir = store.organism_root / "telos"
-        store.revisions_dir = store.telos_dir / "revisions"
-        store.active_pointer = store.telos_dir / "active.json"
-        store.lkg_pointer = store.telos_dir / "last-known-good.json"
-        return store
+        return cls(organism_root)
 
     def initialize_for_mutation(self) -> None:
         """Securely create missing Telos directories for a forthcoming write.
