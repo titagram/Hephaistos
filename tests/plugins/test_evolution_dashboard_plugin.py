@@ -364,11 +364,50 @@ def test_router_exposes_all_governed_mutation_endpoints(client):
     assert confirm.json() == {"code": "confirmation_not_found"}
 
     blueprint = client.post(
-        "/api/plugins/evolution/suggestions/not-a-uuid/blueprint",
+        "/api/plugins/evolution/suggestions/9not-a-suggestion-id/blueprint",
         json={**context, "expected_suggestion_digest": "a" * 64},
     )
     assert blueprint.status_code == 422
     assert blueprint.json() == {"code": "invalid_request"}
+
+
+def test_blueprint_route_forwards_canonical_observer_suggestion_id(
+    client, plugin, monkeypatch
+):
+    """The UUID-only route guard would reject the Observer's ``sug_`` IDs."""
+    captured: dict[str, object] = {}
+
+    class Service:
+        def create_blueprint(self, **kwargs):
+            captured.update(kwargs)
+            return {"status": "created"}
+
+    monkeypatch.setattr(plugin, "_service", lambda: Service())
+    body = {
+        "organism_id": "00000000-0000-4000-8000-000000000000",
+        "expected_snapshot_digest": "a" * 64,
+        "expected_suggestion_digest": "b" * 64,
+    }
+
+    created = client.post(
+        "/api/plugins/evolution/suggestions/sug_0123456789ab/blueprint",
+        json=body,
+    )
+    assert created.status_code == 200, created.text
+    assert captured["suggestion_id"] == "sug_0123456789ab"
+
+    malformed = client.post(
+        "/api/plugins/evolution/suggestions/9not-a-suggestion-id/blueprint",
+        json=body,
+    )
+    unmatched = client.post(
+        "/api/plugins/evolution/suggestions/sug_0123456789ab/extra/blueprint",
+        json=body,
+    )
+
+    assert malformed.status_code == 422
+    assert malformed.json() == {"code": "invalid_request"}
+    assert unmatched.status_code == 404
 
 
 def test_errors_are_sanitized_and_route_module_has_no_remote_or_shell_boundary(client):

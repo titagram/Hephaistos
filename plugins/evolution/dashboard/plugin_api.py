@@ -22,6 +22,7 @@ from hermes_cli.evolution.dashboard_jobs import (
     EvolutionJobError,
     EvolutionJobManager,
 )
+from hermes_cli.evolution.blueprint_contract import _SUGGESTION_ID_PATTERN
 from hermes_cli.evolution.dashboard_service import (
     EvolutionDashboardConflict,
     EvolutionDashboardError,
@@ -560,7 +561,7 @@ async def post_telos_confirm(request: Request) -> dict[str, Any]:
 @router.post("/suggestions/{suggestion_id}/blueprint")
 @_public_route
 async def post_blueprint(suggestion_id: str, request: Request) -> dict[str, Any]:
-    if not _UUID.fullmatch(suggestion_id):
+    if _SUGGESTION_ID_PATTERN.fullmatch(suggestion_id) is None:
         raise _error("invalid_request", status.HTTP_422_UNPROCESSABLE_CONTENT)
     body = await _body(request, BlueprintRequest)
     try:
