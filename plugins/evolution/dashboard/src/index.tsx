@@ -1,7 +1,8 @@
 import { React } from "./sdk";
+import { EvolutionShell } from "./components/EvolutionShell";
 
 function EvolutionPlugin() {
-  return React.createElement("main", { className: "evo-shell" }, "Evolution");
+  return React.createElement(EvolutionShell);
 }
 
 const registry = window.__HERMES_PLUGINS__;

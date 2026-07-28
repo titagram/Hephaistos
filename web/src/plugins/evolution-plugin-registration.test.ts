@@ -7,21 +7,21 @@ interface RegisteredPlugin {
 
 interface RenderedElement {
   props: {
-    children: unknown;
-    className: unknown;
+    children?: unknown;
+    className?: unknown;
   };
   type: unknown;
 }
 
 interface TestReact {
   createElement(
-    type: string,
-    props: { className: string } | null,
+    type: unknown,
+    props: Record<string, unknown> | null,
     ...children: string[]
   ): {
     children: string[];
-    props: { children: string; className: string } | null;
-    type: string;
+    props: Record<string, unknown> | null;
+    type: unknown;
   };
 }
 
@@ -65,7 +65,7 @@ afterEach(() => {
 });
 
 describe("Evolution dashboard plugin", () => {
-  it("registers its minimal host-rendered component", async () => {
+  it("registers the host-rendered Evolution shell", async () => {
     let registered: RegisteredPlugin | undefined;
     const testWindow: TestPluginWindow = {
       __HERMES_PLUGIN_SDK__: {
@@ -113,10 +113,7 @@ describe("Evolution dashboard plugin", () => {
 
     expect(registered?.name).toBe("evolution");
     const rendered = registered?.component() as RenderedElement;
-    expect(rendered.type).toBe("main");
-    expect(rendered.props).toMatchObject({
-      className: "evo-shell",
-      children: "Evolution",
-    });
+    expect(typeof rendered.type).toBe("function");
+    expect((rendered.type as Function).name).toBe("EvolutionShell");
   });
 });

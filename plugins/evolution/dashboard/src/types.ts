@@ -195,6 +195,20 @@ export interface TelosRevision {
   success_indicators: TelosItem[];
 }
 
+export interface TelosDocument {
+  schema_version: 1;
+  organism_id: string;
+  parent_digest: string | null;
+  purpose: string;
+  desired_traits: TelosItem[];
+  capability_directions: TelosItem[];
+  priorities: TelosItem[];
+  tradeoffs: TelosItem[];
+  prohibitions: TelosItem[];
+  proactivity_policy: TelosItem;
+  success_indicators: TelosItem[];
+}
+
 export interface TelosResponse {
   schema_version: 1;
   state: HealthState;
