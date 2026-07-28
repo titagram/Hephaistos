@@ -47,3 +47,36 @@ per-file parallel subprocesses sharing duplicate pytest test-directory names.
 - `test_global_lifecycle_migration.py`: 9 passed
 - `test_telos_cli_approval.py`: 56 passed
 - Ruff and `git diff --check`: passed
+
+---
+
+## Dashboard confirmation expiry correction
+
+### RED evidence
+
+- `web/src/plugins/evolution-strong-confirmation.test.tsx` advances fake time
+  to the server-issued `expires_at` without changing props or causing an
+  unrelated render. Before this correction, the expected expiry alert was not
+  present, proving the dialog only recomputed expiry during a render.
+
+### Delivered
+
+- `StrongConfirmationDialog` now schedules one exact-expiry timeout for each
+  prepared confirmation and cleans it up when that confirmation is replaced or
+  the dialog unmounts.
+- A foreground `visibilitychange` reschedules from `Date.now()`, so a delayed
+  background-tab timer cannot leave a stale confirmation actionable.
+- At expiry, the original message remains exact: “This confirmation expired.
+  Close it and prepare a new transition.” The phrase input and confirm button
+  are disabled, confirm performs no API request, and Cancel remains available
+  for the explicit close-and-reprepare path.
+- This change intentionally does not add a focus trap.
+
+### GREEN verification
+
+- `npm run test -- evolution-strong-confirmation.test.tsx evolution-telos.test.ts evolution-api.test.ts evolution-plugin.test.ts evolution-graph.test.ts`
+  — 5 files, 30 tests passed.
+- `npm run check:evolution` — TypeScript check passed, dashboard bundle rebuilt
+  at `plugins/evolution/dashboard/dist/index.js`, and JavaScript syntax check
+  passed.
+- `git diff --check` — passed.

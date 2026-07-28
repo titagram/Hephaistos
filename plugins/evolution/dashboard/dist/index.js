@@ -31472,13 +31472,42 @@
     onConfirmed,
     onStale
   }) {
-    const { useRef, useState } = SDK.hooks;
+    const { useEffect, useRef, useState } = SDK.hooks;
     const [prepared, setPrepared] = useState(null);
     const [phrase, setPhrase] = useState("");
     const [submitting, setSubmitting] = useState(false);
     const [error3, setError] = useState(null);
+    const [hasExpired, setHasExpired] = useState(false);
     const confirmedRef = useRef(false);
     const title = action === "activate" ? "Activate Telos revision" : "Roll back Telos revision";
+    useEffect(() => {
+      if (prepared === null) {
+        setHasExpired(false);
+        return;
+      }
+      const timestamp = Date.parse(prepared.expires_at);
+      if (!Number.isFinite(timestamp)) return;
+      let timeoutId;
+      const scheduleExpiry = () => {
+        if (timeoutId !== void 0) window.clearTimeout(timeoutId);
+        const delay2 = timestamp - Date.now();
+        if (delay2 <= 0) {
+          setHasExpired(true);
+          return;
+        }
+        setHasExpired(false);
+        timeoutId = window.setTimeout(() => setHasExpired(true), delay2);
+      };
+      const onVisibilityChange = () => {
+        if (!document.hidden) scheduleExpiry();
+      };
+      scheduleExpiry();
+      document.addEventListener("visibilitychange", onVisibilityChange);
+      return () => {
+        if (timeoutId !== void 0) window.clearTimeout(timeoutId);
+        document.removeEventListener("visibilitychange", onVisibilityChange);
+      };
+    }, [prepared?.confirmation_id, prepared?.expires_at]);
     const handleStale = async (nextError) => {
       const recovery = staleTransitionRecovery(nextError);
       if (recovery === null) return false;
@@ -31495,6 +31524,7 @@
         const next = await evolutionApi.prepareTelosTransition({ ...context, current_digest: currentDigest, target_digest: targetDigest, action });
         setPrepared(next);
         setPhrase("");
+        setHasExpired(false);
       } catch (nextError) {
         if (!await handleStale(nextError)) setError(errorMessage3(nextError));
       } finally {
@@ -31524,8 +31554,9 @@
         setSubmitting(false);
       }
     };
-    const canConfirm = prepared !== null && !expired(prepared) && isExactConfirmationPhrase(phrase, prepared.required_phrase) && !submitting && !confirmedRef.current;
-    return /* @__PURE__ */ React.createElement("div", { className: "evo-confirmation-dialog", role: "dialog", "aria-modal": "true", "aria-labelledby": "evo-telos-confirmation-title", "aria-describedby": "evo-telos-confirmation-description" }, /* @__PURE__ */ React.createElement("section", { className: "evo-confirmation-dialog__content" }, /* @__PURE__ */ React.createElement("header", null, /* @__PURE__ */ React.createElement("h2", { id: "evo-telos-confirmation-title" }, title)), /* @__PURE__ */ React.createElement("p", { id: "evo-telos-confirmation-description" }, "This is a consequential local Telos pointer change. Prepare the server-issued confirmation before it can be confirmed once."), /* @__PURE__ */ React.createElement("dl", null, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("dt", null, "Organism"), /* @__PURE__ */ React.createElement("dd", null, prepared?.organism_id ?? organismId)), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("dt", null, "Current digest"), /* @__PURE__ */ React.createElement("dd", null, prepared?.current_digest ?? currentDigest)), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("dt", null, "Target digest"), /* @__PURE__ */ React.createElement("dd", null, prepared?.target_digest ?? targetDigest)), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("dt", null, "Action"), /* @__PURE__ */ React.createElement("dd", null, action)), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("dt", null, "Consequences"), /* @__PURE__ */ React.createElement("dd", null, confirmationConsequences(action))), prepared !== null ? /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("dt", null, "Expires"), /* @__PURE__ */ React.createElement("dd", null, prepared.expires_at)) : null), prepared === null ? /* @__PURE__ */ React.createElement("button", { type: "button", onClick: () => void prepare(), disabled: submitting }, submitting ? "Preparing\u2026" : "Prepare confirmation") : /* @__PURE__ */ React.createElement("label", null, "Type the exact server phrase", /* @__PURE__ */ React.createElement("input", { value: phrase, onChange: (event3) => setPhrase(event3.target.value), autoComplete: "off", "aria-describedby": "evo-telos-required-phrase", disabled: submitting || expired(prepared) }), /* @__PURE__ */ React.createElement("span", { id: "evo-telos-required-phrase" }, prepared.required_phrase)), prepared !== null && expired(prepared) ? /* @__PURE__ */ React.createElement("p", { role: "alert" }, "This confirmation expired. Close it and prepare a new transition.") : null, error3 !== null ? /* @__PURE__ */ React.createElement("p", { role: "alert" }, error3) : null, /* @__PURE__ */ React.createElement("footer", null, /* @__PURE__ */ React.createElement("button", { type: "button", onClick: onClose, disabled: submitting }, "Cancel"), prepared !== null ? /* @__PURE__ */ React.createElement("button", { type: "button", onClick: () => void confirm(), disabled: !canConfirm }, "Confirm ", action) : null)));
+    const isPreparedExpired = prepared !== null && (hasExpired || expired(prepared));
+    const canConfirm = prepared !== null && !isPreparedExpired && isExactConfirmationPhrase(phrase, prepared.required_phrase) && !submitting && !confirmedRef.current;
+    return /* @__PURE__ */ React.createElement("div", { className: "evo-confirmation-dialog", role: "dialog", "aria-modal": "true", "aria-labelledby": "evo-telos-confirmation-title", "aria-describedby": "evo-telos-confirmation-description" }, /* @__PURE__ */ React.createElement("section", { className: "evo-confirmation-dialog__content" }, /* @__PURE__ */ React.createElement("header", null, /* @__PURE__ */ React.createElement("h2", { id: "evo-telos-confirmation-title" }, title)), /* @__PURE__ */ React.createElement("p", { id: "evo-telos-confirmation-description" }, "This is a consequential local Telos pointer change. Prepare the server-issued confirmation before it can be confirmed once."), /* @__PURE__ */ React.createElement("dl", null, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("dt", null, "Organism"), /* @__PURE__ */ React.createElement("dd", null, prepared?.organism_id ?? organismId)), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("dt", null, "Current digest"), /* @__PURE__ */ React.createElement("dd", null, prepared?.current_digest ?? currentDigest)), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("dt", null, "Target digest"), /* @__PURE__ */ React.createElement("dd", null, prepared?.target_digest ?? targetDigest)), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("dt", null, "Action"), /* @__PURE__ */ React.createElement("dd", null, action)), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("dt", null, "Consequences"), /* @__PURE__ */ React.createElement("dd", null, confirmationConsequences(action))), prepared !== null ? /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("dt", null, "Expires"), /* @__PURE__ */ React.createElement("dd", null, prepared.expires_at)) : null), prepared === null ? /* @__PURE__ */ React.createElement("button", { type: "button", onClick: () => void prepare(), disabled: submitting }, submitting ? "Preparing\u2026" : "Prepare confirmation") : /* @__PURE__ */ React.createElement("label", null, "Type the exact server phrase", /* @__PURE__ */ React.createElement("input", { value: phrase, onChange: (event3) => setPhrase(event3.target.value), autoComplete: "off", "aria-describedby": "evo-telos-required-phrase", disabled: submitting || isPreparedExpired }), /* @__PURE__ */ React.createElement("span", { id: "evo-telos-required-phrase" }, prepared.required_phrase)), prepared !== null && isPreparedExpired ? /* @__PURE__ */ React.createElement("p", { role: "alert" }, "This confirmation expired. Close it and prepare a new transition.") : null, error3 !== null ? /* @__PURE__ */ React.createElement("p", { role: "alert" }, error3) : null, /* @__PURE__ */ React.createElement("footer", null, /* @__PURE__ */ React.createElement("button", { type: "button", onClick: onClose, disabled: submitting }, "Cancel"), prepared !== null ? /* @__PURE__ */ React.createElement("button", { type: "button", onClick: () => void confirm(), disabled: !canConfirm }, "Confirm ", action) : null)));
   }
 
   // ../plugins/evolution/dashboard/src/components/TelosDiff.tsx

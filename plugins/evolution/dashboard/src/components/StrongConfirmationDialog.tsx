@@ -34,13 +34,46 @@ export function StrongConfirmationDialog({
   onConfirmed,
   onStale,
 }: StrongConfirmationDialogProps): React.ReactElement {
-  const { useRef, useState } = SDK.hooks;
+  const { useEffect, useRef, useState } = SDK.hooks;
   const [prepared, setPrepared] = useState<TelosTransitionPreparation | null>(null);
   const [phrase, setPhrase] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [hasExpired, setHasExpired] = useState(false);
   const confirmedRef = useRef(false);
   const title = action === "activate" ? "Activate Telos revision" : "Roll back Telos revision";
+
+  useEffect(() => {
+    if (prepared === null) {
+      setHasExpired(false);
+      return;
+    }
+
+    const timestamp = Date.parse(prepared.expires_at);
+    if (!Number.isFinite(timestamp)) return;
+
+    let timeoutId: number | undefined;
+    const scheduleExpiry = () => {
+      if (timeoutId !== undefined) window.clearTimeout(timeoutId);
+      const delay = timestamp - Date.now();
+      if (delay <= 0) {
+        setHasExpired(true);
+        return;
+      }
+      setHasExpired(false);
+      timeoutId = window.setTimeout(() => setHasExpired(true), delay);
+    };
+    const onVisibilityChange = () => {
+      if (!document.hidden) scheduleExpiry();
+    };
+
+    scheduleExpiry();
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      if (timeoutId !== undefined) window.clearTimeout(timeoutId);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [prepared?.confirmation_id, prepared?.expires_at]);
 
   const handleStale = async (nextError: unknown) => {
     const recovery = staleTransitionRecovery(nextError);
@@ -59,6 +92,7 @@ export function StrongConfirmationDialog({
       const next = await evolutionApi.prepareTelosTransition({ ...context, current_digest: currentDigest, target_digest: targetDigest, action });
       setPrepared(next);
       setPhrase("");
+      setHasExpired(false);
     } catch (nextError) {
       if (!await handleStale(nextError)) setError(errorMessage(nextError));
     } finally {
@@ -90,7 +124,8 @@ export function StrongConfirmationDialog({
     }
   };
 
-  const canConfirm = prepared !== null && !expired(prepared) && isExactConfirmationPhrase(phrase, prepared.required_phrase) && !submitting && !confirmedRef.current;
+  const isPreparedExpired = prepared !== null && (hasExpired || expired(prepared));
+  const canConfirm = prepared !== null && !isPreparedExpired && isExactConfirmationPhrase(phrase, prepared.required_phrase) && !submitting && !confirmedRef.current;
   return (
     <div className="evo-confirmation-dialog" role="dialog" aria-modal="true" aria-labelledby="evo-telos-confirmation-title" aria-describedby="evo-telos-confirmation-description">
       <section className="evo-confirmation-dialog__content">
@@ -109,11 +144,11 @@ export function StrongConfirmationDialog({
         ) : (
           <label>
             Type the exact server phrase
-            <input value={phrase} onChange={event => setPhrase(event.target.value)} autoComplete="off" aria-describedby="evo-telos-required-phrase" disabled={submitting || expired(prepared)} />
+            <input value={phrase} onChange={event => setPhrase(event.target.value)} autoComplete="off" aria-describedby="evo-telos-required-phrase" disabled={submitting || isPreparedExpired} />
             <span id="evo-telos-required-phrase">{prepared.required_phrase}</span>
           </label>
         )}
-        {prepared !== null && expired(prepared) ? <p role="alert">This confirmation expired. Close it and prepare a new transition.</p> : null}
+        {prepared !== null && isPreparedExpired ? <p role="alert">This confirmation expired. Close it and prepare a new transition.</p> : null}
         {error !== null ? <p role="alert">{error}</p> : null}
         <footer>
           <button type="button" onClick={onClose} disabled={submitting}>Cancel</button>
