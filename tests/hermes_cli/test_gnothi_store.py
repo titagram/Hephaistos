@@ -123,6 +123,37 @@ def test_legacy_profile_store_is_reported_but_not_imported(
     assert not global_root.exists()
 
 
+def test_unreadable_legacy_profile_state_is_reported_without_importing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    default_root = tmp_path / ".hermes"
+    profile_root = default_root / "profiles" / "reviewer"
+    global_root = default_root / "organism" / "gnothi_seauton"
+    monkeypatch.setattr(
+        hermes_constants, "get_default_hermes_root", lambda: default_root
+    )
+    monkeypatch.setenv("HERMES_HOME", str(profile_root))
+    legacy_store = OrganismRevisionStore(root=profile_root / "gnothi_seauton")
+    legacy_store.publish(
+        _artifact("legacy-rev", collected_at="2026-07-11T00:00:00Z"),
+        published_at="2026-07-11T00:01:00Z",
+    )
+    original_mode = legacy_store.root.stat().st_mode & 0o777
+    legacy_store.root.chmod(0)
+    try:
+        result = OrganismQuery(OrganismRevisionStore()).status()
+    finally:
+        legacy_store.root.chmod(original_mode)
+
+    assert result == {
+        "status": "missing",
+        "actions": ["rebuild"],
+        "diagnostics": ["legacy_profile_state_unreadable"],
+    }
+    assert not global_root.exists()
+
+
 def test_publish_is_idempotent_but_refuses_conflicting_revision(tmp_path: Path):
     store = OrganismRevisionStore(root=tmp_path)
     artifact = _artifact("rev-1", collected_at="2026-07-11T00:00:00Z")

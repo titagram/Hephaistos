@@ -7,6 +7,7 @@ import re
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
+from stat import S_ISREG
 from typing import Any
 
 import hermes_constants
@@ -34,13 +35,19 @@ def _utc_now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
-def legacy_profile_store_present() -> bool:
-    """Return whether the active profile retains a legacy Gnothi pointer."""
+def legacy_profile_store_state() -> str:
+    """Return the read-only legacy profile pointer state."""
     legacy = hermes_constants.get_hermes_home() / "gnothi_seauton"
     canonical = hermes_constants.get_organism_home() / "gnothi_seauton"
     if legacy.absolute() == canonical.absolute():
-        return False
-    return (legacy / "current.json").is_file()
+        return "absent"
+    try:
+        mode = (legacy / "current.json").stat().st_mode
+    except FileNotFoundError:
+        return "absent"
+    except OSError:
+        return "unreadable"
+    return "detected" if S_ISREG(mode) else "absent"
 
 
 class OrganismRevisionStore:

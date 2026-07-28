@@ -5,7 +5,7 @@ from typing import Any
 
 from hermes_cli.gnothi.store import (
     OrganismRevisionStore,
-    legacy_profile_store_present,
+    legacy_profile_store_state,
 )
 
 MAX_RESULTS = 200
@@ -19,8 +19,11 @@ class OrganismQuery:
         artifact = self.store.current()
         if not artifact:
             result = {"status": "missing", "actions": ["rebuild"]}
-            if legacy_profile_store_present():
+            legacy_state = legacy_profile_store_state()
+            if legacy_state == "detected":
                 result["diagnostics"] = ["legacy_profile_state_detected"]
+            elif legacy_state == "unreadable":
+                result["diagnostics"] = ["legacy_profile_state_unreadable"]
             return result
         contract = artifact["organism_contract"]
         coverage = contract.get("coverage", {})
