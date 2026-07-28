@@ -3730,6 +3730,43 @@ def test_worker_launcher_never_resolves_legacy_process_names(monkeypatch):
     assert "hermes-review-engine" not in seen
 
 
+@pytest.mark.parametrize("legacy_name", ["hermes-agent", "hermes-review-engine"])
+def test_worker_launcher_rejects_banned_legacy_hermes_bin_names(monkeypatch, legacy_name):
+    """Explicit bare overrides cannot revive retired worker executors."""
+    monkeypatch.setenv("HERMES_BIN", legacy_name)
+    monkeypatch.setattr(kb, "_safe_which_no_cwd", lambda _name: f"/opt/bin/{legacy_name}")
+    monkeypatch.setattr(kb, "_module_hermes_argv", lambda: ["safe-module"])
+
+    assert kb._resolve_hermes_argv() == ["safe-module"]
+
+
+@pytest.mark.parametrize("legacy_name", ["hermes-agent", "hermes-review-engine"])
+def test_worker_launcher_rejects_banned_legacy_hermes_bin_paths(
+    monkeypatch, tmp_path, legacy_name,
+):
+    """Explicit paths to retired executors cannot become worker argv[0]."""
+    legacy_path = tmp_path / "bin" / legacy_name
+    legacy_path.parent.mkdir()
+    legacy_path.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setenv("HERMES_BIN", str(legacy_path))
+    monkeypatch.setattr(kb, "_module_hermes_argv", lambda: ["safe-module"])
+
+    assert kb._resolve_hermes_argv() == ["safe-module"]
+
+
+def test_worker_launcher_uses_hermes_shim_when_hades_is_unavailable(monkeypatch):
+    """Existing installations with only the Hermes shim keep working."""
+    seen = []
+    monkeypatch.delenv("HERMES_BIN", raising=False)
+    monkeypatch.setattr(
+        "shutil.which",
+        lambda name: seen.append(name) or ({"hermes": "/bin/hermes"}.get(name)),
+    )
+
+    assert kb._resolve_hermes_argv() == ["/bin/hermes"]
+    assert seen == ["hades", "hermes"]
+
+
 def test_resolve_hermes_argv_prefers_path_shim(monkeypatch):
     """The Hades fork prefers its primary shim over legacy Hermes aliases."""
     import shutil

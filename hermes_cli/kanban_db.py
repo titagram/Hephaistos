@@ -8518,19 +8518,39 @@ def _hermes_path_argv(path: str) -> list[str]:
     return [_absolute_hermes_path(path)]
 
 
+_BANNED_WORKER_EXECUTABLE_NAMES = frozenset({
+    "hermes-agent",
+    "hermes-review-engine",
+})
+
+
+def _is_banned_worker_executable(value: str) -> bool:
+    """Return whether a candidate resolves to a retired worker executor."""
+    candidates = (value, os.path.realpath(value))
+    for candidate in candidates:
+        name = os.path.basename(candidate.rstrip("/\\"))
+        stem, _suffix = os.path.splitext(name)
+        if stem.lower() in _BANNED_WORKER_EXECUTABLE_NAMES:
+            return True
+    return False
+
+
 def _resolve_hermes_argv() -> list[str]:
     """Resolve the Hades invocation as argv parts for ``Popen``.
 
     Tries in order:
 
-    1. ``$HERMES_BIN`` — explicit operator override. Path-like values are
-       normalized to absolute paths; bare command names keep normal PATH
-       semantics and never prefer a same-directory file before ``PATH``.
+    1. ``$HERMES_BIN`` — explicit operator override, except retired
+       ``hermes-agent`` and ``hermes-review-engine`` executors. Path-like
+       values are normalized to absolute paths; bare command names keep normal
+       PATH semantics and never prefer a same-directory file before ``PATH``.
     2. The primary ``hades`` console-script shim. On Windows, PATH lookup can
        return a relative ``.cmd`` shim; directly launching batch shims is
        unsafe with task-derived argv, so those fall back to the
        interpreter-bound module form.
-    3. ``sys.executable -m hermes_cli.main`` — fallback for setups where
+    3. The compatible ``hermes`` console-script shim, subject to the same
+       retired-executor ban.
+    4. ``sys.executable -m hermes_cli.main`` — fallback for setups where
        Hades is launched from a venv and neither shim is on
        the dispatcher's ``$PATH`` (cron, systemd ``User=`` services,
        launchd jobs, detached processes, etc.). Goes through the running
@@ -8544,20 +8564,22 @@ def _resolve_hermes_argv() -> list[str]:
 
     env_bin = os.environ.get("HERMES_BIN", "").strip()
     if env_bin:
+        if _is_banned_worker_executable(env_bin):
+            return _module_hermes_argv()
         if _looks_like_path(env_bin):
             return _hermes_path_argv(env_bin)
         resolved_env_bin = _safe_which_no_cwd(env_bin)
-        if resolved_env_bin:
+        if resolved_env_bin and not _is_banned_worker_executable(resolved_env_bin):
             return _hermes_path_argv(resolved_env_bin)
         return _module_hermes_argv()
 
-    for command in ("hades",):
+    for command in ("hades", "hermes"):
         resolved = (
             _safe_which_no_cwd(command)
             if _IS_WINDOWS
             else shutil.which(command)
         )
-        if resolved:
+        if resolved and not _is_banned_worker_executable(resolved):
             return _hermes_path_argv(resolved)
     return _module_hermes_argv()
 
