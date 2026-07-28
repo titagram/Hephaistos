@@ -153,6 +153,25 @@ def test_store_enforces_run_node_and_plan_version_uniqueness(tmp_path):
             )
 
 
+def test_insert_org_node_rejects_default_role_without_persisting(tmp_path):
+    with kb.connect(tmp_path / "kanban.db") as conn:
+        with pytest.raises(ValueError, match="unsupported OrgRun logical role: default"):
+            insert_org_node(
+                conn,
+                run_id="run-1",
+                node_id="execute",
+                task_id="task-1",
+                node_kind="execution",
+                plan_version=1,
+                contract_hash="contract-1",
+                logical_role="default",
+            )
+
+        assert conn.execute(
+            "SELECT COUNT(*) AS n FROM kanban_org_nodes"
+        ).fetchone()["n"] == 0
+
+
 def test_state_validation_and_updates(tmp_path):
     with kb.connect(tmp_path / "kanban.db") as conn:
         _insert_run(conn)

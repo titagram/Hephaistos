@@ -7,6 +7,7 @@ import sqlite3
 import time
 
 from hermes_cli.kanban_db import write_txn
+from tools.delegation_routing import ALLOWED_ROLES
 
 
 ORG_RUN_STATES = frozenset({
@@ -70,6 +71,13 @@ def _validate_org_run_state(state: str) -> str:
     value = str(state)
     if value not in ORG_RUN_STATES:
         raise ValueError(f"invalid OrgRun state: {value}")
+    return value
+
+
+def _validate_logical_role(role: str) -> str:
+    value = str(role)
+    if value not in ALLOWED_ROLES:
+        raise ValueError(f"unsupported OrgRun logical role: {value}")
     return value
 
 
@@ -223,6 +231,7 @@ def insert_org_node(
     state: str = "active",
 ) -> OrgNodeRecord:
     """Persist one immutable node identity for an OrgRun topology."""
+    checked_role = _validate_logical_role(logical_role)
     with write_txn(conn):
         conn.execute(
             "INSERT INTO kanban_org_nodes "
@@ -235,7 +244,7 @@ def insert_org_node(
                 node_kind,
                 int(plan_version),
                 contract_hash,
-                logical_role,
+                checked_role,
                 state,
             ),
         )
