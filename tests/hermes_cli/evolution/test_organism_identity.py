@@ -27,7 +27,19 @@ def test_probe_returns_existing_identity_without_writing(tmp_path):
     assert sorted(path.relative_to(root) for path in root.rglob("*")) == before
 
 
-def test_probe_rejects_symlink_and_corrupt_identity(tmp_path):
+def test_probe_rejects_identity_symlink(tmp_path):
+    """An identity-file symlink must be rejected without following it."""
+    root = tmp_path / "organism"
+    root.mkdir()
+    target = tmp_path / "identity.json"
+    target.write_text("{}", encoding="utf-8")
+    (root / "identity.json").symlink_to(target)
+
+    with pytest.raises(OrganismIdentityError, match="organism_identity_unsafe"):
+        probe_organism_identity(root)
+
+
+def test_probe_rejects_corrupt_identity(tmp_path):
     """Malformed identity content is rejected instead of being normalized."""
     root = tmp_path / "organism"
     root.mkdir()
