@@ -309,6 +309,18 @@ def test_org_run_operations_describes_a_local_model_free_dag():
         assert forbidden not in lowered
 
 
+def test_org_run_operations_distinguishes_validation_from_persisted_run_states():
+    text = (HADES_DOCS / "org-run-operations.md").read_text(encoding="utf-8")
+
+    assert (
+        "Validation is a pre-materialization plan check; it creates no OrgRun record, "
+        "so `hades org show` cannot inspect it."
+    ) in text
+    states_table = text.split("## States and recovery", 1)[1].split("## Authority", 1)[0]
+    assert "| `draft` |" not in states_table
+    assert "| `validated` |" not in states_table
+
+
 def test_hades_support_runbook_covers_launch_failures_without_secret_collection():
     text = (HADES_DOCS / "support-runbook.md").read_text(encoding="utf-8")
     lowered = text.lower()

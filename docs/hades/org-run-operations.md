@@ -20,6 +20,8 @@ hades org show <run-id> --board <board>
 
 Materialization validates the plan and writes the initial DAG atomically. Do not create an OrgRun card-by-card. Use `hades org show` to inspect the plan version, state, topology, blocked work, and dispatchable work; use `hades org list --board <board>` to find runs on that board.
 
+Validation is a pre-materialization plan check; it creates no OrgRun record, so `hades org show` cannot inspect it. The first persisted OrgRun state is `materialized`.
+
 An amendment is the only way to change an existing managed plan:
 
 ```bash
@@ -32,8 +34,6 @@ The amendment is versioned against its base plan version. Revalidate its changed
 
 | State | Meaning | Operator action |
 |---|---|---|
-| `draft` | Plan record exists but is not ready to schedule. | Complete and validate the plan. |
-| `validated` | The plan passed structural and routing checks. | Materialize it on the intended board. |
 | `materialized` | The complete initial DAG exists locally. | Inspect it, then allow dispatcher scheduling. |
 | `running` | Leaf work is active or ready behind dependencies. | Monitor evidence and direct-parent review. |
 | `integrating` | Accepted leaf work awaits integration. | Run the integration checks and attach local evidence. |
