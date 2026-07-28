@@ -8699,6 +8699,7 @@ _BANNED_WORKER_EXECUTABLE_NAMES = frozenset({
     "hermes-agent",
     "hermes-review-engine",
 })
+_BACKEND_ENV_PREFIXES = ("HADES_BACKEND_", "HERMES_BACKEND_")
 
 
 def _is_banned_worker_executable(value: str) -> bool:
@@ -8886,6 +8887,13 @@ def _default_spawn(
 
     prompt = f"work kanban task {task.id}"
     env = dict(os.environ)
+    if (task.idempotency_key or "").startswith("org-run:"):
+        # Versioned Agentic-Kanban OrgRuns are intentionally local-only.
+        # Do not leak inherited backend endpoints or credentials into their
+        # worker processes, even when the parent gateway has backend access.
+        for key in tuple(env):
+            if key.startswith(_BACKEND_ENV_PREFIXES):
+                env.pop(key)
 
     # Inject HERMES_HOME so the worker reads the profile-scoped config.yaml
     # (fallback_providers, toolsets, agent settings, etc.) instead of the root

@@ -3054,6 +3054,55 @@ def test_default_spawn_does_not_auto_load_any_skill(kanban_home, monkeypatch):
     assert env.get("HERMES_PROFILE") == "some-profile"
 
 
+def test_default_spawn_scrubs_backend_credentials_for_local_org_run(
+    kanban_home,
+    monkeypatch,
+):
+    """Versioned local OrgRun workers must not inherit backend authority."""
+    captured = {}
+
+    class FakeProc:
+        pid = 99999
+
+    def fake_popen(cmd, **kwargs):
+        captured["env"] = kwargs.get("env", {})
+        return FakeProc()
+
+    monkeypatch.setattr("subprocess.Popen", fake_popen)
+    monkeypatch.setenv(
+        "HADES_BACKEND_URL",
+        "https://forbidden-org-run-backend.invalid",
+    )
+    monkeypatch.setenv(
+        "HADES_BACKEND_AGENT_TOKEN_TEST",
+        "forbidden-org-run-agent-token",
+    )
+    monkeypatch.setenv(
+        "HERMES_BACKEND_CREDENTIAL_TEST",
+        "forbidden-org-run-credential",
+    )
+
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(
+            conn,
+            title="local OrgRun worker",
+            assignee="some-profile",
+            idempotency_key="org-run:local-only:task:runtime",
+        )
+        task = kb.get_task(conn, tid)
+        workspace = kb.resolve_workspace(task)
+        assert kb._default_spawn(task, str(workspace)) == 99999
+    finally:
+        conn.close()
+
+    assert not {
+        "HADES_BACKEND_URL",
+        "HADES_BACKEND_AGENT_TOKEN_TEST",
+        "HERMES_BACKEND_CREDENTIAL_TEST",
+    }.intersection(captured["env"])
+
+
 @pytest.mark.parametrize(
     ("role", "model"),
     (
