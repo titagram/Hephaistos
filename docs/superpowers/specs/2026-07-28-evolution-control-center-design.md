@@ -1,7 +1,7 @@
 # Evolution Control Center Design
 
 **Date:** 2026-07-28
-**Status:** Approved design, pending document review
+**Status:** Approved design
 **Parent designs:**
 
 - `2026-07-11-gnothi-seauton-autopoiesis-design.md`
