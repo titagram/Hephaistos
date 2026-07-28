@@ -149,8 +149,12 @@ def list_reports(
         clauses.append("subject_id = ?")
         params.append(subject_id)
     if run_id is not None:
-        clauses.append("subject_id = ?")
-        params.append(run_id)
+        clauses.append(
+            "(subject_id = ? OR subject_id IN ("
+            "SELECT task_id FROM kanban_org_nodes WHERE run_id = ?"
+            "))"
+        )
+        params.extend((run_id, run_id))
     where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
     rows = conn.execute(
         "SELECT id FROM kanban_reports" + where + " ORDER BY source_version ASC, generated_at ASC, id ASC",
@@ -224,6 +228,116 @@ def _org_markdown(payload: dict[str, Any]) -> str:
     })
 
 
+def _cancellation_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        f"# OrgRun cancellation report: {payload['run_id']}",
+        "",
+        "## Objective",
+        payload["objective"] or "None recorded.",
+        "",
+        "## Terminal state",
+        f"- State: {payload['state']}",
+        f"- Active nodes: {len(payload['nodes'])}",
+        "",
+        "## Node snapshot",
+    ]
+    lines.extend(
+        f"- {node['node_id']}: {node['task_status']} "
+        f"({node['node_kind']}, {node['logical_role']})"
+        for node in payload["nodes"]
+    )
+    lines.extend([
+        "",
+        "## Provenance",
+        f"- Board: {payload['board_slug']}",
+        f"- Plan version: {payload['plan_version']}",
+        f"- Plan hash: {payload['plan_hash']}",
+        f"- Base commit: {payload['base_commit']}",
+        f"- Cancelled at: {payload['generated_at']}",
+        "",
+    ])
+    return "\n".join(lines)
+
+
+def project_org_run_cancellation(
+    conn: sqlite3.Connection,
+    run_id: str,
+    *,
+    board: str,
+) -> KanbanReportRecord | None:
+    """Persist one canonical snapshot only for an explicitly cancelled OrgRun."""
+    org_run = get_org_run(conn, run_id)
+    if (
+        org_run is None
+        or org_run.board_slug != board
+        or org_run.state != "cancelled"
+    ):
+        return None
+
+    idempotency_key = (
+        f"org-run:{run_id}:cancelled:v{org_run.plan_version}"
+    )
+    existing = conn.execute(
+        "SELECT id FROM kanban_reports WHERE idempotency_key = ?",
+        (idempotency_key,),
+    ).fetchone()
+    if existing is not None:
+        return get_report(conn, int(existing["id"]))
+
+    plan_row = conn.execute(
+        "SELECT plan_json FROM kanban_org_plan_versions "
+        "WHERE run_id = ? AND plan_version = ?",
+        (run_id, org_run.plan_version),
+    ).fetchone()
+    try:
+        plan = (
+            json.loads(str(plan_row["plan_json"]))
+            if plan_row is not None
+            else {}
+        )
+    except (TypeError, ValueError):
+        plan = {}
+    nodes: list[dict[str, Any]] = []
+    for node in list_org_nodes(conn, run_id):
+        if node.state != "active":
+            continue
+        task = kb.get_task(conn, node.task_id)
+        nodes.append({
+            "node_id": _safe_text(node.node_id),
+            "task_id": _safe_text(node.task_id),
+            "node_kind": _safe_text(node.node_kind),
+            "logical_role": _safe_text(node.logical_role),
+            "node_state": _safe_text(node.state),
+            "task_status": _safe_text(task.status if task is not None else "missing"),
+        })
+    payload = {
+        "schema": "hades.org-run-cancellation-report.v1",
+        "board_slug": _safe_text(board),
+        "run_id": _safe_text(run_id),
+        "state": "cancelled",
+        "plan_version": org_run.plan_version,
+        "plan_hash": _safe_text(org_run.plan_hash),
+        "base_commit": _safe_text(org_run.base_commit),
+        "objective": _safe_text(
+            plan.get("objective", "") if isinstance(plan, dict) else ""
+        ),
+        "nodes": nodes,
+        "generated_at": org_run.updated_at,
+    }
+    return insert_report(
+        conn,
+        board_slug=payload["board_slug"],
+        report_type="org_run_cancelled",
+        subject_id=run_id,
+        terminal_run_id=None,
+        source_version=org_run.plan_version,
+        report_json=_canonical_json(payload),
+        report_markdown=_cancellation_markdown(payload),
+        generated_at=org_run.updated_at,
+        idempotency_key=idempotency_key,
+    )
+
+
 def project_org_run_completion(
     conn: sqlite3.Connection, run_id: str, *, board: str,
 ) -> KanbanReportRecord | None:
@@ -231,6 +345,9 @@ def project_org_run_completion(
     org_run = get_org_run(conn, run_id)
     if org_run is None or org_run.board_slug != board:
         return None
+    from hermes_cli.agentic_org_run import load_org_run_topology
+
+    load_org_run_topology(conn, run_id)
     nodes = [node for node in list_org_nodes(conn, run_id) if node.state == "active"]
     non_anchor = [node for node in nodes if node.node_kind != "anchor"]
     if not non_anchor or any((task := kb.get_task(conn, node.task_id)) is None or task.status != "done" for node in non_anchor):
@@ -308,7 +425,9 @@ def project_after_task_completion(
         (task_id,),
     ).fetchall()
     for row in rows:
-        org_report = project_org_run_completion(conn, str(row["run_id"]), board=board)
+        owned_run_id = str(row["run_id"])
+        org_report = project_org_run_completion(conn, owned_run_id, board=board)
         if org_report is not None:
             records.append(org_report)
+        refresh_org_run_state(conn, owned_run_id)
     return tuple(records)

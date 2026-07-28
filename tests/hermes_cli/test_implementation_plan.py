@@ -164,6 +164,14 @@ def test_rejects_missing_base_commit():
         validate(plan)
 
 
+def test_rejects_abbreviated_commit_even_when_git_can_resolve_it():
+    """Breaks if plan provenance can be rebound by accepting a short Git OID."""
+    plan = replace(parsed_plan(), base_commit=existing_commit()[:12])
+
+    with pytest.raises(ValueError, match="full canonical commit OID"):
+        validate(plan)
+
+
 def test_hash_and_serialization_are_deterministic():
     plan = replace(parsed_plan(), base_commit=existing_commit())
     first = validate_implementation_plan(

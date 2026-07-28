@@ -26,6 +26,7 @@ from hermes_cli.org_run_store import (
     list_org_nodes,
     refresh_org_run_state,
 )
+from hermes_cli.profiles import profile_exists
 from tools.delegation_routing import load_delegation_routing, resolve_role_profile
 
 
@@ -70,7 +71,7 @@ def _validated_plan(path: str, *, board: str | None):
     validation = validate_implementation_plan(
         plan,
         repository=_repository_for_board(board),
-        profile_exists=_role_route_exists,
+        profile_exists=profile_exists,
         role_route_exists=_role_route_exists,
     )
     return plan, validation
@@ -187,7 +188,8 @@ def amend_org_run_file(path: str, *, board: str | None) -> tuple[dict[str, Any],
                 amendment,
                 board=board,
                 repository=repository,
-                profile_exists=_role_route_exists,
+                profile_exists=profile_exists,
+                role_route_exists=_role_route_exists,
             )
             run = get_org_run(conn, amendment.run_id)
             assert run is not None
@@ -231,13 +233,16 @@ def list_org_runs(*, board: str | None) -> tuple[dict[str, Any], int]:
                 "SELECT * FROM kanban_org_runs WHERE board_slug = ? ORDER BY run_id",
                 (board_slug,),
             ).fetchall()
-            runs = [{
-                "run_id": str(row["run_id"]),
-                "state": str(row["state"]),
-                "origin": str(row["origin"]),
-                "plan_version": int(row["plan_version"]),
-                "plan_hash": str(row["plan_hash"]),
-            } for row in rows]
+            runs = []
+            for row in rows:
+                run_id = str(row["run_id"])
+                runs.append({
+                    "run_id": run_id,
+                    "state": refresh_org_run_state(conn, run_id),
+                    "origin": str(row["origin"]),
+                    "plan_version": int(row["plan_version"]),
+                    "plan_hash": str(row["plan_hash"]),
+                })
             known = {run["run_id"] for run in runs}
             runs.extend({
                 "run_id": run_id,

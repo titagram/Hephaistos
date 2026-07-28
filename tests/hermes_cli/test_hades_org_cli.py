@@ -88,6 +88,8 @@ def _configure_local_board(tmp_path: Path, monkeypatch) -> None:
 """,
         encoding="utf-8",
     )
+    for role in ("leaf", "orchestrator", "reviewer"):
+        (home / "profiles" / role).mkdir(parents=True, exist_ok=True)
     kb.write_board_metadata("default", default_workdir=str(REPOSITORY))
 
 
@@ -179,6 +181,51 @@ def test_local_plan_cli_validates_materializes_amends_and_shows_state(tmp_path, 
     assert amended["run_id"] == "local-run-001"
     assert amended["plan_version"] == 2
     assert set(amended["topology"]["tasks"]) == {"runtime", "regression"}
+
+
+def test_validation_requires_installed_role_profile_separately_from_route(
+    tmp_path,
+    monkeypatch,
+):
+    """Breaks if a configured route is mistaken for an installed profile."""
+    from hermes_cli.hades_org_cmd import validate_plan_file
+
+    _configure_local_board(tmp_path, monkeypatch)
+    (tmp_path / ".hermes" / "profiles" / "reviewer").rmdir()
+    plan_path = _write_json(tmp_path, "plan.json", _plan_payload())
+
+    payload, code = validate_plan_file(str(plan_path), board="default")
+
+    assert code == 2
+    assert payload["code"] == "invalid_plan"
+    assert "missing profile for role: reviewer" in payload["message"]
+
+
+def test_org_run_list_refreshes_stale_state_from_durable_cards(tmp_path, monkeypatch):
+    """Breaks if list returns the cached run row instead of current card state."""
+    from hermes_cli.hades_org_cmd import list_org_runs, materialize_plan_file
+
+    _configure_local_board(tmp_path, monkeypatch)
+    plan_path = _write_json(tmp_path, "plan.json", _plan_payload())
+    materialized, code = materialize_plan_file(str(plan_path), board="default")
+    assert code == 0
+    execution_id = materialized["topology"]["tasks"]["runtime"]["execution_id"]
+    with kb.connect(board="default") as conn:
+        conn.execute(
+            "UPDATE tasks SET status='running' WHERE id=?",
+            (execution_id,),
+        )
+        conn.execute(
+            "UPDATE kanban_org_runs SET state='materialized' WHERE run_id=?",
+            ("local-run-001",),
+        )
+        conn.commit()
+
+    payload, code = list_org_runs(board="default")
+
+    assert code == 0
+    run = next(item for item in payload["runs"] if item["run_id"] == "local-run-001")
+    assert run["state"] == "running"
 
 
 def test_list_marks_legacy_runs_until_adoption_without_recreating_cards(tmp_path, monkeypatch):

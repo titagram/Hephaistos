@@ -22,6 +22,7 @@ from hermes_cli.implementation_plan import (
     canonical_plan_json,
     parse_implementation_plan,
     validate_implementation_plan,
+    verify_plan_validation,
 )
 from hermes_cli.org_run_store import (
     get_org_run,
@@ -29,7 +30,9 @@ from hermes_cli.org_run_store import (
     insert_org_run,
     insert_plan_version,
     list_org_nodes,
+    refresh_org_run_state,
     set_org_nodes_state,
+    update_org_node_contract,
     update_org_run_plan,
 )
 
@@ -105,6 +108,87 @@ def _contract_hash(
 
 def _task_contract(task: ImplementationTask) -> dict[str, Any]:
     return asdict(task)
+
+
+def _execution_body(plan: ImplementationPlan, task: ImplementationTask) -> str:
+    return (
+        f"{plan.objective}\n\n"
+        f"Acceptance criteria:\n- "
+        + "\n- ".join(task.acceptance_criteria)
+        + "\n\nVerification:\n- "
+        + "\n- ".join(task.verification)
+    )
+
+
+def _task_review_body() -> str:
+    return (
+        "Independently verify this implementation task, its declared "
+        "scope, acceptance criteria, and focused test evidence."
+    )
+
+
+def _integration_body() -> str:
+    return (
+        "Integrate accepted task results in dependency order and verify "
+        "the complete local objective."
+    )
+
+
+def _global_review_body() -> str:
+    return (
+        "Independently verify the integrated objective, acceptance "
+        "criteria, and regression evidence."
+    )
+
+
+def _expected_live_task_fields(
+    plan: ImplementationPlan,
+    spec: _NodeSpec,
+) -> tuple[str, str | None, list[str] | None]:
+    """Return the exact title/body/skills rendered for one current-plan node."""
+    tasks = {task.id: task for task in plan.tasks}
+    logical_task_id = _logical_task_id(
+        plan.run_id,
+        spec.node_id,
+        spec.node_kind,
+    )
+    if spec.node_kind == "anchor":
+        return (
+            f"OrgRun: {plan.run_id}",
+            "Local Agentic-Kanban OrgRun anchor.\n\n"
+            f"Objective: {plan.objective}\nBase commit: {plan.base_commit}",
+            None,
+        )
+    if spec.node_kind == "execution" and logical_task_id is not None:
+        task = tasks[logical_task_id]
+        return task.title, _execution_body(plan, task), None
+    if spec.node_kind == "task_review" and logical_task_id is not None:
+        return (
+            f"Review: {tasks[logical_task_id].title}",
+            _task_review_body(),
+            list(_REVIEW_SKILLS),
+        )
+    if spec.node_kind == "integration":
+        return (
+            f"Integrate OrgRun {plan.run_id}",
+            _integration_body(),
+            None,
+        )
+    if spec.node_kind == "global_review":
+        return (
+            f"Review integrated OrgRun {plan.run_id}",
+            _global_review_body(),
+            list(_REVIEW_SKILLS),
+        )
+    if spec.node_kind == "finalization":
+        return (
+            f"Finalize OrgRun {plan.run_id}",
+            "Summarize verified outcomes, residual risks, and local evidence.",
+            None,
+        )
+    raise ValueError(
+        f"OrgRun {plan.run_id} has unsupported managed node: {spec.node_id}"
+    )
 
 
 def _runnable_workspace_kwargs(board: str | None) -> dict[str, str]:
@@ -320,6 +404,15 @@ def _expected_plan_node_specs(plan: ImplementationPlan) -> dict[str, _NodeSpec]:
     return {spec.node_id: spec for spec in specs}
 
 
+def _effective_spec_key(spec: _NodeSpec) -> tuple[Any, ...]:
+    return (
+        spec.node_kind,
+        spec.logical_role,
+        _canonical_json(spec.task_contract),
+        tuple(sorted(spec.dependency_node_ids)),
+    )
+
+
 def _reject_unowned_task_keys(
     conn: sqlite3.Connection,
     plan: ImplementationPlan,
@@ -385,6 +478,7 @@ def materialize_org_run(
         raise ValueError(
             "materialize_org_run cannot run inside an existing transaction"
         )
+    verify_plan_validation(plan, validation)
     with kb.write_txn(conn):
         existing = get_org_run(conn, plan.run_id)
         if existing is not None:
@@ -448,13 +542,7 @@ def materialize_org_run(
             execution_ids[task.id] = kb.create_task(
                 conn,
                 title=task.title,
-                body=(
-                    f"{plan.objective}\n\n"
-                    f"Acceptance criteria:\n- "
-                    + "\n- ".join(task.acceptance_criteria)
-                    + "\n\nVerification:\n- "
-                    + "\n- ".join(task.verification)
-                ),
+                body=_execution_body(plan, task),
                 assignee=_profile(validation, task.role),
                 created_by=_CREATED_BY,
                 parents=[anchor_id],
@@ -471,10 +559,7 @@ def materialize_org_run(
             review_ids[task.id] = kb.create_task(
                 conn,
                 title=f"Review: {task.title}",
-                body=(
-                    "Independently verify this implementation task, its declared "
-                    "scope, acceptance criteria, and focused test evidence."
-                ),
+                body=_task_review_body(),
                 assignee=_profile(validation, "reviewer"),
                 created_by=_CREATED_BY,
                 parents=[execution_ids[task.id]],
@@ -543,10 +628,7 @@ def materialize_org_run(
         integration_id = kb.create_task(
             conn,
             title=f"Integrate OrgRun {plan.run_id}",
-            body=(
-                "Integrate accepted task results in dependency order and verify "
-                "the complete local objective."
-            ),
+            body=_integration_body(),
             assignee=_profile(validation, "orchestrator"),
             created_by=_CREATED_BY,
             parents=[terminal_task_ids[key] for key in sorted(terminal_task_ids)],
@@ -579,10 +661,7 @@ def materialize_org_run(
             review_id = kb.create_task(
                 conn,
                 title=f"Review integrated OrgRun {plan.run_id}",
-                body=(
-                    "Independently verify the integrated objective, acceptance "
-                    "criteria, and regression evidence."
-                ),
+                body=_global_review_body(),
                 assignee=_profile(validation, "reviewer"),
                 created_by=_CREATED_BY,
                 parents=[integration_id],
@@ -642,7 +721,7 @@ def materialize_org_run(
             plan_hash=validation.plan_hash,
             base_commit=plan.base_commit,
             origin=plan.origin,
-            state="running" if activate else "materialized",
+            state="materialized",
             anchor_task_id=anchor_id,
         )
         insert_plan_version(
@@ -1010,13 +1089,14 @@ def apply_org_run_amendment(
     board: str | None,
     repository: Path,
     profile_exists: Callable[[str], bool],
+    role_route_exists: Callable[[str], bool],
 ) -> OrgRunTopology:
     """Atomically apply one validated amendment to a local OrgRun."""
     if conn.in_transaction:
         raise ValueError(
             "apply_org_run_amendment cannot run inside an existing transaction"
         )
-    with kb.write_txn(conn):
+    with kb.write_txn(conn), kb._allow_managed_plan_mutations(conn):
         run = get_org_run(conn, amendment.run_id)
         if run is None:
             raise KeyError(f"unknown OrgRun: {amendment.run_id}")
@@ -1061,7 +1141,7 @@ def apply_org_run_amendment(
             amended_plan,
             repository=repository,
             profile_exists=profile_exists,
-            role_route_exists=lambda _role: True,
+            role_route_exists=role_route_exists,
         )
         new_version = run.plan_version + 1
 
@@ -1101,7 +1181,13 @@ def apply_org_run_amendment(
             if task_id not in targets and topology.review_id is not None
         }
         runnable_kwargs = _runnable_workspace_kwargs(board)
-        triage = run.state == "materialized"
+        triage = all(
+            (
+                task := kb.get_task(conn, task_topology.execution_id)
+            ) is not None
+            and task.status == "triage"
+            for task_topology in current_topology.tasks.values()
+        )
         node_specs: list[_NodeSpec] = []
 
         for task in amended_plan.tasks:
@@ -1111,13 +1197,7 @@ def apply_org_run_amendment(
             execution_ids[task.id] = kb.create_task(
                 conn,
                 title=task.title,
-                body=(
-                    f"{amended_plan.objective}\n\n"
-                    f"Acceptance criteria:\n- "
-                    + "\n- ".join(task.acceptance_criteria)
-                    + "\n\nVerification:\n- "
-                    + "\n- ".join(task.verification)
-                ),
+                body=_execution_body(amended_plan, task),
                 assignee=_profile(validation, task.role),
                 created_by=_CREATED_BY,
                 parents=[current_topology.anchor_id],
@@ -1134,10 +1214,7 @@ def apply_org_run_amendment(
             review_ids[task.id] = kb.create_task(
                 conn,
                 title=f"Review: {task.title}",
-                body=(
-                    "Independently verify this implementation task, its declared "
-                    "scope, acceptance criteria, and focused test evidence."
-                ),
+                body=_task_review_body(),
                 assignee=_profile(validation, "reviewer"),
                 created_by=_CREATED_BY,
                 parents=[execution_ids[task.id]],
@@ -1226,10 +1303,7 @@ def apply_org_run_amendment(
             global_review_id = kb.create_task(
                 conn,
                 title=f"Review integrated OrgRun {amendment.run_id}",
-                body=(
-                    "Independently verify the integrated objective, acceptance "
-                    "criteria, and regression evidence."
-                ),
+                body=_global_review_body(),
                 assignee=_profile(validation, "reviewer"),
                 created_by=_CREATED_BY,
                 parents=[current_topology.integration_id],
@@ -1301,6 +1375,35 @@ def apply_org_run_amendment(
                 logical_role=spec.logical_role,
             )
 
+        current_specs = _expected_plan_node_specs(current_plan)
+        amended_specs = _expected_plan_node_specs(amended_plan)
+        new_node_ids = {spec.node_id for spec in node_specs}
+        for node in active_nodes:
+            if node.node_id in new_node_ids:
+                continue
+            old_spec = current_specs.get(node.node_id)
+            new_spec = amended_specs.get(node.node_id)
+            if (
+                old_spec is None
+                or new_spec is None
+                or _effective_spec_key(old_spec) == _effective_spec_key(new_spec)
+            ):
+                continue
+            update_org_node_contract(
+                conn,
+                run_id=amendment.run_id,
+                node_id=node.node_id,
+                plan_version=new_version,
+                contract_hash=_contract_hash(
+                    node_kind=new_spec.node_kind,
+                    logical_role=new_spec.logical_role,
+                    task_contract=new_spec.task_contract,
+                    dependency_node_ids=new_spec.dependency_node_ids,
+                    plan_version=new_version,
+                    base_commit=amended_plan.base_commit,
+                ),
+            )
+
         insert_plan_version(
             conn,
             run_id=amendment.run_id,
@@ -1348,6 +1451,75 @@ def _logical_task_id(run_id: str, node_id: str, node_kind: str) -> str | None:
         if node_id.startswith(legacy_prefix) and node_id.endswith(":review"):
             return node_id[len(legacy_prefix):-len(":review")]
     return None
+
+
+def _decoded_skills(value: Any) -> list[str] | None:
+    if not value:
+        return None
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(parsed, list):
+        return None
+    return [str(item) for item in parsed]
+
+
+def _raise_managed_plan_drift(
+    run_id: str,
+    node_id: str,
+    field: str,
+) -> None:
+    raise ValueError(
+        f"OrgRun {run_id} managed plan drift at {node_id}: {field}"
+    )
+
+
+def _validate_current_plan_live_nodes(
+    conn: sqlite3.Connection,
+    run_id: str,
+    plan: ImplementationPlan,
+    nodes: list,
+) -> None:
+    """Verify live card contracts and parents against the current plan."""
+    specs = _expected_plan_node_specs(plan)
+    active = {
+        node.node_id: node
+        for node in nodes
+        if node.state == "active"
+    }
+    for node_id, node in sorted(active.items()):
+        spec = specs.get(node_id)
+        if spec is None:
+            _raise_managed_plan_drift(run_id, node_id, "unexpected node")
+        row = conn.execute(
+            "SELECT title, body, assignee, skills FROM tasks WHERE id = ?",
+            (node.task_id,),
+        ).fetchone()
+        if row is None:
+            _raise_managed_plan_drift(run_id, node_id, "missing card")
+        if row["assignee"] != spec.logical_role:
+            _raise_managed_plan_drift(run_id, node_id, "logical role")
+        title, body, skills = _expected_live_task_fields(plan, spec)
+        if row["title"] != title:
+            _raise_managed_plan_drift(run_id, node_id, "title")
+        if row["body"] != body:
+            _raise_managed_plan_drift(run_id, node_id, "body")
+        if _decoded_skills(row["skills"]) != skills:
+            _raise_managed_plan_drift(run_id, node_id, "skills")
+        try:
+            expected_parent_ids = sorted(
+                active[parent_node_id].task_id
+                for parent_node_id in spec.dependency_node_ids
+            )
+        except KeyError as exc:
+            _raise_managed_plan_drift(
+                run_id,
+                node_id,
+                f"missing dependency node {exc.args[0]}",
+            )
+        if kb.parent_ids(conn, node.task_id) != expected_parent_ids:
+            _raise_managed_plan_drift(run_id, node_id, "parent links")
 
 
 def _validate_stored_node_provenance(
@@ -1477,6 +1649,13 @@ def _validate_stored_node_provenance(
     }
     if actual_records != expected_records:
         raise ValueError(f"OrgRun {run_id} has incomplete stored topology")
+    if current_plan is not None:
+        _validate_current_plan_live_nodes(
+            conn,
+            run_id,
+            current_plan,
+            nodes,
+        )
 
 
 def load_org_run_topology(
@@ -1546,6 +1725,24 @@ def is_org_run_task(conn: sqlite3.Connection, task_id: str) -> bool:
         "SELECT 1 FROM kanban_org_nodes WHERE task_id = ? LIMIT 1",
         (task_id,),
     ).fetchone() is not None
+
+
+def validate_live_org_run_task(
+    conn: sqlite3.Connection,
+    task_id: str,
+) -> str | None:
+    """Validate a managed card's whole current topology and return its role."""
+    row = conn.execute(
+        "SELECT run_id, logical_role FROM kanban_org_nodes "
+        "WHERE task_id = ? AND state = 'active'",
+        (task_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    topology = load_org_run_topology(conn, str(row["run_id"]))
+    if topology is None:
+        raise ValueError(f"OrgRun {row['run_id']} has incomplete stored topology")
+    return str(row["logical_role"])
 
 
 def _legacy_task_rows(
@@ -1814,7 +2011,7 @@ def adopt_legacy_org_run(
             plan_hash=plan_hash,
             base_commit=base_commit,
             origin="backend",
-            state="running",
+            state="materialized",
             anchor_task_id=anchor["id"],
         )
         insert_plan_version(
@@ -1847,4 +2044,5 @@ def adopt_legacy_org_run(
         topology = load_org_run_topology(conn, run_id)
         if topology is None:
             raise ValueError(f"legacy OrgRun {run_id} adoption was incomplete")
+        refresh_org_run_state(conn, run_id)
         return topology

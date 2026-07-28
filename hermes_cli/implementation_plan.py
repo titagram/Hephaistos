@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import itertools
 import json
+import re
 import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
@@ -247,14 +248,14 @@ def canonical_plan_json(plan: ImplementationPlan) -> str:
     return json.dumps(asdict(plan), sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
 
-def validate_implementation_plan(
+def _deterministic_plan_projection(
     plan: ImplementationPlan,
-    *,
-    repository: Path,
-    profile_exists: Callable[[str], bool],
-    role_route_exists: Callable[[str], bool],
-) -> PlanValidation:
-    """Validate a plan deterministically against local repository and routing state."""
+) -> tuple[
+    str,
+    dict[str, tuple[str, ...]],
+    tuple[tuple[str, str, str], ...],
+]:
+    """Derive the immutable hash and dependency projection from plan content."""
     by_id: dict[str, ImplementationTask] = {}
     for task in plan.tasks:
         if task.id in by_id:
@@ -271,7 +272,10 @@ def validate_implementation_plan(
 
     conflicts: list[tuple[str, str, str]] = []
     for first_id, second_id in itertools.combinations(sorted(by_id), 2):
-        for scope in sorted(set(by_id[first_id].write_scope) & set(by_id[second_id].write_scope)):
+        for scope in sorted(
+            set(by_id[first_id].write_scope)
+            & set(by_id[second_id].write_scope)
+        ):
             dependencies[second_id].add(first_id)
             conflicts.append((first_id, second_id, scope))
 
@@ -292,24 +296,72 @@ def validate_implementation_plan(
     for task_id in sorted(by_id):
         visit(task_id)
 
+    return (
+        hashlib.sha256(canonical_plan_json(plan).encode("utf-8")).hexdigest(),
+        {
+            key: tuple(sorted(value))
+            for key, value in sorted(dependencies.items())
+        },
+        tuple(conflicts),
+    )
+
+
+def verify_plan_validation(
+    plan: ImplementationPlan,
+    validation: PlanValidation,
+) -> None:
+    """Reject a supplied validation that is not the plan's exact projection."""
+    plan_hash, dependencies, conflicts = _deterministic_plan_projection(plan)
+    expected_profiles = {role: role for role in _RUNTIME_ROLES}
+    if (
+        validation.plan_hash != plan_hash
+        or validation.ordered_dependencies != dependencies
+        or validation.conflicts != conflicts
+        or validation.resolved_profiles != expected_profiles
+        or tuple(validation.routed_roles) != _RUNTIME_ROLES
+    ):
+        raise ValueError("supplied plan validation does not match plan content")
+
+
+def validate_implementation_plan(
+    plan: ImplementationPlan,
+    *,
+    repository: Path,
+    profile_exists: Callable[[str], bool],
+    role_route_exists: Callable[[str], bool],
+) -> PlanValidation:
+    """Validate a plan deterministically against local repository and routing state."""
+    plan_hash, dependencies, conflicts = _deterministic_plan_projection(plan)
+
     for role in _RUNTIME_ROLES:
         if not profile_exists(role):
             raise ValueError(f"missing profile for role: {role}")
         if not role_route_exists(role):
             raise ValueError(f"missing delegation role route: {role}")
 
+    if re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", plan.base_commit) is None:
+        raise ValueError("base_commit must be a full canonical commit OID")
     try:
-        subprocess.run(
-            ["git", "-C", str(repository), "cat-file", "-e", f"{plan.base_commit}^{{commit}}"],
+        resolved = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repository),
+                "rev-parse",
+                "--verify",
+                f"{plan.base_commit}^{{commit}}",
+            ],
             check=True, capture_output=True, text=True, timeout=10,
-        )
+        ).stdout.strip()
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         raise ValueError("base_commit does not resolve to a commit") from exc
+    if resolved != plan.base_commit:
+        raise ValueError("base_commit must be a full canonical commit OID")
 
     return PlanValidation(
-        plan_hash=hashlib.sha256(canonical_plan_json(plan).encode("utf-8")).hexdigest(),
-        ordered_dependencies={key: tuple(sorted(value)) for key, value in sorted(dependencies.items())},
-        conflicts=tuple(conflicts),
+        plan_hash=plan_hash,
+        ordered_dependencies=dependencies,
+        conflicts=conflicts,
         resolved_profiles={role: role for role in _RUNTIME_ROLES},
         routed_roles=_RUNTIME_ROLES,
     )

@@ -240,6 +240,7 @@ def test_additive_amendment_versions_full_plan_and_replays_idempotently(tmp_path
             board="default",
             repository=repository,
             profile_exists=lambda _role: True,
+            role_route_exists=lambda _role: True,
         )
         first_snapshot = _snapshot(conn)
         replay = apply_org_run_amendment(
@@ -248,6 +249,7 @@ def test_additive_amendment_versions_full_plan_and_replays_idempotently(tmp_path
             board="default",
             repository=repository,
             profile_exists=lambda _role: True,
+            role_route_exists=lambda _role: True,
         )
 
         run = get_org_run(conn, amendment.run_id)
@@ -303,6 +305,7 @@ def test_amended_reused_finalization_projection_failure_keeps_run_reviewing(
             board="default",
             repository=repository,
             profile_exists=lambda _role: True,
+            role_route_exists=lambda _role: True,
         )
         final_node = next(
             node for node in list_org_nodes(conn, amendment.run_id)
@@ -377,6 +380,7 @@ def test_amendment_rejects_started_downstream_phase_without_writes(
                 board="default",
                 repository=repository,
                 profile_exists=lambda _role: True,
+                role_route_exists=lambda _role: True,
             )
 
         assert _snapshot(conn) == before
@@ -414,6 +418,7 @@ def test_stale_replay_requires_exact_amendment_provenance(tmp_path, mismatch):
             board="default",
             repository=repository,
             profile_exists=lambda _role: True,
+            role_route_exists=lambda _role: True,
         )
         before = _snapshot(conn)
 
@@ -424,6 +429,7 @@ def test_stale_replay_requires_exact_amendment_provenance(tmp_path, mismatch):
                 board="default",
                 repository=repository,
                 profile_exists=lambda _role: True,
+                role_route_exists=lambda _role: True,
             )
 
         assert _snapshot(conn) == before
@@ -456,6 +462,7 @@ def test_replacement_archives_unfinished_task_and_rewires_integration(tmp_path):
             board="default",
             repository=repository,
             profile_exists=lambda _role: True,
+            role_route_exists=lambda _role: True,
         )
 
         assert set(amended.tasks) == {"runtime-v2"}
@@ -475,6 +482,56 @@ def test_replacement_archives_unfinished_task_and_rewires_integration(tmp_path):
         )
 
 
+def test_amendment_versions_every_retained_node_whose_effective_dag_changes(
+    tmp_path,
+):
+    """Breaks if rewired retained cards keep a stale contract hash/version."""
+    repository = Path(__file__).resolve().parents[2]
+    original_plan = _plan(repository, two_tasks=True)
+    docs = replace(original_plan.tasks[1], depends_on=("runtime",))
+    original_plan = replace(original_plan, tasks=(original_plan.tasks[0], docs))
+    amendment = parse_implementation_amendment(
+        _amendment_payload(cancel_task_ids=["runtime"])
+    )
+    with kb.connect(tmp_path / "kanban.db") as conn:
+        original = materialize_org_run(
+            conn,
+            original_plan,
+            _validation(original_plan),
+            board="default",
+            activate=False,
+        )
+
+        amended = apply_org_run_amendment(
+            conn,
+            amendment,
+            board="default",
+            repository=repository,
+            profile_exists=lambda _role: True,
+            role_route_exists=lambda _role: True,
+        )
+
+        nodes = {node.node_id: node for node in list_org_nodes(conn, amendment.run_id)}
+        docs_node = nodes[f"org-run:{amendment.run_id}:task:docs"]
+        integration_node = nodes[f"org-run:{amendment.run_id}:integration"]
+        cancelled_runtime = nodes[f"org-run:{amendment.run_id}:task:runtime"]
+        assert docs_node.plan_version == 2
+        assert integration_node.plan_version == 2
+        assert cancelled_runtime.plan_version == 1
+        assert cancelled_runtime.state == "cancelled"
+        assert kb.parent_ids(conn, amended.tasks["docs"].execution_id) == [
+            amended.anchor_id
+        ]
+        assert conn.execute(
+            "SELECT COUNT(*) FROM kanban_org_plan_versions WHERE run_id=?",
+            (amendment.run_id,),
+        ).fetchone()[0] == 2
+        assert load_org_run_topology(conn, amendment.run_id) == amended
+        assert original.tasks["runtime"].execution_id != amended.tasks[
+            "docs"
+        ].execution_id
+
+
 def test_cancellation_archives_unfinished_task_and_keeps_remaining_gate(tmp_path):
     repository = Path(__file__).resolve().parents[2]
     amendment = parse_implementation_amendment(
@@ -489,6 +546,7 @@ def test_cancellation_archives_unfinished_task_and_keeps_remaining_gate(tmp_path
             board="default",
             repository=repository,
             profile_exists=lambda _role: True,
+            role_route_exists=lambda _role: True,
         )
 
         assert set(amended.tasks) == {"runtime"}
@@ -516,6 +574,7 @@ def test_load_rejects_cancelled_node_without_historical_provenance(tmp_path):
             board="default",
             repository=repository,
             profile_exists=lambda _role: True,
+            role_route_exists=lambda _role: True,
         )
         conn.execute(
             "UPDATE kanban_org_nodes SET plan_version=99 "
@@ -596,6 +655,7 @@ def test_load_rejects_tampered_historical_cancelled_contract(tmp_path):
             board="default",
             repository=repository,
             profile_exists=lambda _role: True,
+            role_route_exists=lambda _role: True,
         )
         conn.execute(
             "UPDATE kanban_org_nodes SET contract_hash='tampered' "
@@ -633,6 +693,7 @@ def test_amendment_refuses_to_rewrite_started_task_without_version_bump(
                 board="default",
                 repository=repository,
                 profile_exists=lambda _role: True,
+                role_route_exists=lambda _role: True,
             )
 
         assert _snapshot(conn) == before
@@ -658,6 +719,7 @@ def test_amendment_rejects_stale_base_version_without_writes(tmp_path):
                 board="default",
                 repository=repository,
                 profile_exists=lambda _role: True,
+                role_route_exists=lambda _role: True,
             )
 
         assert _snapshot(conn) == before
@@ -696,10 +758,37 @@ def test_validation_failure_rolls_back_without_version_bump(tmp_path, failure):
                     if failure == "profile"
                     else (lambda _role: True)
                 ),
+                role_route_exists=lambda _role: True,
             )
 
         assert _snapshot(conn) == before
         assert get_org_run(conn, amendment.run_id).plan_version == 1
+
+
+def test_amendment_requires_profile_and_route_as_separate_prerequisites(tmp_path):
+    """Breaks if amendment validation silently trusts either prerequisite."""
+    repository = Path(__file__).resolve().parents[2]
+    amendment = parse_implementation_amendment(
+        _amendment_payload(add_tasks=[_task_payload("regression")])
+    )
+    with kb.connect(tmp_path / "kanban.db") as conn:
+        _materialized(conn, repository)
+        before = _snapshot(conn)
+
+        with pytest.raises(
+            ValueError,
+            match="missing delegation role route: reviewer",
+        ):
+            apply_org_run_amendment(
+                conn,
+                amendment,
+                board="default",
+                repository=repository,
+                profile_exists=lambda _role: True,
+                role_route_exists=lambda role: role != "reviewer",
+            )
+
+        assert _snapshot(conn) == before
 
 
 def test_mid_apply_failure_rolls_back_cards_links_nodes_and_version(
@@ -732,6 +821,7 @@ def test_mid_apply_failure_rolls_back_cards_links_nodes_and_version(
                 board="default",
                 repository=repository,
                 profile_exists=lambda _role: True,
+                role_route_exists=lambda _role: True,
             )
 
         assert _snapshot(conn) == before

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import replace
 import hashlib
 import json
@@ -210,10 +211,270 @@ def test_materialize_exact_replay_is_idempotent_and_changed_plan_is_rejected(tmp
             materialize_org_run(
                 conn,
                 changed,
-                _validation(changed, plan_hash="plan-hash-2"),
+                _validation(changed),
                 board="default",
             )
         assert _counts(conn) == first_counts
+
+
+def test_materialize_recomputes_supplied_validation_before_opening_transaction(
+    tmp_path,
+    monkeypatch,
+):
+    """Breaks if a forged plan hash/dependency projection reaches SQLite."""
+    plan = _plan()
+    forged = replace(
+        _validation(plan),
+        plan_hash="0" * 64,
+        ordered_dependencies={"runtime": ("not-in-plan",)},
+    )
+    entered = False
+
+    @contextmanager
+    def forbidden_write_txn(_conn):
+        nonlocal entered
+        entered = True
+        yield
+
+    with kb.connect(tmp_path / "kanban.db") as conn:
+        monkeypatch.setattr(kb, "write_txn", forbidden_write_txn)
+        with pytest.raises(ValueError, match="supplied plan validation"):
+            materialize_org_run(conn, plan, forged, board="default")
+
+    assert entered is False
+
+
+def test_generic_contract_and_dag_mutations_reject_managed_cards(tmp_path):
+    """Breaks if ordinary Kanban verbs can rewrite a materialized plan."""
+    plan = _plan(risk="low", task_review=False, global_review=False)
+    with kb.connect(tmp_path / "kanban.db") as conn:
+        topology = materialize_org_run(
+            conn, plan, _validation(plan), board="default"
+        )
+        execution_id = topology.tasks["runtime"].execution_id
+        outsider_id = kb.create_task(conn, title="ordinary task")
+
+        forbidden = (
+            lambda: kb.assign_task(conn, execution_id, "reviewer"),
+            lambda: kb.link_tasks(conn, outsider_id, execution_id),
+            lambda: kb.unlink_tasks(conn, topology.anchor_id, execution_id),
+            lambda: kb.archive_task(conn, execution_id),
+            lambda: kb.delete_task(conn, execution_id),
+        )
+        for mutation in forbidden:
+            with pytest.raises(ValueError, match="managed OrgRun"):
+                mutation()
+
+        assert kb.get_task(conn, execution_id).assignee == "leaf"
+        assert kb.get_task(conn, execution_id).status != "archived"
+        assert kb.parent_ids(conn, execution_id) == [topology.anchor_id]
+
+
+@pytest.mark.parametrize("mutation", ["create_child", "dependency_block"])
+def test_indirect_generic_link_writers_reject_managed_cards(tmp_path, mutation):
+    """Breaks if a less-obvious writer can attach a card to a managed DAG."""
+    plan = _plan(risk="low", task_review=False, global_review=False)
+    with kb.connect(tmp_path / "kanban.db") as conn:
+        topology = materialize_org_run(
+            conn, plan, _validation(plan), board="default"
+        )
+        execution_id = topology.tasks["runtime"].execution_id
+        outsider_id = kb.create_task(conn, title="ordinary dependency")
+
+        with pytest.raises(kb.ManagedPlanMutationError):
+            if mutation == "create_child":
+                kb.create_task(
+                    conn,
+                    title="generic child",
+                    parents=[execution_id],
+                )
+            else:
+                kb.block_task(
+                    conn,
+                    execution_id,
+                    kind="dependency",
+                    dependency_task_id=outsider_id,
+                )
+
+        assert kb.parent_ids(conn, execution_id) == [topology.anchor_id]
+        assert kb.child_ids(conn, execution_id) == [topology.integration_id]
+
+
+@pytest.mark.parametrize(
+    "tamper_sql",
+    [
+        "UPDATE tasks SET assignee='reviewer' WHERE id=?",
+        "UPDATE tasks SET title='rewritten contract' WHERE id=?",
+        "UPDATE tasks SET skills='[\"other-skill\"]' WHERE id=?",
+    ],
+)
+def test_dispatch_blocks_live_managed_contract_drift(
+    tmp_path,
+    monkeypatch,
+    tamper_sql,
+):
+    """Breaks if dispatch trusts allowed-looking live fields over provenance."""
+    plan = _plan(risk="low", task_review=False, global_review=False)
+    spawned: list[str] = []
+    with kb.connect(tmp_path / "kanban.db") as conn:
+        topology = materialize_org_run(
+            conn, plan, _validation(plan), board="default"
+        )
+        execution_id = topology.tasks["runtime"].execution_id
+        conn.execute(tamper_sql, (execution_id,))
+        conn.commit()
+        monkeypatch.setattr(
+            "hermes_cli.profiles.profile_exists",
+            lambda _profile: True,
+        )
+        monkeypatch.setattr(
+            kb,
+            "_resolve_worker_role_route",
+            lambda role: {"role": role},
+        )
+
+        kb.dispatch_once(
+            conn,
+            spawn_fn=lambda task, *_args, **_kwargs: spawned.append(task.id),
+            board="default",
+        )
+
+        assert spawned == []
+        assert kb.get_task(conn, execution_id).status == "blocked"
+        blocked = [
+            event for event in kb.list_events(conn, execution_id)
+            if event.kind == "blocked"
+        ]
+        assert len(blocked) == 1
+        assert "managed_plan_drift" in blocked[0].payload["reason"]
+
+
+def test_dispatch_blocks_managed_parent_link_drift(tmp_path, monkeypatch):
+    """Breaks if a ready card can launch after its stored DAG was rewired."""
+    plan = _plan(risk="low", task_review=False, global_review=False)
+    with kb.connect(tmp_path / "kanban.db") as conn:
+        topology = materialize_org_run(
+            conn, plan, _validation(plan), board="default"
+        )
+        execution_id = topology.tasks["runtime"].execution_id
+        conn.execute(
+            "DELETE FROM task_links WHERE parent_id=? AND child_id=?",
+            (topology.anchor_id, execution_id),
+        )
+        conn.commit()
+        monkeypatch.setattr(
+            "hermes_cli.profiles.profile_exists",
+            lambda _profile: True,
+        )
+        monkeypatch.setattr(
+            kb,
+            "_resolve_worker_role_route",
+            lambda role: {"role": role},
+        )
+
+        result = kb.dispatch_once(
+            conn,
+            spawn_fn=lambda *_args, **_kwargs: pytest.fail(
+                "drifted managed task spawned"
+            ),
+            board="default",
+        )
+
+        assert result.auto_blocked == [execution_id]
+        assert kb.get_task(conn, execution_id).status == "blocked"
+
+
+def test_review_column_dispatch_blocks_live_managed_contract_drift(
+    tmp_path,
+    monkeypatch,
+):
+    """Breaks if the review dispatcher skips the managed-plan preflight."""
+    plan = _plan(risk="low", task_review=False, global_review=False)
+    with kb.connect(tmp_path / "kanban.db") as conn:
+        topology = materialize_org_run(
+            conn, plan, _validation(plan), board="default"
+        )
+        execution_id = topology.tasks["runtime"].execution_id
+        conn.execute(
+            "UPDATE tasks SET status='review', assignee='reviewer' WHERE id=?",
+            (execution_id,),
+        )
+        conn.commit()
+        monkeypatch.setattr(
+            "hermes_cli.profiles.profile_exists",
+            lambda _profile: True,
+        )
+        monkeypatch.setattr(
+            kb,
+            "_resolve_worker_role_route",
+            lambda role: {"role": role},
+        )
+
+        result = kb.dispatch_once(
+            conn,
+            spawn_fn=lambda *_args, **_kwargs: pytest.fail(
+                "drifted managed review task spawned"
+            ),
+            board="default",
+        )
+
+        assert result.auto_blocked == [execution_id]
+        assert kb.get_task(conn, execution_id).status == "blocked"
+
+
+def test_dispatch_routes_managed_task_by_validated_persisted_role(
+    tmp_path,
+    monkeypatch,
+):
+    """Breaks if managed dispatch routes from a mutable assignee field."""
+    plan = _plan(risk="low", task_review=False, global_review=False)
+    with kb.connect(tmp_path / "kanban.db") as conn:
+        topology = materialize_org_run(
+            conn, plan, _validation(plan), board="default"
+        )
+        execution_id = topology.tasks["runtime"].execution_id
+        routed_roles: list[str] = []
+        monkeypatch.setattr(
+            "hermes_cli.agentic_org_run.validate_live_org_run_task",
+            lambda _conn, _task_id: "reviewer",
+        )
+        monkeypatch.setattr(
+            "hermes_cli.profiles.profile_exists",
+            lambda _profile: True,
+        )
+        monkeypatch.setattr(
+            kb,
+            "_resolve_worker_role_route",
+            lambda role: routed_roles.append(role) or {"role": role},
+        )
+
+        result = kb.dispatch_once(
+            conn,
+            spawn_fn=lambda *_args, **_kwargs: None,
+            board="default",
+            dry_run=True,
+        )
+
+        assert result.spawned == [(execution_id, "leaf", "")]
+        assert routed_roles == ["reviewer"]
+
+
+def test_exact_replay_rejects_live_managed_contract_drift(tmp_path):
+    """Breaks if idempotent replay validates rows but not their live contract."""
+    plan = _plan(risk="low", task_review=False, global_review=False)
+    validation = _validation(plan)
+    with kb.connect(tmp_path / "kanban.db") as conn:
+        topology = materialize_org_run(
+            conn, plan, validation, board="default"
+        )
+        conn.execute(
+            "UPDATE tasks SET body='tampered' WHERE id=?",
+            (topology.tasks["runtime"].execution_id,),
+        )
+        conn.commit()
+
+        with pytest.raises(ValueError, match="managed plan drift"):
+            materialize_org_run(conn, plan, validation, board="default")
 
 
 def test_materialize_rejects_an_unowned_idempotency_key_collision(tmp_path):
@@ -537,6 +798,54 @@ def test_refresh_org_run_state_uses_durable_statuses_with_exact_precedence(
         assert refresh_org_run_state(conn, plan.run_id) == "cancelled"
 
 
+def test_materialize_persists_materialized_until_execution_really_starts(tmp_path):
+    """Breaks if activation intent is persisted as running before any claim."""
+    plan = _plan(risk="low", task_review=False, global_review=False)
+    with kb.connect(tmp_path / "kanban.db") as conn:
+        topology = materialize_org_run(
+            conn, plan, _validation(plan), board="default"
+        )
+        execution_id = topology.tasks["runtime"].execution_id
+
+        assert get_org_run(conn, plan.run_id).state == "materialized"
+        assert refresh_org_run_state(conn, plan.run_id) == "materialized"
+        assert kb.claim_task(conn, execution_id, claimer="state-test")
+        assert get_org_run(conn, plan.run_id).state == "running"
+        assert kb.block_task(
+            conn,
+            execution_id,
+            reason="operator input",
+            kind="needs_input",
+        )
+        assert get_org_run(conn, plan.run_id).state == "blocked"
+
+
+def test_recurrence_routed_triage_is_a_blocked_org_run_state(tmp_path):
+    """Breaks if human-intervention triage is misclassified as materialized."""
+    plan = _plan(risk="low", task_review=False, global_review=False)
+    with kb.connect(tmp_path / "kanban.db") as conn:
+        topology = materialize_org_run(
+            conn,
+            plan,
+            _validation(plan),
+            board="default",
+            activate=False,
+        )
+        execution_id = topology.tasks["runtime"].execution_id
+        conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (execution_id,))
+        conn.commit()
+        assert kb.block_task(
+            conn, execution_id, reason="same capability", kind="capability"
+        )
+        assert kb.unblock_task(conn, execution_id)
+        assert kb.block_task(
+            conn, execution_id, reason="same capability", kind="capability"
+        )
+
+        assert kb.get_task(conn, execution_id).status == "triage"
+        assert refresh_org_run_state(conn, plan.run_id) == "blocked"
+
+
 def test_complete_task_projects_local_reports_after_org_run_finalization(tmp_path):
     """The completion path derives reports after, never instead of, local state."""
     plan = _plan(risk="low", task_review=False, global_review=False)
@@ -715,6 +1024,7 @@ def test_adopt_legacy_org_run_records_provenance_without_recreating_cards_or_rea
             and kb.get_task(conn, review_id).skills == ["hierarchical-development"]
             for review_id in review_ids
         )
+        assert get_org_run(conn, "legacy-run-001").state == "blocked"
         assert adopt_legacy_org_run(
             conn, "legacy-run-001", board="default"
         ) == topology

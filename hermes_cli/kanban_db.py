@@ -363,6 +363,62 @@ _CURRENT_BOARD_OVERRIDE: ContextVar[str | None] = ContextVar(
     "hermes_kanban_current_board_override",
     default=None,
 )
+_MANAGED_PLAN_MUTATION_CONNECTIONS: ContextVar[tuple[int, ...]] = ContextVar(
+    "hermes_kanban_managed_plan_mutation_connections",
+    default=(),
+)
+
+
+class ManagedPlanMutationError(ValueError):
+    """A generic Kanban writer attempted to rewrite a managed plan."""
+
+
+@contextlib.contextmanager
+def _allow_managed_plan_mutations(conn: sqlite3.Connection):
+    """Authorize managed contract/DAG writes for the active amendment txn."""
+    if not conn.in_transaction:
+        raise RuntimeError(
+            "managed OrgRun mutations require an active amendment transaction"
+        )
+    current = _MANAGED_PLAN_MUTATION_CONNECTIONS.get()
+    token = _MANAGED_PLAN_MUTATION_CONNECTIONS.set((*current, id(conn)))
+    try:
+        yield
+    finally:
+        _MANAGED_PLAN_MUTATION_CONNECTIONS.reset(token)
+
+
+def _managed_plan_mutations_allowed(conn: sqlite3.Connection) -> bool:
+    return (
+        conn.in_transaction
+        and id(conn) in _MANAGED_PLAN_MUTATION_CONNECTIONS.get()
+    )
+
+
+def assert_task_contract_mutable(
+    conn: sqlite3.Connection,
+    *task_ids: str,
+    operation: str,
+) -> None:
+    """Reject generic managed-card mutations outside an amendment transaction."""
+    if _managed_plan_mutations_allowed(conn) or not task_ids:
+        return
+    placeholders = ",".join("?" for _ in task_ids)
+    try:
+        row = conn.execute(
+            f"SELECT task_id FROM kanban_org_nodes "
+            f"WHERE task_id IN ({placeholders}) LIMIT 1",
+            tuple(task_ids),
+        ).fetchone()
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc).lower():
+            return
+        raise
+    if row is not None:
+        raise ManagedPlanMutationError(
+            "managed OrgRun card contracts and DAG can only change through "
+            f"an amendment transaction ({operation}: {row['task_id']})"
+        )
 
 
 @contextlib.contextmanager
@@ -3371,6 +3427,11 @@ def create_task(
         task_id = _new_task_id()
         try:
             with write_txn(conn):
+                assert_task_contract_mutable(
+                    conn,
+                    *parents,
+                    operation="create linked task",
+                )
                 # Determine task status from parent status, unless the caller
                 # parks it directly in blocked for human-ops review or in
                 # triage for a specifier.
@@ -3574,6 +3635,11 @@ def assign_task(conn: sqlite3.Connection, task_id: str, profile: Optional[str]) 
     """
     profile = _canonical_assignee(profile)
     with write_txn(conn):
+        assert_task_contract_mutable(
+            conn,
+            task_id,
+            operation="assign",
+        )
         row = conn.execute(
             "SELECT status, claim_lock, assignee FROM tasks WHERE id = ?", (task_id,)
         ).fetchone()
@@ -3607,6 +3673,12 @@ def link_tasks(conn: sqlite3.Connection, parent_id: str, child_id: str) -> None:
     if parent_id == child_id:
         raise ValueError("a task cannot depend on itself")
     with write_txn(conn):
+        assert_task_contract_mutable(
+            conn,
+            parent_id,
+            child_id,
+            operation="link",
+        )
         missing = _find_missing_parents(conn, [parent_id, child_id])
         if missing:
             raise ValueError(f"unknown task(s): {', '.join(missing)}")
@@ -3658,6 +3730,12 @@ def _would_cycle(conn: sqlite3.Connection, parent_id: str, child_id: str) -> boo
 
 def unlink_tasks(conn: sqlite3.Connection, parent_id: str, child_id: str) -> bool:
     with write_txn(conn):
+        assert_task_contract_mutable(
+            conn,
+            parent_id,
+            child_id,
+            operation="unlink",
+        )
         cur = conn.execute(
             "DELETE FROM task_links WHERE parent_id = ? AND child_id = ?",
             (parent_id, child_id),
@@ -4162,6 +4240,29 @@ def recompute_ready(
 # Claim / complete / block
 # ---------------------------------------------------------------------------
 
+def _refresh_managed_org_runs_for_task(
+    conn: sqlite3.Connection,
+    task_id: str,
+) -> None:
+    """Keep cached OrgRun lifecycle state atomic with an owned task change."""
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT run_id FROM kanban_org_nodes "
+            "WHERE task_id = ? AND state = 'active'",
+            (task_id,),
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc).lower():
+            return
+        raise
+    if not rows:
+        return
+    from hermes_cli.org_run_store import refresh_org_run_state
+
+    for row in rows:
+        refresh_org_run_state(conn, str(row["run_id"]))
+
+
 def claim_task(
     conn: sqlite3.Connection,
     task_id: str,
@@ -4273,6 +4374,7 @@ def claim_task(
             {"lock": lock, "expires": expires, "run_id": run_id},
             run_id=run_id,
         )
+        _refresh_managed_org_runs_for_task(conn, task_id)
         claimed = get_task(conn, task_id)
     _fire_kanban_lifecycle_hook(
         "kanban_task_claimed",
@@ -4398,6 +4500,7 @@ def claim_review_task(
              "source_status": "review"},
             run_id=run_id,
         )
+        _refresh_managed_org_runs_for_task(conn, task_id)
         return get_task(conn, task_id)
 
 
@@ -4666,6 +4769,11 @@ def reassign_task(
     Returns True if the reassign landed. ``profile`` may be ``None`` to
     unassign entirely.
     """
+    assert_task_contract_mutable(
+        conn,
+        task_id,
+        operation="reassign",
+    )
     if reclaim_first:
         # Safe to call even if nothing to reclaim.
         reclaim_task(conn, task_id, reason=reason or "reassign")
@@ -4810,6 +4918,26 @@ class HallucinatedCardsError(ValueError):
         )
 
 
+def _completion_board_slug(
+    conn: sqlite3.Connection,
+    task_id: str,
+    board: Optional[str],
+) -> str:
+    """Resolve completion ownership from OrgRun provenance before UI state."""
+    rows = conn.execute(
+        "SELECT DISTINCT r.board_slug "
+        "FROM kanban_org_nodes AS n "
+        "JOIN kanban_org_runs AS r ON r.run_id = n.run_id "
+        "WHERE n.task_id = ?",
+        (task_id,),
+    ).fetchall()
+    if len(rows) > 1:
+        raise ValueError(f"task {task_id} belongs to multiple OrgRun boards")
+    if rows:
+        return str(rows[0]["board_slug"])
+    return _normalize_board_slug(board) or get_current_board()
+
+
 def complete_task(
     conn: sqlite3.Connection,
     task_id: str,
@@ -4819,6 +4947,7 @@ def complete_task(
     metadata: Optional[dict] = None,
     created_cards: Optional[Iterable[str]] = None,
     expected_run_id: Optional[int] = None,
+    board: Optional[str] = None,
 ) -> bool:
     """Transition ``running|ready -> done`` and record ``result``.
 
@@ -4849,6 +4978,7 @@ def complete_task(
     and never blocks.
     """
     now = int(time.time())
+    completion_board = _completion_board_slug(conn, task_id, board)
 
     # Gate: verify created_cards BEFORE the main write txn. A rejected
     # completion still needs an auditable event, so we emit it in a
@@ -4963,6 +5093,7 @@ def complete_task(
             completed_payload,
             run_id=run_id,
         )
+        _refresh_managed_org_runs_for_task(conn, task_id)
     # Prose-scan the summary + result for t_<hex> references that do
     # not resolve. Advisory — does not block the completion. Runs in
     # its own txn so the completion itself is already durable by the
@@ -4996,7 +5127,7 @@ def complete_task(
     _done_task = get_task(conn, task_id)
     try:
         from hermes_cli.kanban_reports import project_after_task_completion
-        project_after_task_completion(conn, task_id, board=get_current_board())
+        project_after_task_completion(conn, task_id, board=completion_board)
     except Exception as exc:
         from hermes_cli.hades_backend_client import redact_secret
         with write_txn(conn):
@@ -5028,7 +5159,7 @@ def complete_task(
     _fire_kanban_lifecycle_hook(
         "kanban_task_completed",
         task_id,
-        board=get_current_board(),
+        board=completion_board,
         assignee=_done_task.assignee if _done_task else None,
         run_id=run_id,
         summary=(summary if summary is not None else result),
@@ -5486,6 +5617,12 @@ def block_task(
                         f"dependency task {dependency_task_id} is already "
                         f"{dependency_row['status']}; expected an unfinished parent"
                     )
+                assert_task_contract_mutable(
+                    conn,
+                    dependency_task_id,
+                    task_id,
+                    operation="dependency block link",
+                )
                 if _would_cycle(conn, dependency_task_id, task_id):
                     raise ValueError(
                         f"linking {dependency_task_id} -> {task_id} would "
@@ -5564,6 +5701,7 @@ def block_task(
                 run_id=run_id,
                 reason=reason,
             )
+            _refresh_managed_org_runs_for_task(conn, task_id)
             return True
 
         # Truly-blocked kinds. Increment the unblock-loop counter when this is a
@@ -5668,6 +5806,7 @@ def block_task(
                 {"reason": reason, "kind": kind, "recurrences": recurrences},
                 run_id=run_id,
             )
+        _refresh_managed_org_runs_for_task(conn, task_id)
         _blocked_task = get_task(conn, task_id)
     _fire_kanban_lifecycle_hook(
         "kanban_task_blocked",
@@ -5814,6 +5953,7 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
             conn, task_id, "unblocked",
             {"status": new_status} if new_status != "ready" else None,
         )
+        _refresh_managed_org_runs_for_task(conn, task_id)
         return True
 
 
@@ -5846,6 +5986,11 @@ def specify_triage_task(
         raise ValueError("title cannot be blank")
     assignee = _canonical_assignee(assignee)
     with write_txn(conn):
+        assert_task_contract_mutable(
+            conn,
+            task_id,
+            operation="specify",
+        )
         existing = conn.execute(
             "SELECT title, body, assignee FROM tasks WHERE id = ? AND status = 'triage'",
             (task_id,),
@@ -6000,6 +6145,11 @@ def decompose_triage_task(
     now = int(time.time())
     child_ids: list[str] = []
     with write_txn(conn):
+        assert_task_contract_mutable(
+            conn,
+            task_id,
+            operation="decompose",
+        )
         root_row = conn.execute(
             "SELECT id, status, tenant, workspace_kind, workspace_path "
             "FROM tasks WHERE id = ?",
@@ -6133,6 +6283,11 @@ def decompose_triage_task(
 
 def archive_task(conn: sqlite3.Connection, task_id: str) -> bool:
     with write_txn(conn):
+        assert_task_contract_mutable(
+            conn,
+            task_id,
+            operation="archive",
+        )
         cur = conn.execute(
             "UPDATE tasks SET status = 'archived', "
             "    claim_lock = NULL, claim_expires = NULL, worker_pid = NULL "
@@ -6165,6 +6320,11 @@ def delete_archived_task(conn: sqlite3.Connection, task_id: str) -> bool:
     second deliberate action.
     """
     with write_txn(conn):
+        assert_task_contract_mutable(
+            conn,
+            task_id,
+            operation="delete archived",
+        )
         row = conn.execute(
             "SELECT status FROM tasks WHERE id = ?",
             (task_id,),
@@ -6194,6 +6354,11 @@ def delete_task(conn: sqlite3.Connection, task_id: str) -> bool:
     if the task was not found.
     """
     with write_txn(conn):
+        assert_task_contract_mutable(
+            conn,
+            task_id,
+            operation="delete",
+        )
         cur = conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
         if cur.rowcount != 1:
             return False
@@ -6554,6 +6719,7 @@ def schedule_task(
                 summary=reason,
             )
         _append_event(conn, task_id, "scheduled", {"reason": reason}, run_id=run_id)
+        _refresh_managed_org_runs_for_task(conn, task_id)
         return True
 
 
@@ -8150,22 +8316,37 @@ def _dispatch_once_locked(
         if max_spawn is not None and running_count + spawned >= max_spawn:
             break
         row_assignee = row["assignee"]
-        from hermes_cli.agentic_org_run import is_org_run_task
+        from hermes_cli.agentic_org_run import (
+            is_org_run_task,
+            validate_live_org_run_task,
+        )
         managed_org_run_task = is_org_run_task(conn, row["id"])
         pinned_role_route = None
         if managed_org_run_task:
+            try:
+                managed_role = validate_live_org_run_task(conn, row["id"])
+            except ValueError as exc:
+                reason = f"managed_plan_drift: {str(exc)[:300]}"
+                result.auto_blocked.append(row["id"])
+                if not dry_run:
+                    block_task(
+                        conn,
+                        row["id"],
+                        reason=reason,
+                        kind="capability",
+                    )
+                continue
             try:
                 from hermes_cli.profiles import profile_exists
             except Exception:
                 profile_exists = None  # type: ignore[assignment]
             unavailable_reason, pinned_role_route = _resolve_org_run_role(
                 profile_exists,
-                row_assignee,
+                managed_role,
             )
             if unavailable_reason is not None:
-                if dry_run:
-                    result.auto_blocked.append(row["id"])
-                else:
+                result.auto_blocked.append(row["id"])
+                if not dry_run:
                     block_task(
                         conn,
                         row["id"],
@@ -8413,18 +8594,33 @@ def _dispatch_once_locked(
             from hermes_cli.profiles import profile_exists
         except Exception:
             profile_exists = None  # type: ignore[assignment]
-        from hermes_cli.agentic_org_run import is_org_run_task
+        from hermes_cli.agentic_org_run import (
+            is_org_run_task,
+            validate_live_org_run_task,
+        )
         managed_org_run_task = is_org_run_task(conn, row["id"])
         pinned_role_route = None
         if managed_org_run_task:
+            try:
+                managed_role = validate_live_org_run_task(conn, row["id"])
+            except ValueError as exc:
+                reason = f"managed_plan_drift: {str(exc)[:300]}"
+                result.auto_blocked.append(row["id"])
+                if not dry_run:
+                    block_task(
+                        conn,
+                        row["id"],
+                        reason=reason,
+                        kind="capability",
+                    )
+                continue
             unavailable_reason, pinned_role_route = _resolve_org_run_role(
                 profile_exists,
-                row["assignee"],
+                managed_role,
             )
             if unavailable_reason is not None:
-                if dry_run:
-                    result.auto_blocked.append(row["id"])
-                else:
+                result.auto_blocked.append(row["id"])
+                if not dry_run:
                     block_task(
                         conn,
                         row["id"],

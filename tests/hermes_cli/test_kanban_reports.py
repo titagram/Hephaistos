@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import hashlib
 import json
+
+import pytest
 
 from hermes_cli import kanban_db as kb
 from hermes_cli.agentic_org_run import materialize_org_run
@@ -16,10 +19,16 @@ from hermes_cli.kanban_reports import (
     get_report,
     list_reports,
     project_after_task_completion,
+    project_org_run_cancellation,
     project_org_run_completion,
     project_task_completion,
 )
-from hermes_cli.org_run_store import get_org_run, list_org_nodes
+from hermes_cli.org_run_store import (
+    get_org_run,
+    list_org_nodes,
+    refresh_org_run_state,
+    set_org_run_state,
+)
 
 
 def _plan(*, run_id: str = "reports-run-001") -> ImplementationPlan:
@@ -214,8 +223,8 @@ def test_final_projection_backfills_the_completed_anchor_task_report(tmp_path):
         assert len(task_reports) == len(active_task_ids)
 
 
-def test_org_run_projection_is_version_isolated_and_after_task_returns_all_new_records(tmp_path):
-    """Breaks if an amended plan reuses a final report or task hook omits reports."""
+def test_org_run_projection_rejects_a_forged_version_pointer(tmp_path):
+    """Breaks if report versioning trusts a mutable run pointer without provenance."""
     plan = _plan(run_id="reports-run-versioned")
     with kb.connect(tmp_path / "kanban.db") as conn:
         topology = materialize_org_run(
@@ -235,8 +244,117 @@ def test_org_run_projection_is_version_isolated_and_after_task_returns_all_new_r
             (plan.run_id,),
         )
         conn.commit()
-        assert project_org_run_completion(conn, plan.run_id, board="default") is not None
+        with pytest.raises(ValueError, match="incomplete stored topology"):
+            project_org_run_completion(conn, plan.run_id, board="default")
 
         reports = list_reports(conn, report_type="org_run_final", run_id=plan.run_id)
-        assert [report.source_version for report in reports] == [1, 2]
-        assert reports[0].idempotency_key != reports[1].idempotency_key
+        assert [report.source_version for report in reports] == [1]
+
+
+def test_run_filter_selects_reports_through_org_node_ownership(tmp_path):
+    """Breaks if run_id is incorrectly compared only with report.subject_id."""
+    plan = _plan(run_id="reports-run-filter")
+    with kb.connect(tmp_path / "kanban.db") as conn:
+        topology = materialize_org_run(
+            conn, plan, _validation(plan), board="default"
+        )
+        execution_id = topology.tasks["implementation"].execution_id
+        _complete(conn, execution_id, summary="owned task complete")
+
+        reports = list_reports(conn, run_id=plan.run_id)
+
+        assert [report.subject_id for report in reports] == [execution_id]
+        assert reports[0].report_type == "task"
+
+
+def test_actual_cancellation_projects_one_canonical_redacted_report(tmp_path):
+    """Breaks if cancellation is unreported, duplicated, or leaks plan text."""
+    plan = replace(
+        _plan(run_id="reports-run-cancelled"),
+        objective="Cancel safely; token=supersecret123",
+    )
+    with kb.connect(tmp_path / "kanban.db") as conn:
+        materialize_org_run(conn, plan, _validation(plan), board="default")
+
+        set_org_run_state(conn, plan.run_id, "cancelled", now=123)
+        set_org_run_state(conn, plan.run_id, "cancelled", now=124)
+
+        reports = list_reports(
+            conn,
+            report_type="org_run_cancelled",
+            run_id=plan.run_id,
+        )
+        assert len(reports) == 1
+        report = reports[0]
+        payload = json.loads(report.report_json)
+        assert report == project_org_run_cancellation(
+            conn, plan.run_id, board="default"
+        )
+        assert report.report_json == json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        assert payload["schema"] == "hades.org-run-cancellation-report.v1"
+        assert payload["state"] == "cancelled"
+        assert payload["run_id"] == plan.run_id
+        assert "supersecret123" not in report.report_json
+        assert "***" in report.report_json
+
+
+def test_blocked_org_run_never_projects_a_cancellation_report(tmp_path):
+    """Breaks if a recoverable blocked run is rendered as terminal cancellation."""
+    plan = _plan(run_id="reports-run-blocked")
+    with kb.connect(tmp_path / "kanban.db") as conn:
+        topology = materialize_org_run(
+            conn, plan, _validation(plan), board="default"
+        )
+        execution_id = topology.tasks["implementation"].execution_id
+        assert kb.block_task(
+            conn, execution_id, reason="needs operator", kind="needs_input"
+        )
+        assert refresh_org_run_state(conn, plan.run_id) == "blocked"
+
+        assert project_org_run_cancellation(
+            conn, plan.run_id, board="default"
+        ) is None
+        assert list_reports(
+            conn,
+            report_type="org_run_cancelled",
+            run_id=plan.run_id,
+        ) == []
+
+
+def test_final_projection_rejects_live_contract_or_dag_drift(tmp_path):
+    """Breaks if done statuses alone can produce a trusted final report."""
+    plan = _plan(run_id="reports-run-drift")
+    with kb.connect(tmp_path / "kanban.db") as conn:
+        topology = materialize_org_run(
+            conn, plan, _validation(plan), board="default"
+        )
+        for task_id in (
+            topology.tasks["implementation"].execution_id,
+            topology.integration_id,
+            topology.finalization_id,
+        ):
+            _complete(conn, task_id, summary="done")
+        conn.execute(
+            "UPDATE tasks SET assignee='reviewer' WHERE id=?",
+            (topology.finalization_id,),
+        )
+        conn.execute(
+            "DELETE FROM kanban_reports WHERE report_type='org_run_final' "
+            "AND subject_id=?",
+            (plan.run_id,),
+        )
+        conn.commit()
+
+        with pytest.raises(ValueError, match="managed plan drift"):
+            project_org_run_completion(conn, plan.run_id, board="default")
+
+        assert list_reports(
+            conn,
+            report_type="org_run_final",
+            run_id=plan.run_id,
+        ) == []

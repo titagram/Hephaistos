@@ -737,6 +737,8 @@ def create_task(payload: CreateTaskBody, board: Optional[str] = Query(None)):
                 # Probe failure must never block the create itself.
                 pass
         return body
+    except kanban_db.ManagedPlanMutationError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     finally:
@@ -929,6 +931,16 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
         task = kanban_db.get_task(conn, task_id)
         if task is None:
             raise HTTPException(status_code=404, detail=f"task {task_id} not found")
+        if (
+            payload.assignee is not None
+            or payload.title is not None
+            or payload.body is not None
+        ):
+            kanban_db.assert_task_contract_mutable(
+                conn,
+                task_id,
+                operation="dashboard edit",
+            )
 
         # --- assignee ----------------------------------------------------
         if payload.assignee is not None:
@@ -951,6 +963,7 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
                     result=payload.result,
                     summary=payload.summary,
                     metadata=payload.metadata,
+                    board=board,
                 )
             elif s == "blocked":
                 ok = kanban_db.block_task(conn, task_id, reason=payload.block_reason)
@@ -1036,6 +1049,8 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
 
         updated = kanban_db.get_task(conn, task_id)
         return {"task": _task_dict(updated) if updated else None}
+    except kanban_db.ManagedPlanMutationError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     finally:
         conn.close()
 
@@ -1053,6 +1068,8 @@ def delete_task(task_id: str, board: Optional[str] = Query(None)):
         if not ok:
             raise HTTPException(status_code=404, detail=f"task {task_id} not found")
         return {"deleted": True, "task_id": task_id}
+    except kanban_db.ManagedPlanMutationError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     finally:
         conn.close()
 
@@ -1224,6 +1241,8 @@ def add_link(payload: LinkBody, board: Optional[str] = Query(None)):
     try:
         kanban_db.link_tasks(conn, payload.parent_id, payload.child_id)
         return {"ok": True}
+    except kanban_db.ManagedPlanMutationError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     finally:
@@ -1241,6 +1260,8 @@ def delete_link(
     try:
         ok = kanban_db.unlink_tasks(conn, parent_id, child_id)
         return {"ok": bool(ok)}
+    except kanban_db.ManagedPlanMutationError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     finally:
         conn.close()
 
@@ -1294,6 +1315,7 @@ def bulk_update(payload: BulkTaskBody, board: Optional[str] = Query(None)):
                             result=payload.result,
                             summary=payload.summary,
                             metadata=payload.metadata,
+                            board=board,
                         )
                     elif s == "blocked":
                         ok = kanban_db.block_task(conn, tid)
@@ -1782,6 +1804,8 @@ def reassign_task_endpoint(
                 ),
             )
         return {"ok": True, "task_id": task_id, "assignee": payload.profile or None}
+    except kanban_db.ManagedPlanMutationError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     finally:
         conn.close()
 

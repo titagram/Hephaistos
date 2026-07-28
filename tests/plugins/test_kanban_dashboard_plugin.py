@@ -838,6 +838,142 @@ def test_patch_status_triage_works(client):
     assert r.json()["task"]["status"] == "todo"
 
 
+def test_dashboard_rejects_generic_managed_contract_dag_archive_and_delete(
+    client,
+):
+    """Breaks if REST mutations can bypass the OrgRun amendment boundary."""
+    managed = client.post(
+        "/api/plugins/kanban/tasks",
+        json={"title": "managed", "assignee": "leaf"},
+    ).json()["task"]
+    outsider = client.post(
+        "/api/plugins/kanban/tasks",
+        json={"title": "outsider"},
+    ).json()["task"]
+    with kb.connect_closing() as conn:
+        conn.execute(
+            "INSERT INTO kanban_org_runs "
+            "(run_id, board_slug, plan_version, plan_hash, base_commit, origin, "
+            "state, anchor_task_id, created_at, updated_at) "
+            "VALUES ('managed-api-run', 'default', 1, ?, ?, 'local', "
+            "'materialized', ?, 1, 1)",
+            ("a" * 64, "b" * 40, managed["id"]),
+        )
+        conn.execute(
+            "INSERT INTO kanban_org_nodes "
+            "(run_id, node_id, task_id, node_kind, plan_version, contract_hash, "
+            "logical_role, state) VALUES "
+            "('managed-api-run', 'org-run:managed-api-run:anchor', ?, "
+            "'anchor', 1, ?, 'orchestrator', 'active')",
+            (managed["id"], "c" * 64),
+        )
+        conn.commit()
+
+    assert client.patch(
+        f"/api/plugins/kanban/tasks/{managed['id']}",
+        json={"assignee": "reviewer", "title": "rewritten"},
+    ).status_code == 409
+    assert client.patch(
+        f"/api/plugins/kanban/tasks/{managed['id']}",
+        json={"status": "archived"},
+    ).status_code == 409
+    assert client.post(
+        "/api/plugins/kanban/links",
+        json={"parent_id": outsider["id"], "child_id": managed["id"]},
+    ).status_code == 409
+    assert client.delete(
+        f"/api/plugins/kanban/tasks/{managed['id']}",
+    ).status_code == 409
+    with kb.connect_closing() as conn:
+        task = kb.get_task(conn, managed["id"])
+        assert task is not None
+        assert task.assignee == "leaf"
+        assert task.title == "managed"
+        assert task.status != "archived"
+        assert kb.parent_ids(conn, managed["id"]) == []
+
+
+def test_dashboard_completion_projects_to_explicit_non_current_org_run_board(
+    client,
+):
+    """Breaks if connection-owned completion falls back to the current board."""
+    import hashlib
+
+    from hermes_cli.agentic_org_run import materialize_org_run
+    from hermes_cli.implementation_plan import (
+        IMPLEMENTATION_PLAN_SCHEMA,
+        ImplementationPlan,
+        ImplementationTask,
+        PlanValidation,
+        canonical_plan_json,
+    )
+
+    kb.create_board("other")
+    plan = ImplementationPlan(
+        schema=IMPLEMENTATION_PLAN_SCHEMA,
+        run_id="other-board-run",
+        objective="Project on the owning board",
+        base_commit="a" * 40,
+        acceptance_criteria=("The report stays on other",),
+        tasks=(
+            ImplementationTask(
+                id="work",
+                title="Work on other",
+                role="leaf",
+                risk="low",
+                write_scope=("hermes_cli/other.py",),
+                depends_on=(),
+                acceptance_criteria=("Work completes",),
+                verification=("pytest tests/plugins/test_kanban_dashboard_plugin.py",),
+                independent_review=False,
+            ),
+        ),
+    )
+    validation = PlanValidation(
+        plan_hash=hashlib.sha256(
+            canonical_plan_json(plan).encode("utf-8")
+        ).hexdigest(),
+        ordered_dependencies={"work": ()},
+        conflicts=(),
+        resolved_profiles={
+            "orchestrator": "orchestrator",
+            "leaf": "leaf",
+            "reviewer": "reviewer",
+        },
+        routed_roles=("orchestrator", "leaf", "reviewer"),
+    )
+    with kb.connect(board="other") as conn:
+        topology = materialize_org_run(
+            conn, plan, validation, board="other"
+        )
+        for task_id in (
+            topology.tasks["work"].execution_id,
+            topology.integration_id,
+        ):
+            assert kb.claim_task(conn, task_id, claimer="other-board")
+            assert kb.complete_task(
+                conn,
+                task_id,
+                summary="done",
+                board="other",
+            )
+
+    response = client.patch(
+        f"/api/plugins/kanban/tasks/{topology.finalization_id}?board=other",
+        json={"status": "done", "summary": "final evidence"},
+    )
+
+    assert response.status_code == 200
+    reports = client.get(
+        "/api/plugins/kanban/reports"
+        "?report_type=org_run_final&run_id=other-board-run&board=other"
+    )
+    assert reports.status_code == 200
+    payload = reports.json()["reports"]
+    assert len(payload) == 1
+    assert payload[0]["board_slug"] == "other"
+
+
 # ---------------------------------------------------------------------------
 # Progress rollup (done children / total children)
 # ---------------------------------------------------------------------------

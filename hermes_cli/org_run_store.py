@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import sqlite3
 import time
 
-from hermes_cli.kanban_db import write_txn
+from hermes_cli.kanban_db import BLOCK_RECURRENCE_LIMIT, write_txn
 from tools.delegation_routing import ALLOWED_ROLES
 
 
@@ -183,12 +183,19 @@ def set_org_run_state(
 ) -> None:
     checked_state = _validate_org_run_state(state)
     with write_txn(conn):
+        timestamp = _timestamp(now)
         updated = conn.execute(
             "UPDATE kanban_org_runs SET state = ?, updated_at = ? WHERE run_id = ?",
-            (checked_state, _timestamp(now), run_id),
+            (checked_state, timestamp, run_id),
         )
         if updated.rowcount != 1:
             raise KeyError(f"unknown OrgRun: {run_id}")
+        if checked_state == "cancelled":
+            run = get_org_run(conn, run_id)
+            assert run is not None
+            from hermes_cli.kanban_reports import project_org_run_cancellation
+
+            project_org_run_cancellation(conn, run_id, board=run.board_slug)
 
 
 def update_org_run_plan(
@@ -241,7 +248,7 @@ def refresh_org_run_state(conn: sqlite3.Connection, run_id: str) -> str:
             return "cancelled"
 
         rows = conn.execute(
-            "SELECT n.node_kind, t.status "
+            "SELECT n.node_kind, t.status, t.block_recurrences "
             "FROM kanban_org_nodes AS n "
             "JOIN tasks AS t ON t.id = n.task_id "
             "WHERE n.run_id = ? AND n.state = 'active'",
@@ -259,6 +266,12 @@ def refresh_org_run_state(conn: sqlite3.Connection, run_id: str) -> str:
             if kind != "anchor"
             for status in statuses
         ]
+        human_triage = any(
+            row["node_kind"] != "anchor"
+            and row["status"] == "triage"
+            and int(row["block_recurrences"] or 0) >= BLOCK_RECURRENCE_LIMIT
+            for row in rows
+        )
         finalization_done = "done" in by_kind.get("finalization", ())
         final_report_exists = conn.execute(
             "SELECT 1 FROM kanban_reports "
@@ -280,7 +293,7 @@ def refresh_org_run_state(conn: sqlite3.Connection, run_id: str) -> str:
             for status in by_kind.get("execution", ())
         )
 
-        if "blocked" in required_statuses:
+        if "blocked" in required_statuses or human_triage:
             state = "blocked"
         elif finalization_done and final_report_exists:
             state = "completed"
@@ -370,6 +383,26 @@ def list_org_nodes(
         (run_id,),
     ).fetchall()
     return [_org_node_from_row(row) for row in rows]
+
+
+def update_org_node_contract(
+    conn: sqlite3.Connection,
+    *,
+    run_id: str,
+    node_id: str,
+    plan_version: int,
+    contract_hash: str,
+) -> None:
+    """Advance one retained active node to its changed effective contract."""
+    with write_txn(conn):
+        updated = conn.execute(
+            "UPDATE kanban_org_nodes "
+            "SET plan_version = ?, contract_hash = ? "
+            "WHERE run_id = ? AND node_id = ? AND state = 'active'",
+            (int(plan_version), contract_hash, run_id, node_id),
+        )
+        if updated.rowcount != 1:
+            raise ValueError(f"OrgRun {run_id} has incomplete stored topology")
 
 
 def insert_report(
