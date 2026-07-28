@@ -228,6 +228,95 @@ def test_list_marks_legacy_runs_until_adoption_without_recreating_cards(tmp_path
     assert listed["runs"][0]["plan_version"] == 1
 
 
+def test_project_reports_backfills_a_historical_completed_org_run(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    """Breaks if operators cannot recover reports for pre-projection completions."""
+    from hermes_cli.hades_org_cmd import (
+        materialize_plan_file,
+        project_org_run_reports,
+    )
+    from hermes_cli.kanban_reports import list_reports
+
+    _configure_local_board(tmp_path, monkeypatch)
+    plan_path = _write_json(tmp_path, "plan.json", _plan_payload())
+    materialized, code = materialize_plan_file(str(plan_path), board="default")
+    assert code == 0
+
+    with monkeypatch.context() as projection_disabled:
+        projection_disabled.setattr(
+            "hermes_cli.kanban_reports.project_after_task_completion",
+            lambda *_args, **_kwargs: (),
+        )
+        with kb.connect(board="default") as conn:
+            while True:
+                kb.recompute_ready(conn)
+                ready = [
+                    str(row["id"])
+                    for row in conn.execute(
+                        "SELECT id FROM tasks WHERE status = 'ready' ORDER BY id"
+                    )
+                ]
+                if not ready:
+                    break
+                for task_id in ready:
+                    assert kb.claim_task(
+                        conn,
+                        task_id,
+                        claimer="historical-report-test",
+                    )
+                    assert kb.complete_task(
+                        conn,
+                        task_id,
+                        summary=f"completed {task_id}",
+                    )
+
+    with kb.connect(board="default") as conn:
+        assert list_reports(conn, run_id="local-run-001") == []
+        active_task_ids = {
+            str(row["task_id"])
+            for row in conn.execute(
+                "SELECT task_id FROM kanban_org_nodes "
+                "WHERE run_id = ? AND state = 'active'",
+                ("local-run-001",),
+            )
+        }
+
+    projected, code = project_org_run_reports(
+        "local-run-001",
+        board="default",
+    )
+
+    assert code == 0
+    assert projected["status"] == "projected"
+    assert projected["run_id"] == "local-run-001"
+    assert projected["state"] == "completed"
+    assert len(projected["task_report_ids"]) == len(active_task_ids)
+    assert len(projected["final_report_ids"]) == 1
+    assert projected["report_ids"] == sorted(
+        projected["task_report_ids"] + projected["final_report_ids"]
+    )
+
+    from hermes_cli.hades_org_cmd import build_parser, org_command
+
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers(dest="command")
+    build_parser(sub, cmd_org=org_command)
+    args = parser.parse_args([
+        "org",
+        "project-reports",
+        "local-run-001",
+        "--board",
+        "default",
+        "--json",
+    ])
+
+    assert org_command(args) == 0
+    assert json.loads(capsys.readouterr().out) == projected
+
+
 def test_list_includes_an_interrupted_legacy_anchor_without_full_topology(tmp_path, monkeypatch):
     """Breaks if interrupted legacy runs vanish before an operator can adopt them."""
     from hermes_cli.hades_org_cmd import list_org_runs

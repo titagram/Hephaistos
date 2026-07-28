@@ -270,6 +270,76 @@ def adopt_legacy_run(run_id: str, *, board: str | None) -> tuple[dict[str, Any],
     }, 0
 
 
+def project_org_run_reports(
+    run_id: str,
+    *,
+    board: str | None,
+) -> tuple[dict[str, Any], int]:
+    """Backfill canonical reports for an already-terminal local OrgRun."""
+    board_slug = board or kb.get_current_board()
+    try:
+        with kb.connect(board=board) as conn:
+            run = get_org_run(conn, run_id)
+            if run is None or run.board_slug != board_slug:
+                raise KeyError(run_id)
+            # Keep report projection out of this module's cold-import graph:
+            # kanban_reports owns evidence redaction and is loaded only when
+            # an operator explicitly requests this local recovery path.
+            from hermes_cli.kanban_reports import (
+                list_reports,
+                project_org_run_completion,
+            )
+
+            final = project_org_run_completion(
+                conn,
+                run_id,
+                board=board_slug,
+            )
+            if final is None:
+                return _error(
+                    "org_run_reports_not_ready",
+                    ValueError(
+                        f"OrgRun {run_id} is not terminal; "
+                        "complete its active gates before projecting reports"
+                    ),
+                ), 2
+            active_task_ids = sorted(
+                node.task_id
+                for node in list_org_nodes(conn, run_id)
+                if node.state == "active"
+            )
+            task_report_ids = sorted(
+                report.id
+                for task_id in active_task_ids
+                for report in list_reports(
+                    conn,
+                    report_type="task",
+                    subject_id=task_id,
+                )
+            )
+            final_report_ids = [
+                report.id
+                for report in list_reports(
+                    conn,
+                    report_type="org_run_final",
+                    subject_id=run_id,
+                )
+            ]
+            state = refresh_org_run_state(conn, run_id)
+    except KeyError:
+        return _error("org_run_not_found", ValueError(run_id)), 1
+    except Exception as exc:  # pragma: no cover - defensive CLI boundary
+        return _error("org_run_report_projection_failed", exc), 1
+    return {
+        "status": "projected",
+        "run_id": run_id,
+        "state": state,
+        "task_report_ids": task_report_ids,
+        "final_report_ids": final_report_ids,
+        "report_ids": sorted(task_report_ids + final_report_ids),
+    }, 0
+
+
 def sync_kanban(*, board: str | None, mode: str, project_id: str | None = None) -> tuple[dict[str, Any], int]:
     """Keep the legacy parser entry as a typed, local-only rejection."""
     del board, mode, project_id
@@ -317,6 +387,15 @@ def build_parser(subparsers, *, cmd_org: Callable[[argparse.Namespace], int]) ->
     adopt.add_argument("--json", action="store_true")
     adopt.set_defaults(func=cmd_org)
 
+    project_reports = sub.add_parser(
+        "project-reports",
+        help="Backfill canonical reports for a terminal local OrgRun",
+    )
+    project_reports.add_argument("run_id")
+    project_reports.add_argument("--board", default=None)
+    project_reports.add_argument("--json", action="store_true")
+    project_reports.set_defaults(func=cmd_org)
+
     sync = sub.add_parser("sync", help="Report the local-only sync boundary")
     sync.add_argument("--mode", default="off")
     sync.add_argument("--project-id", default=None)
@@ -339,6 +418,8 @@ def org_command(args: argparse.Namespace) -> int:
         result, code = list_org_runs(board=args.board)
     elif action == "adopt-legacy":
         result, code = adopt_legacy_run(args.run_id, board=args.board)
+    elif action == "project-reports":
+        result, code = project_org_run_reports(args.run_id, board=args.board)
     elif action == "sync":
         result, code = sync_kanban(
             board=args.board,
@@ -346,7 +427,10 @@ def org_command(args: argparse.Namespace) -> int:
             project_id=args.project_id,
         )
     else:
-        print("usage: hermes org <validate|materialize|show|amend|list|adopt-legacy|sync>")
+        print(
+            "usage: hermes org "
+            "<validate|materialize|show|amend|list|adopt-legacy|project-reports|sync>"
+        )
         return 2
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     return code
