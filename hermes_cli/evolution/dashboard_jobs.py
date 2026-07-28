@@ -14,7 +14,6 @@ import math
 import os
 import re
 import stat
-import tempfile
 import threading
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -148,7 +147,6 @@ class _JobRequest:
 class _JobDirectory:
     """Retained private directory descriptors for one storage transaction."""
 
-    path: Path
     root_fd: int | None = None
     evolution_fd: int | None = None
     fd: int | None = None
@@ -595,39 +593,6 @@ class EvolutionJobManager:
         ):
             raise EvolutionJobStorageError("job_storage_unsafe")
 
-    @classmethod
-    def _validate_private_directory(cls, path: Path) -> os.stat_result:
-        try:
-            info = path.lstat()
-        except (OSError, TypeError, NotImplementedError):
-            raise EvolutionJobStorageError("job_storage_unsafe") from None
-        cls._validate_private_directory_info(info)
-        return info
-
-    @classmethod
-    def _validate_private_file(cls, path: Path) -> os.stat_result:
-        try:
-            info = path.lstat()
-        except (OSError, TypeError, NotImplementedError):
-            raise EvolutionJobStorageError("job_storage_unsafe") from None
-        cls._validate_private_file_info(info)
-        return info
-
-    @classmethod
-    def _ensure_private_directory(cls, path: Path) -> os.stat_result:
-        try:
-            info = path.lstat()
-        except FileNotFoundError:
-            try:
-                path.mkdir(mode=0o700)
-            except FileExistsError:
-                pass
-            except (OSError, TypeError, NotImplementedError):
-                raise EvolutionJobStorageError("job_storage_unsafe") from None
-        except (OSError, TypeError, NotImplementedError):
-            raise EvolutionJobStorageError("job_storage_unsafe") from None
-        return cls._validate_private_directory(path)
-
     @staticmethod
     def _supports_anchored_storage() -> bool:
         supported = getattr(os, "supports_dir_fd", frozenset())
@@ -723,22 +688,7 @@ class EvolutionJobManager:
 
     def _open_jobs_directory(self, *, create: bool) -> _JobDirectory | None:
         if not self._supports_anchored_storage():
-            try:
-                resolve_organism_root(self.root)
-            except OrganismHomeError:
-                raise EvolutionJobStorageError("job_storage_unsafe") from None
-            if create:
-                self._ensure_private_directory(self.root)
-                self._ensure_private_directory(self.root / "evolution")
-                self._ensure_private_directory(self.jobs_dir)
-            else:
-                try:
-                    self._validate_private_directory(self.root)
-                    self._validate_private_directory(self.root / "evolution")
-                    self._validate_private_directory(self.jobs_dir)
-                except FileNotFoundError:
-                    return None
-            return _JobDirectory(self.jobs_dir)
+            raise EvolutionJobStorageError("job_storage_unsafe")
 
         root_fd = self._open_anchored_root(create=create)
         if root_fd is None:
@@ -760,7 +710,6 @@ class EvolutionJobManager:
                 os.close(root_fd)
                 return None
             directory = _JobDirectory(
-                self.jobs_dir,
                 root_fd=root_fd,
                 evolution_fd=evolution_fd,
                 fd=jobs_fd,
@@ -775,10 +724,10 @@ class EvolutionJobManager:
 
     @staticmethod
     def _private_file_info_at(directory: _JobDirectory, name: str) -> os.stat_result | None:
+        if directory.fd is None:
+            raise EvolutionJobStorageError("job_storage_unsafe")
         try:
-            if directory.fd is not None:
-                return os.stat(name, dir_fd=directory.fd, follow_symlinks=False)
-            return (directory.path / name).lstat()
+            return os.stat(name, dir_fd=directory.fd, follow_symlinks=False)
         except FileNotFoundError:
             return None
         except (OSError, TypeError, NotImplementedError):
@@ -788,6 +737,8 @@ class EvolutionJobManager:
     def _open_private_lock(
         cls, directory: _JobDirectory, name: str, *, create: bool
     ) -> int | None:
+        if directory.fd is None:
+            raise EvolutionJobStorageError("job_storage_unsafe")
         existing = cls._private_file_info_at(directory, name)
         flags = os.O_RDWR | getattr(os, "O_BINARY", 0)
         if hasattr(os, "O_NOFOLLOW"):
@@ -798,14 +749,9 @@ class EvolutionJobManager:
                 if not create:
                     return None
                 try:
-                    if directory.fd is not None:
-                        descriptor = os.open(
-                            name, flags | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=directory.fd
-                        )
-                    else:
-                        descriptor = os.open(
-                            directory.path / name, flags | os.O_CREAT | os.O_EXCL, 0o600
-                        )
+                    descriptor = os.open(
+                        name, flags | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=directory.fd
+                    )
                 except FileExistsError:
                     existing = cls._private_file_info_at(directory, name)
                 else:
@@ -815,11 +761,7 @@ class EvolutionJobManager:
                     existing = cls._private_file_info_at(directory, name)
                 assert existing is not None
                 cls._validate_private_file_info(existing)
-                descriptor = (
-                    os.open(name, flags, dir_fd=directory.fd)
-                    if directory.fd is not None
-                    else os.open(directory.path / name, flags)
-                )
+                descriptor = os.open(name, flags, dir_fd=directory.fd)
             opened = os.fstat(descriptor)
             linked = cls._private_file_info_at(directory, name)
             if linked is None:
@@ -904,6 +846,8 @@ class EvolutionJobManager:
     def _read_record(
         self, directory: _JobDirectory, job_id: str
     ) -> EvolutionJob | None:
+        if directory.fd is None:
+            raise EvolutionJobStorageError("job_storage_unsafe")
         name = self._record_name(job_id)
         expected = self._private_file_info_at(directory, name)
         if expected is None:
@@ -914,11 +858,7 @@ class EvolutionJobManager:
             flags |= os.O_NOFOLLOW
         descriptor: int | None = None
         try:
-            descriptor = (
-                os.open(name, flags, dir_fd=directory.fd)
-                if directory.fd is not None
-                else os.open(directory.path / name, flags)
-            )
+            descriptor = os.open(name, flags, dir_fd=directory.fd)
             opened = os.fstat(descriptor)
             linked = self._private_file_info_at(directory, name)
             if linked is None or not _same_inode(expected, opened) or not _same_inode(opened, linked):
@@ -1014,6 +954,8 @@ class EvolutionJobManager:
         ).encode("utf-8")
 
     def _write_record(self, directory: _JobDirectory, job: EvolutionJob) -> None:
+        if directory.fd is None:
+            raise EvolutionJobStorageError("job_storage_unsafe")
         name = self._record_name(job.job_id)
         existing = self._private_file_info_at(directory, name)
         if existing is not None:
@@ -1024,27 +966,21 @@ class EvolutionJobManager:
         descriptor: int | None = None
         temporary_name: str | None = None
         try:
-            if directory.fd is None:
-                descriptor, temporary_path = tempfile.mkstemp(
-                    prefix=f".{job.job_id}.", suffix=".tmp", dir=directory.path
-                )
-                temporary_name = temporary_path
-            else:
-                for _ in range(16):
-                    candidate = f".{job.job_id}.{uuid.uuid4().hex}.tmp"
-                    try:
-                        descriptor = os.open(
-                            candidate,
-                            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                            0o600,
-                            dir_fd=directory.fd,
-                        )
-                    except FileExistsError:
-                        continue
-                    temporary_name = candidate
-                    break
-                if descriptor is None or temporary_name is None:
-                    raise EvolutionJobStorageError("job_storage_unavailable")
+            for _ in range(16):
+                candidate = f".{job.job_id}.{uuid.uuid4().hex}.tmp"
+                try:
+                    descriptor = os.open(
+                        candidate,
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                        0o600,
+                        dir_fd=directory.fd,
+                    )
+                except FileExistsError:
+                    continue
+                temporary_name = candidate
+                break
+            if descriptor is None or temporary_name is None:
+                raise EvolutionJobStorageError("job_storage_unavailable")
             os.fchmod(descriptor, 0o600)
             view = memoryview(content)
             while view:
@@ -1055,19 +991,15 @@ class EvolutionJobManager:
             os.fsync(descriptor)
             os.close(descriptor)
             descriptor = None
-            if directory.fd is None:
-                assert temporary_name is not None
-                os.replace(temporary_name, directory.path / name)
-            else:
-                assert temporary_name is not None
-                self._verify_linked_directory(directory)
-                os.replace(
-                    temporary_name,
-                    name,
-                    src_dir_fd=directory.fd,
-                    dst_dir_fd=directory.fd,
-                )
-                os.fsync(directory.fd)
+            assert temporary_name is not None
+            self._verify_linked_directory(directory)
+            os.replace(
+                temporary_name,
+                name,
+                src_dir_fd=directory.fd,
+                dst_dir_fd=directory.fd,
+            )
+            os.fsync(directory.fd)
             linked = self._private_file_info_at(directory, name)
             if linked is None:
                 raise EvolutionJobStorageError("job_storage_unsafe")
@@ -1081,10 +1013,7 @@ class EvolutionJobManager:
                 os.close(descriptor)
             if temporary_name is not None:
                 try:
-                    if directory.fd is None:
-                        Path(temporary_name).unlink()
-                    else:
-                        os.unlink(temporary_name, dir_fd=directory.fd)
+                    os.unlink(temporary_name, dir_fd=directory.fd)
                 except FileNotFoundError:
                     pass
 
@@ -1124,11 +1053,10 @@ class EvolutionJobManager:
 
     def _iter_record_ids(self, directory: _JobDirectory) -> Iterator[str]:
         """Yield at most the fixed durable cap without materializing a directory."""
+        if directory.fd is None:
+            raise EvolutionJobStorageError("job_storage_unsafe")
         try:
-            scan_target: int | Path = (
-                os.dup(directory.fd) if directory.fd is not None else directory.path
-            )
-            with os.scandir(scan_target) as entries:
+            with os.scandir(os.dup(directory.fd)) as entries:
                 count = 0
                 for entry in entries:
                     if not entry.name.endswith(".json"):

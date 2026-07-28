@@ -591,3 +591,45 @@ def test_ancestor_swap_before_submission_never_redirects_job_storage(tmp_path, m
         assert not (outside / "organism").exists()
     finally:
         manager.shutdown()
+
+
+def test_unanchored_storage_rejects_submission_before_any_path_write(tmp_path, monkeypatch):
+    """Falling back to pathname writes without dir-fd anchoring must fail closed."""
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    root = parent / "organism"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    manager = EvolutionJobManager(root, workspace_root=_workspace(tmp_path))
+    mkdir_calls: list[Path] = []
+    open_calls: list[object] = []
+    original_open = jobs_module.os.open
+
+    def swapping_mkdir(path, *args, **kwargs):
+        mkdir_calls.append(path)
+        if path == root:
+            parent.rename(tmp_path / "original-parent")
+            parent.symlink_to(outside, target_is_directory=True)
+        raise AssertionError("unsafe pathname mkdir attempted")
+
+    def spying_open(path, *args, **kwargs):
+        open_calls.append(path)
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(manager, "_supports_anchored_storage", lambda: False)
+    monkeypatch.setattr(jobs_module.Path, "mkdir", swapping_mkdir)
+    monkeypatch.setattr(jobs_module.os, "open", spying_open)
+    try:
+        with pytest.raises(EvolutionJobStorageError, match="job_storage_unsafe"):
+            manager.get_job(str(uuid.uuid4()))
+        with pytest.raises(EvolutionJobStorageError, match="job_storage_unsafe"):
+            manager.list_jobs()
+        with pytest.raises(EvolutionJobStorageError, match="job_storage_unsafe"):
+            manager.submit_revision_diff("rev:left", "rev:right")
+
+        assert mkdir_calls == []
+        assert open_calls == []
+        assert not root.exists()
+        assert not (outside / "organism").exists()
+    finally:
+        manager.shutdown()
