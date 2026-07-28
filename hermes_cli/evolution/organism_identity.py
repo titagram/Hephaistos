@@ -67,6 +67,23 @@ def _identity_path_stat(root: Path) -> os.stat_result | None:
     return st
 
 
+def _decode_identity(identity_path: Path) -> OrganismIdentity:
+    """Read, validate, and return an identity document."""
+    try:
+        data = json.loads(identity_path.read_text(encoding="utf-8"))
+    except Exception:
+        raise OrganismIdentityError("organism_identity_corrupted") from None
+
+    identity = OrganismIdentity(
+        schema_version=int(data.get("schema_version", 0)),
+        organism_id=str(data.get("organism_id", "")),
+        created_at=str(data.get("created_at", "")),
+        lineage_root_digest=str(data.get("lineage_root_digest", "")),
+    )
+    validate_organism_identity(identity)
+    return identity
+
+
 def create_organism_identity(
     organism_root: Path | None = None,
     lineage_root_digest: str = "0000000000000000000000000000000000000000000000000000000000000000",
@@ -141,16 +158,24 @@ def load_organism_identity(organism_root: Path | None = None) -> OrganismIdentit
     if not stat_module.S_ISREG(st.st_mode):
         raise OrganismIdentityError("organism_identity_unsafe") from None
 
+    return _decode_identity(identity_path)
+
+
+def probe_organism_identity(
+    organism_root: Path | None = None,
+) -> OrganismIdentity | None:
+    """Return the existing organism identity without creating filesystem state."""
+    from .organism_home import resolve_organism_root
+
+    root = resolve_organism_root(organism_root)
+    st = _identity_path_stat(root)
+    if st is None:
+        return None
+    if not stat_module.S_ISREG(st.st_mode):
+        raise OrganismIdentityError("organism_identity_unsafe")
     try:
-        data = json.loads(identity_path.read_text(encoding="utf-8"))
+        return _decode_identity(root / "identity.json")
+    except OrganismIdentityError:
+        raise OrganismIdentityError("organism_identity_corrupted") from None
     except Exception:
         raise OrganismIdentityError("organism_identity_corrupted") from None
-
-    identity = OrganismIdentity(
-        schema_version=int(data.get("schema_version", 0)),
-        organism_id=str(data.get("organism_id", "")),
-        created_at=str(data.get("created_at", "")),
-        lineage_root_digest=str(data.get("lineage_root_digest", "")),
-    )
-    validate_organism_identity(identity)
-    return identity
