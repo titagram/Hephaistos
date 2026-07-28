@@ -4742,6 +4742,7 @@ def reclaim_task(
             payload,
             run_id=run_id,
         )
+        _refresh_managed_org_runs_for_task(conn, task_id)
     # Operator intervention — they've looked at the task, so the
     # consecutive-failures counter is now stale. Give the next retry
     # a fresh budget. (_clear_failure_counter opens its own write_txn,
@@ -7800,6 +7801,7 @@ def _record_task_failure(
                     run_id=run_id,
                 )
             # Timeout/crash path's caller already emitted its own event.
+        _refresh_managed_org_runs_for_task(conn, task_id)
     return blocked
 
 

@@ -94,6 +94,7 @@ def _contract_hash(
     dependency_node_ids: tuple[str, ...],
     plan_version: int,
     base_commit: str,
+    parent_task_ids: tuple[str, ...] | None = None,
 ) -> str:
     payload = {
         "node_kind": node_kind,
@@ -103,6 +104,8 @@ def _contract_hash(
         "plan_version": int(plan_version),
         "base_commit": base_commit,
     }
+    if parent_task_ids is not None:
+        payload["parent_task_ids"] = sorted(parent_task_ids)
     return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
 
 
@@ -1454,15 +1457,17 @@ def _logical_task_id(run_id: str, node_id: str, node_kind: str) -> str | None:
 
 
 def _decoded_skills(value: Any) -> list[str] | None:
-    if not value:
+    if value is None:
         return None
     try:
         parsed = json.loads(value)
-    except (TypeError, ValueError):
-        return None
-    if not isinstance(parsed, list):
-        return None
-    return [str(item) for item in parsed]
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid skills JSON") from exc
+    if not isinstance(parsed, list) or any(
+        not isinstance(item, str) for item in parsed
+    ):
+        raise ValueError("invalid skills JSON")
+    return list(parsed)
 
 
 def _raise_managed_plan_drift(
@@ -1505,7 +1510,11 @@ def _validate_current_plan_live_nodes(
             _raise_managed_plan_drift(run_id, node_id, "title")
         if row["body"] != body:
             _raise_managed_plan_drift(run_id, node_id, "body")
-        if _decoded_skills(row["skills"]) != skills:
+        try:
+            live_skills = _decoded_skills(row["skills"])
+        except ValueError:
+            _raise_managed_plan_drift(run_id, node_id, "skills")
+        if live_skills != skills:
             _raise_managed_plan_drift(run_id, node_id, "skills")
         try:
             expected_parent_ids = sorted(
@@ -1519,6 +1528,61 @@ def _validate_current_plan_live_nodes(
                 f"missing dependency node {exc.args[0]}",
             )
         if kb.parent_ids(conn, node.task_id) != expected_parent_ids:
+            _raise_managed_plan_drift(run_id, node_id, "parent links")
+
+
+def _validate_adopted_live_nodes(
+    conn: sqlite3.Connection,
+    run_id: str,
+    plan_payload: dict[str, Any],
+    nodes: list,
+) -> None:
+    """Verify adopted cards against the full immutable adoption snapshot."""
+    raw_nodes = plan_payload.get("nodes")
+    if not isinstance(raw_nodes, list):
+        raise ValueError(f"OrgRun {run_id} has incomplete stored topology")
+    expected = {
+        str(raw["node_id"]): raw
+        for raw in raw_nodes
+        if isinstance(raw, dict) and isinstance(raw.get("node_id"), str)
+    }
+    active = {
+        node.node_id: node
+        for node in nodes
+        if node.state == "active"
+    }
+    if set(expected) != set(active):
+        raise ValueError(f"OrgRun {run_id} has incomplete stored topology")
+    for node_id, node in sorted(active.items()):
+        raw = expected[node_id]
+        task_contract = raw.get("task_contract")
+        parent_task_ids = raw.get("parent_task_ids")
+        if (
+            not isinstance(task_contract, dict)
+            or set(task_contract) != {"title", "body", "assignee", "skills"}
+            or not isinstance(parent_task_ids, list)
+            or any(not isinstance(item, str) for item in parent_task_ids)
+        ):
+            raise ValueError(f"OrgRun {run_id} has incomplete stored topology")
+        row = conn.execute(
+            "SELECT title, body, assignee, skills FROM tasks WHERE id = ?",
+            (node.task_id,),
+        ).fetchone()
+        if row is None:
+            _raise_managed_plan_drift(run_id, node_id, "missing card")
+        try:
+            live_skills = _decoded_skills(row["skills"])
+        except ValueError:
+            _raise_managed_plan_drift(run_id, node_id, "skills")
+        for field, live_value in (
+            ("title", row["title"]),
+            ("body", row["body"]),
+            ("assignee", row["assignee"]),
+            ("skills", live_skills),
+        ):
+            if task_contract[field] != live_value:
+                _raise_managed_plan_drift(run_id, node_id, field)
+        if kb.parent_ids(conn, node.task_id) != sorted(parent_task_ids):
             _raise_managed_plan_drift(run_id, node_id, "parent links")
 
 
@@ -1642,6 +1706,51 @@ def _validate_stored_node_provenance(
                 raise ValueError(
                     f"OrgRun {run_id} has incomplete stored topology"
                 )
+    else:
+        raw_nodes_by_id = {
+            str(raw["node_id"]): raw
+            for raw in plan_payload["nodes"]
+            if isinstance(raw, dict) and isinstance(raw.get("node_id"), str)
+        }
+        if len(raw_nodes_by_id) != len(plan_payload["nodes"]):
+            raise ValueError(f"OrgRun {run_id} has incomplete stored topology")
+        base_commit = plan_payload.get("base_commit")
+        if not isinstance(base_commit, str):
+            raise ValueError(f"OrgRun {run_id} has incomplete stored topology")
+        for node in nodes:
+            raw = raw_nodes_by_id.get(node.node_id)
+            if raw is None:
+                raise ValueError(f"OrgRun {run_id} has incomplete stored topology")
+            task_contract = raw.get("task_contract")
+            dependency_node_ids = raw.get("dependency_node_ids")
+            parent_task_ids = raw.get("parent_task_ids")
+            task_row = conn.execute(
+                "SELECT idempotency_key FROM tasks WHERE id = ?",
+                (node.task_id,),
+            ).fetchone()
+            if (
+                node.plan_version != plan_version
+                or not isinstance(task_contract, dict)
+                or not isinstance(dependency_node_ids, list)
+                or not isinstance(parent_task_ids, list)
+                or any(
+                    not isinstance(item, str)
+                    for item in (*dependency_node_ids, *parent_task_ids)
+                )
+                or node.contract_hash
+                != _contract_hash(
+                    node_kind=node.node_kind,
+                    logical_role=node.logical_role,
+                    task_contract=task_contract,
+                    dependency_node_ids=tuple(dependency_node_ids),
+                    plan_version=node.plan_version,
+                    base_commit=base_commit,
+                    parent_task_ids=tuple(parent_task_ids),
+                )
+                or task_row is None
+                or task_row["idempotency_key"] != node.node_id
+            ):
+                raise ValueError(f"OrgRun {run_id} has incomplete stored topology")
     actual_records = {
         (node.node_id, node.task_id, node.node_kind, node.logical_role)
         for node in nodes
@@ -1654,6 +1763,13 @@ def _validate_stored_node_provenance(
             conn,
             run_id,
             current_plan,
+            nodes,
+        )
+    else:
+        _validate_adopted_live_nodes(
+            conn,
+            run_id,
+            plan_payload,
             nodes,
         )
 
@@ -1739,6 +1855,11 @@ def validate_live_org_run_task(
     ).fetchone()
     if row is None:
         return None
+    run = get_org_run(conn, str(row["run_id"]))
+    if run is None:
+        raise ValueError(f"OrgRun {row['run_id']} has incomplete stored topology")
+    if run.state == "cancelled":
+        raise ValueError(f"OrgRun {row['run_id']} is cancelled")
     topology = load_org_run_topology(conn, str(row["run_id"]))
     if topology is None:
         raise ValueError(f"OrgRun {row['run_id']} has incomplete stored topology")
@@ -1809,12 +1930,15 @@ def _legacy_base_commit(anchor: sqlite3.Row) -> str:
 
 def _legacy_contract(row: sqlite3.Row) -> dict[str, Any]:
     try:
-        skills = json.loads(row["skills"]) if row["skills"] else None
-    except (TypeError, ValueError):
-        skills = None
+        skills = _decoded_skills(row["skills"])
+    except ValueError as exc:
+        raise ValueError(
+            f"legacy OrgRun card {row['id']} has invalid skills"
+        ) from exc
     return {
         "title": row["title"],
         "body": row["body"],
+        "assignee": row["assignee"],
         "skills": skills,
     }
 
@@ -1996,6 +2120,9 @@ def adopt_legacy_org_run(
                     "task_id": spec.task_id,
                     "node_kind": spec.node_kind,
                     "logical_role": spec.logical_role,
+                    "task_contract": spec.task_contract,
+                    "dependency_node_ids": list(spec.dependency_node_ids),
+                    "parent_task_ids": kb.parent_ids(conn, spec.task_id),
                 }
                 for spec in node_specs
             ],
@@ -2037,6 +2164,9 @@ def adopt_legacy_org_run(
                     dependency_node_ids=spec.dependency_node_ids,
                     plan_version=_PLAN_VERSION,
                     base_commit=base_commit,
+                    parent_task_ids=tuple(
+                        kb.parent_ids(conn, spec.task_id)
+                    ),
                 ),
                 logical_role=spec.logical_role,
             )

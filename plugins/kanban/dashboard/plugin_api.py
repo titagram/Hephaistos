@@ -1193,6 +1193,7 @@ def _set_status_direct(
                             int(time.time()),
                         ),
                     )
+        kanban_db._refresh_managed_org_runs_for_task(conn, task_id)
     # If we re-opened something, children may have gone stale.
     if new_status in {"done", "ready"}:
         kanban_db.recompute_ready(conn)

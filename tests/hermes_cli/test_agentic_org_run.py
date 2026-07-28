@@ -27,7 +27,11 @@ from hermes_cli.implementation_plan import (
 )
 from hermes_cli.kanban_portfolio import create_org_run
 from hermes_cli.org_run_store import get_org_run, list_org_nodes
-from hermes_cli.org_run_store import insert_report, refresh_org_run_state
+from hermes_cli.org_run_store import (
+    insert_report,
+    refresh_org_run_state,
+    set_org_run_state,
+)
 from tools.delegation_routing import DelegationProfile
 
 
@@ -1030,6 +1034,169 @@ def test_adopt_legacy_org_run_records_provenance_without_recreating_cards_or_rea
         ) == topology
 
 
+def test_adoption_rejects_malformed_raw_skills(tmp_path):
+    """Breaks if malformed JSON is silently sealed as an absent skill contract."""
+    with kb.connect(tmp_path / "kanban.db") as conn:
+        legacy_plan = parse_execution_portfolio(_legacy_payload())
+        legacy = create_org_run(
+            conn, legacy_plan, validate_execution_portfolio(legacy_plan)
+        )
+        conn.execute(
+            "UPDATE tasks SET skills='{\"broken\"' WHERE id=?",
+            (legacy.remote_tasks["runtime"].execution_id,),
+        )
+        conn.commit()
+
+        with pytest.raises(ValueError, match="invalid skills"):
+            adopt_legacy_org_run(conn, "legacy-run-001", board="default")
+
+        assert get_org_run(conn, "legacy-run-001") is None
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("assignee", "title", "body", "skills", "malformed_skills", "parents"),
+)
+def test_adopted_replay_rejects_live_contract_and_parent_drift(
+    tmp_path,
+    mutation,
+):
+    """Breaks if adopted replay trusts mutable cards instead of its sealed contract."""
+    with kb.connect(tmp_path / "kanban.db") as conn:
+        legacy_plan = parse_execution_portfolio(_legacy_payload())
+        create_org_run(
+            conn, legacy_plan, validate_execution_portfolio(legacy_plan)
+        )
+        topology = adopt_legacy_org_run(
+            conn, "legacy-run-001", board="default"
+        )
+        execution_id = topology.tasks["runtime"].execution_id
+        if mutation == "parents":
+            conn.execute(
+                "INSERT INTO task_links (parent_id, child_id) VALUES (?, ?)",
+                (topology.anchor_id, execution_id),
+            )
+        elif mutation == "malformed_skills":
+            conn.execute(
+                "UPDATE tasks SET skills='[\"unterminated\"' WHERE id=?",
+                (execution_id,),
+            )
+        else:
+            changed = {
+                "assignee": "reviewer",
+                "title": "tampered title",
+                "body": "tampered body",
+                "skills": json.dumps(["tampered-skill"]),
+            }[mutation]
+            conn.execute(
+                f"UPDATE tasks SET {mutation}=? WHERE id=?",
+                (changed, execution_id),
+            )
+        conn.commit()
+
+        with pytest.raises(ValueError, match="managed plan drift"):
+            adopt_legacy_org_run(conn, "legacy-run-001", board="default")
+
+
+@pytest.mark.parametrize("tamper", ("title", "parents"))
+def test_adopted_replay_rejects_rehashed_historical_contract_drift(
+    tmp_path,
+    tamper,
+):
+    """Breaks if rewriting both the snapshot and live row bypasses node hashes."""
+    with kb.connect(tmp_path / "kanban.db") as conn:
+        legacy_plan = parse_execution_portfolio(_legacy_payload())
+        create_org_run(
+            conn, legacy_plan, validate_execution_portfolio(legacy_plan)
+        )
+        topology = adopt_legacy_org_run(
+            conn, "legacy-run-001", board="default"
+        )
+        execution_id = topology.tasks["runtime"].execution_id
+        row = conn.execute(
+            "SELECT plan_json FROM kanban_org_plan_versions "
+            "WHERE run_id=? AND plan_version=1",
+            ("legacy-run-001",),
+        ).fetchone()
+        payload = json.loads(row["plan_json"])
+        execution = next(
+            node for node in payload["nodes"]
+            if node["task_id"] == execution_id
+        )
+        if tamper == "title":
+            execution["task_contract"]["title"] = "rewritten together"
+            conn.execute(
+                "UPDATE tasks SET title='rewritten together' WHERE id=?",
+                (execution_id,),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO task_links (parent_id, child_id) VALUES (?, ?)",
+                (topology.anchor_id, execution_id),
+            )
+            execution["parent_task_ids"] = kb.parent_ids(
+                conn, execution_id
+            )
+        plan_json = json.dumps(
+            payload,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        plan_hash = hashlib.sha256(plan_json.encode("utf-8")).hexdigest()
+        conn.execute(
+            "UPDATE kanban_org_plan_versions "
+            "SET plan_json=?, plan_hash=? WHERE run_id=? AND plan_version=1",
+            (plan_json, plan_hash, "legacy-run-001"),
+        )
+        conn.execute(
+            "UPDATE kanban_org_runs SET plan_hash=? WHERE run_id=?",
+            (plan_hash, "legacy-run-001"),
+        )
+        conn.commit()
+
+        with pytest.raises(ValueError, match="incomplete stored topology"):
+            adopt_legacy_org_run(conn, "legacy-run-001", board="default")
+
+
+def test_dispatch_blocks_adopted_live_role_drift(tmp_path, monkeypatch):
+    """Breaks if dispatch routes an adopted card after its live role changed."""
+    with kb.connect(tmp_path / "kanban.db") as conn:
+        legacy_plan = parse_execution_portfolio(_legacy_payload())
+        create_org_run(
+            conn, legacy_plan, validate_execution_portfolio(legacy_plan)
+        )
+        topology = adopt_legacy_org_run(
+            conn, "legacy-run-001", board="default"
+        )
+        execution_id = topology.tasks["runtime"].execution_id
+        conn.execute(
+            "UPDATE tasks SET assignee='reviewer' WHERE id=?",
+            (execution_id,),
+        )
+        conn.commit()
+        monkeypatch.setattr(
+            "hermes_cli.profiles.profile_exists",
+            lambda _profile: True,
+        )
+        monkeypatch.setattr(
+            kb,
+            "_resolve_worker_role_route",
+            lambda role: {"role": role},
+        )
+
+        result = kb.dispatch_once(
+            conn,
+            spawn_fn=lambda *_args, **_kwargs: pytest.fail(
+                "drifted adopted card spawned"
+            ),
+            board="default",
+        )
+
+        assert result.auto_blocked == [execution_id]
+        assert kb.get_task(conn, execution_id).status == "blocked"
+
+
 def test_adoption_does_not_absorb_a_run_whose_id_extends_the_requested_prefix(
     tmp_path,
 ):
@@ -1400,3 +1567,123 @@ def test_dispatch_blocks_adopted_review_instead_of_falling_back_to_default(
         assert [event.kind for event in events].count("blocked") == 1
         assert not any(event.kind == "assigned" for event in events)
         assert get_org_run(conn, "legacy-run-001") is not None
+
+
+def test_reclaim_refreshes_owning_org_run_state(tmp_path):
+    """Breaks if reclaim leaves the cached run state stuck at running."""
+    plan = _plan(risk="low", task_review=False, global_review=False)
+    with kb.connect(tmp_path / "kanban.db") as conn:
+        topology = materialize_org_run(
+            conn, plan, _validation(plan), board="default"
+        )
+        execution_id = topology.tasks["runtime"].execution_id
+        assert kb.claim_task(conn, execution_id, claimer="org-test") is not None
+        assert get_org_run(conn, plan.run_id).state == "running"
+
+        assert kb.reclaim_task(
+            conn,
+            execution_id,
+            reason="operator retry",
+            signal_fn=lambda *_args: None,
+        )
+
+        assert get_org_run(conn, plan.run_id).state == "materialized"
+
+
+@pytest.mark.parametrize(
+    ("failure_limit", "expected_state"),
+    ((2, "materialized"), (1, "blocked")),
+)
+def test_record_task_failure_refreshes_owning_org_run_state(
+    tmp_path,
+    failure_limit,
+    expected_state,
+):
+    """Breaks if a failed managed attempt leaves stale cached run state."""
+    plan = _plan(
+        run_id=f"failure-refresh-{failure_limit}",
+        risk="low",
+        task_review=False,
+        global_review=False,
+    )
+    with kb.connect(tmp_path / "kanban.db") as conn:
+        topology = materialize_org_run(
+            conn, plan, _validation(plan), board="default"
+        )
+        execution_id = topology.tasks["runtime"].execution_id
+        assert kb.claim_task(conn, execution_id, claimer="org-test") is not None
+
+        kb._record_task_failure(
+            conn,
+            execution_id,
+            "spawn failed",
+            outcome="spawn_failed",
+            failure_limit=failure_limit,
+            release_claim=True,
+            end_run=True,
+        )
+
+        assert get_org_run(conn, plan.run_id).state == expected_state
+
+
+def test_dashboard_direct_status_transition_refreshes_owning_org_run_state(
+    tmp_path,
+):
+    """Breaks if dashboard drag-drop leaves the cached run state stale."""
+    from plugins.kanban.dashboard.plugin_api import _set_status_direct
+
+    plan = _plan(risk="low", task_review=False, global_review=False)
+    with kb.connect(tmp_path / "kanban.db") as conn:
+        topology = materialize_org_run(
+            conn, plan, _validation(plan), board="default"
+        )
+        execution_id = topology.tasks["runtime"].execution_id
+        assert kb.claim_task(conn, execution_id, claimer="org-test") is not None
+        assert get_org_run(conn, plan.run_id).state == "running"
+
+        assert _set_status_direct(conn, execution_id, "ready")
+
+        assert get_org_run(conn, plan.run_id).state == "materialized"
+
+
+def test_cancelled_org_run_cannot_dispatch_ready_managed_cards(
+    tmp_path,
+    monkeypatch,
+):
+    """Breaks if cancellation is report-only and ready cards can still launch."""
+    plan = _plan(risk="low", task_review=False, global_review=False)
+    with kb.connect(tmp_path / "kanban.db") as conn:
+        topology = materialize_org_run(
+            conn, plan, _validation(plan), board="default"
+        )
+        execution_id = topology.tasks["runtime"].execution_id
+        set_org_run_state(conn, plan.run_id, "cancelled", now=123)
+        set_org_run_state(conn, plan.run_id, "cancelled", now=124)
+        monkeypatch.setattr(
+            "hermes_cli.profiles.profile_exists",
+            lambda _profile: True,
+        )
+        monkeypatch.setattr(
+            kb,
+            "_resolve_worker_role_route",
+            lambda role: {"role": role},
+        )
+
+        result = kb.dispatch_once(
+            conn,
+            spawn_fn=lambda *_args, **_kwargs: pytest.fail(
+                "cancelled OrgRun card spawned"
+            ),
+            board="default",
+        )
+
+        assert result.auto_blocked == [execution_id]
+        assert get_org_run(conn, plan.run_id).state == "cancelled"
+        reports = conn.execute(
+            "SELECT report_type FROM kanban_reports "
+            "WHERE subject_id=? ORDER BY id",
+            (plan.run_id,),
+        ).fetchall()
+        assert [row["report_type"] for row in reports] == [
+            "org_run_cancelled"
+        ]
