@@ -64,11 +64,12 @@ def _is_url_path_context(value: str, start: int) -> bool:
 
 
 def _embedded_path_kind(value: str, start: int) -> str | None:
-    if (
-        not _is_embedded_path_boundary(value, start)
-        or _is_url_path_context(value, start)
-    ):
+    if not _is_embedded_path_boundary(value, start):
         return None
+    if _is_url_path_context(value, start):
+        return None
+    if value[start : start + 7].lower() == "file://":
+        return "file"
     if value[start] == "/":
         return "posix"
     if value[start : start + 2] == "\\\\":
@@ -187,6 +188,9 @@ def redact_value(
         if len(value) > MAX_STRING_LENGTH:
             value = value[:MAX_STRING_LENGTH]
             redactions += 1
+        if value.lower().startswith("file://"):
+            value, embedded_path_redactions = _redact_embedded_absolute_paths(value)
+            return value, redactions + embedded_path_redactions
         safe_path = _safe_path(value, workspace_root)
         if safe_path is not None:
             safe_value, path_count = safe_path

@@ -685,6 +685,39 @@ def test_revision_diff_redacts_network_paths_without_consuming_public_context(
     ]
 
 
+def test_revision_diff_redacts_file_uris_at_the_public_dashboard_boundary(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "organism"
+    identity = create_organism_identity(root)
+    first = _graph_artifact(identity, revision_id="rev-file-uri-1", available=True)
+    second = _graph_artifact(identity, revision_id="rev-file-uri-2", available=True)
+    add_node(
+        second,
+        node_id="capability:file-uri",
+        kind="capability",
+        label="Read file://server/share/private/trace.log:4",
+        owner_class="third-party",
+        owner_id="private-owner",
+        state={"available": True},
+        evidence_refs=["FILE:///C:/Users/alice/private/tool.py:8:3"],
+    )
+    store = OrganismRevisionStore(root / "gnothi_seauton")
+    store.publish(first)
+    store.publish(second)
+
+    result = EvolutionDashboardService(root).revision_diff(
+        "rev-file-uri-1", "rev-file-uri-2"
+    )
+
+    added = result["added_capabilities"]
+    assert added[0]["label"] == "Read [ABSOLUTE_PATH]:4"
+    assert added[0]["evidence_refs"] == ["[ABSOLUTE_PATH]:8:3"]
+    assert "file://" not in json.dumps(result).lower()
+    assert "users/alice" not in json.dumps(result).lower()
+    assert "server/share" not in json.dumps(result).lower()
+
+
 def test_graph_and_revision_reads_leave_an_absent_root_absent(tmp_path: Path) -> None:
     root = tmp_path / "organism"
     service = EvolutionDashboardService(root)

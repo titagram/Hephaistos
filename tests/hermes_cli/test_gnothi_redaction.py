@@ -78,6 +78,34 @@ def test_embedded_path_redaction_keeps_bracketed_path_components_together():
     assert count == 2
 
 
+def test_embedded_file_uris_redact_local_locations_and_preserve_line_suffixes():
+    value = (
+        "See (file:///private/secret/plugin.py:42), "
+        "FILE:///C:/Users/alice/private/tool.py:8:3; and "
+        "file://server/share/private/trace.log:4!"
+    )
+
+    redacted, count = redact_value(value)
+
+    assert redacted == (
+        "See ([ABSOLUTE_PATH]:42), [ABSOLUTE_PATH]:8:3; and "
+        "[ABSOLUTE_PATH]:4!"
+    )
+    assert count == 3
+
+
+def test_embedded_file_uris_inside_public_url_query_and_fragment_stay_public():
+    value = (
+        "Read https://example.test/docs?next=file:///private/secret/plugin.py:42 "
+        "and https://example.test/#file://server/share/private/trace.log:4."
+    )
+
+    redacted, count = redact_value(value)
+
+    assert redacted == value
+    assert count == 0
+
+
 def test_exception_exposes_class_only():
     assert safe_exception_class(RuntimeError("/private/path token=secret")) == (
         "RuntimeError"

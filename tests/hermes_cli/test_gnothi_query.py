@@ -323,6 +323,32 @@ def test_subgraph_redacts_network_paths_without_consuming_evidence_context(
     ]
 
 
+def test_subgraph_redacts_file_uris_at_the_public_query_boundary(tmp_path: Path) -> None:
+    store = OrganismRevisionStore(root=tmp_path)
+    artifact = _graph_artifact()
+    node = artifact["nodes"][0]
+    node["label"] = "Source file:///private/secret/plugin.py:42 is unavailable"
+    node["evidence_refs"] = [
+        "FILE:///C:/Users/alice/private/tool.py:8:3; "
+        "file://server/share/private/trace.log:4",
+    ]
+    store.publish(artifact)
+
+    result = OrganismQuery(store).subgraph(
+        root_id="capability:alpha",
+        depth=0,
+        limit=1,
+        kinds=frozenset(),
+        search="",
+    )
+
+    public_node = result["nodes"][0]
+    assert public_node["label"] == "Source [ABSOLUTE_PATH]:42 is unavailable"
+    assert public_node["evidence_refs"] == [
+        "[ABSOLUTE_PATH]:8:3; [ABSOLUTE_PATH]:4",
+    ]
+
+
 def test_subgraph_uses_the_supplied_immutable_artifact(tmp_path: Path) -> None:
     store = OrganismRevisionStore(root=tmp_path)
     first = _graph_artifact("rev-graph-first")
