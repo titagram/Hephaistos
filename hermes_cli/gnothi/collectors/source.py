@@ -66,6 +66,11 @@ def _probe_source(context: CollectorContext) -> str:
 
 def _binding_for_workspace(root: Path) -> backend_db.WorkspaceBinding | None:
     resolved = root.resolve()
+    # Connecting through the backend helper initializes its SQLite schema. A
+    # Gnothi collection is observational, so an unconfigured backend must
+    # remain absent rather than being materialized just to look for a binding.
+    if not backend_db.hades_backend_db_path().is_file():
+        return None
     with backend_db.connect_closing() as conn:
         agent = backend_db.get_default_agent(conn)
         if agent is None:
