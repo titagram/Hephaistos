@@ -1,28 +1,49 @@
-"""Local-only commands for validating and materializing Hades OrgRuns."""
+"""Local-only commands for versioned Hades implementation-plan OrgRuns."""
 
 from __future__ import annotations
 
 import argparse
+from dataclasses import asdict
 import json
 from pathlib import Path
 from typing import Any, Callable
 
 from hermes_cli import kanban_db as kb
-from hermes_cli.hierarchical_execution import (
-    parse_execution_portfolio,
-    validate_execution_portfolio,
+from hermes_cli.agentic_org_run import (
+    adopt_legacy_org_run,
+    apply_org_run_amendment,
+    load_org_run_topology,
+    materialize_org_run,
 )
-from hermes_cli.kanban_portfolio import OrgRunCreated, RemoteTaskTopology, create_org_run
-from hermes_cli.hades_kanban_sync import SYNC_MODES
-from hermes_cli.kanban_backend import run_kanban_sync
-from hermes_cli.kanban_swarm import latest_blackboard
-from hermes_cli.hades_coordination import snapshot_org_run
+from hermes_cli.config import read_raw_config
+from hermes_cli.implementation_plan import (
+    parse_implementation_amendment,
+    parse_implementation_plan,
+    validate_implementation_plan,
+)
+from hermes_cli.org_run_store import (
+    get_org_run,
+    list_org_nodes,
+    refresh_org_run_state,
+)
+from tools.delegation_routing import load_delegation_routing, resolve_role_profile
+
+
+_SYNC_DISABLED = {
+    "state": "unsupported",
+    "code": "agentic_kanban_has_no_remote_sync",
+    "retryable": False,
+}
+
+
+class _BoardWorkspaceMissing(ValueError):
+    """Selected board does not identify a usable local Git repository."""
 
 
 def _read_json(path: str) -> dict[str, Any]:
     raw = json.loads(Path(path).expanduser().read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
-        raise ValueError("portfolio JSON must be an object")
+        raise ValueError("JSON input must be an object")
     return raw
 
 
@@ -30,124 +51,240 @@ def _error(code: str, exc: Exception) -> dict[str, Any]:
     return {"status": "error", "code": code, "message": str(exc)[:300]}
 
 
-def validate_portfolio_file(path: str) -> tuple[dict[str, Any], int]:
+def _repository_for_board(board: str | None) -> Path:
+    slug = board or kb.get_current_board()
+    raw = str(kb.read_board_metadata(slug).get("default_workdir") or "").strip()
+    path = Path(raw).expanduser().resolve()
+    if not raw or not (path / ".git").exists():
+        raise _BoardWorkspaceMissing("selected board has no Git default_workdir")
+    return path
+
+
+def _role_route_exists(role: str) -> bool:
+    routing = load_delegation_routing(read_raw_config())
+    return resolve_role_profile(routing, role) is not None
+
+
+def _validated_plan(path: str, *, board: str | None):
+    plan = parse_implementation_plan(_read_json(path))
+    validation = validate_implementation_plan(
+        plan,
+        repository=_repository_for_board(board),
+        profile_exists=_role_route_exists,
+        role_route_exists=_role_route_exists,
+    )
+    return plan, validation
+
+
+def _topology_payload(topology) -> dict[str, Any]:
+    return asdict(topology)
+
+
+def _report_ids(conn, run_id: str) -> list[int]:
+    """Read durable report identities without loading report projection code."""
+    rows = conn.execute(
+        "SELECT id FROM kanban_reports WHERE subject_id = ? ORDER BY "
+        "source_version ASC, generated_at ASC, id ASC",
+        (run_id,),
+    ).fetchall()
+    return [int(row["id"]) for row in rows]
+
+
+def validate_plan_file(path: str, *, board: str | None) -> tuple[dict[str, Any], int]:
     try:
-        plan = parse_execution_portfolio(_read_json(path))
-        validation = validate_execution_portfolio(plan)
+        plan, validation = _validated_plan(path, board=board)
+    except _BoardWorkspaceMissing as exc:
+        return _error("board_workspace_missing", exc), 2
     except (ValueError, OSError, json.JSONDecodeError) as exc:
-        return _error("invalid_portfolio", exc), 2
+        return _error("invalid_plan", exc), 2
     return {
         "status": "valid",
         "schema": plan.schema,
-        "org_run_id": plan.org_run_id,
+        "run_id": plan.run_id,
         "task_count": len(plan.tasks),
         "conflict_count": len(validation.conflicts),
+        "plan_hash": validation.plan_hash,
+        "resolved_profiles": validation.resolved_profiles,
+        "routed_roles": sorted(validation.routed_roles),
     }, 0
 
 
-def materialize_portfolio_file(
+def materialize_plan_file(
     path: str,
     *,
     board: str | None,
 ) -> tuple[dict[str, Any], int]:
     try:
-        plan = parse_execution_portfolio(_read_json(path))
-        validation = validate_execution_portfolio(plan)
+        plan, validation = _validated_plan(path, board=board)
         with kb.connect(board=board) as conn:
-            created = create_org_run(conn, plan, validation, board=board)
-            topology = {
-                "anchor_id": created.anchor_id,
-                "remote_tasks": {
-                    key: {
-                        "anchor_id": value.anchor_id,
-                        "execution_id": value.execution_id,
-                        "review_id": value.review_id,
-                        "integration_ready_id": value.integration_ready_id,
-                        "completion_id": value.completion_id,
-                        "work_item_id": value.work_item_id,
-                    }
-                    for key, value in created.remote_tasks.items()
-                },
-                "integration_id": created.integration_id,
-                "review_id": created.review_id,
-                "synthesis_id": created.synthesis_id,
-                "project_id": created.project_id,
-            }
+            topology = materialize_org_run(conn, plan, validation, board=board)
+    except _BoardWorkspaceMissing as exc:
+        return _error("board_workspace_missing", exc), 2
     except (ValueError, OSError, json.JSONDecodeError) as exc:
-        return _error("invalid_portfolio", exc), 2
+        return _error("invalid_plan", exc), 2
     except Exception as exc:  # pragma: no cover - defensive CLI boundary
         return _error("org_run_materialization_failed", exc), 1
     return {
         "status": "materialized",
-        "org_run_id": plan.org_run_id,
-        "topology": topology,
+        "run_id": plan.run_id,
+        "plan_hash": validation.plan_hash,
+        "topology": _topology_payload(topology),
     }, 0
 
 
+def _show_payload(conn, run_id: str) -> dict[str, Any]:
+    run = get_org_run(conn, run_id)
+    if run is None:
+        raise KeyError(run_id)
+    state = refresh_org_run_state(conn, run_id)
+    nodes = list_org_nodes(conn, run_id)
+    stored_topology = load_org_run_topology(conn, run_id)
+    if stored_topology is None:
+        raise ValueError(f"OrgRun {run_id} has incomplete stored topology")
+    blocked_nodes: list[str] = []
+    dispatchable_nodes: list[str] = []
+    for node in nodes:
+        task = kb.get_task(conn, node.task_id)
+        if task is not None:
+            if task.status == "blocked":
+                blocked_nodes.append(node.node_id)
+            elif task.status == "ready":
+                dispatchable_nodes.append(node.node_id)
+    return {
+        "status": "ok",
+        "run_id": run_id,
+        "state": state,
+        "plan_version": run.plan_version,
+        "plan_hash": run.plan_hash,
+        "topology": _topology_payload(stored_topology),
+        "blocked_nodes": sorted(blocked_nodes),
+        "dispatchable_nodes": sorted(dispatchable_nodes),
+        "report_ids": _report_ids(conn, run_id),
+    }
+
+
 def show_org_run(
-    org_run_id: str,
+    run_id: str,
     *,
     board: str | None,
 ) -> tuple[dict[str, Any], int]:
     try:
         with kb.connect(board=board) as conn:
-            row = conn.execute(
-                "SELECT id FROM tasks WHERE idempotency_key = ? "
-                "AND status != 'archived' LIMIT 1",
-                (f"org-run:{org_run_id}:anchor",),
-            ).fetchone()
-            if row is None:
-                return _error("org_run_not_found", ValueError(org_run_id)), 1
-            topology = latest_blackboard(conn, row["id"]).get("topology")
-            if not isinstance(topology, dict):
-                return _error("org_run_topology_missing", ValueError(org_run_id)), 1
-            # Keep the CLI output useful without creating a second scheduler:
-            # phase is derived from durable Kanban task state only.
-            created = OrgRunCreated(
-                anchor_id=str(topology["anchor_id"]),
-                remote_tasks={
-                    key: RemoteTaskTopology(**value)
-                    for key, value in topology["remote_tasks"].items()
-                },
-                integration_id=str(topology["integration_id"]),
-                review_id=str(topology["review_id"]),
-                synthesis_id=str(topology["synthesis_id"]),
-                project_id=str(topology.get("project_id") or ""),
-            )
-            snapshot = snapshot_org_run(conn, org_run_id, created)
+            return _show_payload(conn, run_id), 0
+    except KeyError:
+        return _error("org_run_not_found", ValueError(run_id)), 1
     except Exception as exc:  # pragma: no cover - defensive CLI boundary
         return _error("org_run_show_failed", exc), 1
+
+
+def amend_org_run_file(path: str, *, board: str | None) -> tuple[dict[str, Any], int]:
+    try:
+        amendment = parse_implementation_amendment(_read_json(path))
+        repository = _repository_for_board(board)
+        with kb.connect(board=board) as conn:
+            topology = apply_org_run_amendment(
+                conn,
+                amendment,
+                board=board,
+                repository=repository,
+                profile_exists=_role_route_exists,
+            )
+            run = get_org_run(conn, amendment.run_id)
+            assert run is not None
+    except _BoardWorkspaceMissing as exc:
+        return _error("board_workspace_missing", exc), 2
+    except (KeyError, ValueError, OSError, json.JSONDecodeError) as exc:
+        return _error("invalid_amendment", exc), 2
+    except Exception as exc:  # pragma: no cover - defensive CLI boundary
+        return _error("org_run_amendment_failed", exc), 1
     return {
-        "status": "ok",
-        "org_run_id": org_run_id,
-        "topology": topology,
-        "phase": snapshot.phase,
-        "complete": snapshot.complete,
-        "blocked": snapshot.blocked,
-        "dispatchable": list(snapshot.dispatchable),
+        "status": "amended",
+        "run_id": amendment.run_id,
+        "plan_version": run.plan_version,
+        "plan_hash": run.plan_hash,
+        "topology": _topology_payload(topology),
+    }, 0
+
+
+def _legacy_run_ids(conn) -> list[str]:
+    rows = conn.execute(
+        "SELECT idempotency_key FROM tasks "
+        "WHERE idempotency_key LIKE 'org-run:%:anchor'"
+    ).fetchall()
+    prefix = "org-run:"
+    suffix = ":anchor"
+    candidates = {
+        str(row["idempotency_key"])[len(prefix):-len(suffix)]
+        for row in rows
+        if row["idempotency_key"]
+    }
+    keys = {
+        str(row["idempotency_key"])
+        for row in conn.execute(
+            "SELECT idempotency_key FROM tasks WHERE idempotency_key IS NOT NULL"
+        ).fetchall()
+    }
+    return sorted(
+        run_id for run_id in candidates
+        if {
+            f"org-run:{run_id}:integration",
+            f"org-run:{run_id}:org-review",
+            f"org-run:{run_id}:synthesis",
+        } <= keys
+    )
+
+
+def list_org_runs(*, board: str | None) -> tuple[dict[str, Any], int]:
+    try:
+        board_slug = board or kb.get_current_board()
+        with kb.connect(board=board) as conn:
+            rows = conn.execute(
+                "SELECT * FROM kanban_org_runs WHERE board_slug = ? ORDER BY run_id",
+                (board_slug,),
+            ).fetchall()
+            runs = [{
+                "run_id": str(row["run_id"]),
+                "state": str(row["state"]),
+                "origin": str(row["origin"]),
+                "plan_version": int(row["plan_version"]),
+                "plan_hash": str(row["plan_hash"]),
+            } for row in rows]
+            known = {run["run_id"] for run in runs}
+            runs.extend({
+                "run_id": run_id,
+                "state": "legacy_unadopted",
+                "origin": "legacy",
+                "plan_version": None,
+                "plan_hash": None,
+            } for run_id in _legacy_run_ids(conn) if run_id not in known)
+    except Exception as exc:  # pragma: no cover - defensive CLI boundary
+        return _error("org_run_list_failed", exc), 1
+    return {"status": "ok", "runs": sorted(runs, key=lambda run: run["run_id"])}, 0
+
+
+def adopt_legacy_run(run_id: str, *, board: str | None) -> tuple[dict[str, Any], int]:
+    try:
+        with kb.connect(board=board) as conn:
+            topology = adopt_legacy_org_run(conn, run_id, board=board)
+            run = get_org_run(conn, run_id)
+            assert run is not None
+    except (KeyError, ValueError) as exc:
+        return _error("invalid_legacy_org_run", exc), 2
+    except Exception as exc:  # pragma: no cover - defensive CLI boundary
+        return _error("org_run_adoption_failed", exc), 1
+    return {
+        "status": "adopted",
+        "run_id": run_id,
+        "plan_version": run.plan_version,
+        "plan_hash": run.plan_hash,
+        "topology": _topology_payload(topology),
     }, 0
 
 
 def sync_kanban(*, board: str | None, mode: str, project_id: str | None = None) -> tuple[dict[str, Any], int]:
-    """Synchronize remote work items into the selected local board."""
-    if mode not in SYNC_MODES:
-        return _error("invalid_sync_mode", ValueError(mode)), 2
-    if mode == "off":
-        return {"status": "ok", "mode": mode, "pulled": 0}, 0
-    if project_id is not None:
-        # The selected workspace binding is authoritative; accepting a
-        # profile/default override here could pull another project's cards.
-        return _error("invalid_sync_project", ValueError("project id is selected by the workspace binding")), 2
-    report = run_kanban_sync(board=board)
-    return {
-        "status": report.state,
-        "mode": mode,
-        "pulled": report.pulled,
-        "created": report.created,
-        "existing": report.existing,
-        "failed": report.failed,
-        "outbox_pending": report.outbox_pending,
-    }, (0 if report.state in {"synced", "local_only"} else 1)
+    """Keep the legacy parser entry as a typed, local-only rejection."""
+    del board, mode, project_id
+    return dict(_SYNC_DISABLED), 2
 
 
 def build_parser(subparsers, *, cmd_org: Callable[[argparse.Namespace], int]) -> None:
@@ -156,25 +293,43 @@ def build_parser(subparsers, *, cmd_org: Callable[[argparse.Namespace], int]) ->
         help="Validate and materialize local Hades OrgRuns",
     )
     sub = parser.add_subparsers(dest="org_action")
-    validate = sub.add_parser("validate", help="Validate a portfolio JSON file")
-    validate.add_argument("portfolio")
+    validate = sub.add_parser("validate", help="Validate an implementation plan JSON file")
+    validate.add_argument("plan")
+    validate.add_argument("--board", default=None)
     validate.add_argument("--json", action="store_true")
     validate.set_defaults(func=cmd_org)
 
-    materialize = sub.add_parser("materialize", help="Materialize a portfolio in local Kanban")
-    materialize.add_argument("portfolio")
+    materialize = sub.add_parser("materialize", help="Materialize an implementation plan in local Kanban")
+    materialize.add_argument("plan")
     materialize.add_argument("--board", default=None)
     materialize.add_argument("--json", action="store_true")
     materialize.set_defaults(func=cmd_org)
 
-    show = sub.add_parser("show", help="Show a materialized OrgRun")
-    show.add_argument("org_run_id")
+    show = sub.add_parser("show", help="Show a materialized local OrgRun")
+    show.add_argument("run_id")
     show.add_argument("--board", default=None)
     show.add_argument("--json", action="store_true")
     show.set_defaults(func=cmd_org)
 
-    sync = sub.add_parser("sync", help="Optionally pull backend work items into local Kanban")
-    sync.add_argument("--mode", choices=sorted(SYNC_MODES), default="off")
+    amend = sub.add_parser("amend", help="Apply an implementation-plan amendment")
+    amend.add_argument("amendment")
+    amend.add_argument("--board", default=None)
+    amend.add_argument("--json", action="store_true")
+    amend.set_defaults(func=cmd_org)
+
+    list_runs = sub.add_parser("list", help="List local and unadopted legacy OrgRuns")
+    list_runs.add_argument("--board", default=None)
+    list_runs.add_argument("--json", action="store_true")
+    list_runs.set_defaults(func=cmd_org)
+
+    adopt = sub.add_parser("adopt-legacy", help="Adopt legacy OrgRun cards in place")
+    adopt.add_argument("run_id")
+    adopt.add_argument("--board", default=None)
+    adopt.add_argument("--json", action="store_true")
+    adopt.set_defaults(func=cmd_org)
+
+    sync = sub.add_parser("sync", help="Report the local-only sync boundary")
+    sync.add_argument("--mode", default="off")
     sync.add_argument("--project-id", default=None)
     sync.add_argument("--board", default=None)
     sync.add_argument("--json", action="store_true")
@@ -184,11 +339,17 @@ def build_parser(subparsers, *, cmd_org: Callable[[argparse.Namespace], int]) ->
 def org_command(args: argparse.Namespace) -> int:
     action = getattr(args, "org_action", None)
     if action == "validate":
-        result, code = validate_portfolio_file(args.portfolio)
+        result, code = validate_plan_file(args.plan, board=args.board)
     elif action == "materialize":
-        result, code = materialize_portfolio_file(args.portfolio, board=args.board)
+        result, code = materialize_plan_file(args.plan, board=args.board)
     elif action == "show":
-        result, code = show_org_run(args.org_run_id, board=args.board)
+        result, code = show_org_run(args.run_id, board=args.board)
+    elif action == "amend":
+        result, code = amend_org_run_file(args.amendment, board=args.board)
+    elif action == "list":
+        result, code = list_org_runs(board=args.board)
+    elif action == "adopt-legacy":
+        result, code = adopt_legacy_run(args.run_id, board=args.board)
     elif action == "sync":
         result, code = sync_kanban(
             board=args.board,
@@ -196,7 +357,7 @@ def org_command(args: argparse.Namespace) -> int:
             project_id=args.project_id,
         )
     else:
-        print("usage: hermes org <validate|materialize|show>")
+        print("usage: hermes org <validate|materialize|show|amend|list|adopt-legacy|sync>")
         return 2
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     return code
