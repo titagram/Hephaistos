@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+import hermes_constants
 from hermes_cli.gnothi.contract import new_artifact
 from hermes_cli.gnothi.store import OrganismRevisionStore
 
@@ -28,14 +29,18 @@ def test_publish_writes_revision_and_atomically_updates_current(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        hermes_constants, "get_default_hermes_root", lambda: tmp_path
+    )
     store = OrganismRevisionStore()
     artifact = _artifact("rev-1", collected_at="2026-07-11T00:00:00Z")
 
     pointer = store.publish(artifact, published_at="2026-07-11T00:01:00Z")
 
-    revision_path = tmp_path / "gnothi_seauton" / "revisions" / "rev-1.json"
-    pointer_path = tmp_path / "gnothi_seauton" / "current.json"
+    revision_path = (
+        tmp_path / "organism" / "gnothi_seauton" / "revisions" / "rev-1.json"
+    )
+    pointer_path = tmp_path / "organism" / "gnothi_seauton" / "current.json"
     assert json.loads(revision_path.read_text()) == artifact
     assert json.loads(pointer_path.read_text()) == pointer
     assert pointer == {
@@ -47,6 +52,47 @@ def test_publish_writes_revision_and_atomically_updates_current(
     assert store.current() == artifact
     assert revision_path.stat().st_mode & 0o777 == 0o600
     assert pointer_path.stat().st_mode & 0o777 == 0o600
+
+
+def test_default_store_is_global_across_profile_switches(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    default_root = tmp_path / ".hermes"
+    profile_root = default_root / "profiles" / "reviewer"
+    monkeypatch.setattr(
+        hermes_constants, "get_default_hermes_root", lambda: default_root
+    )
+    monkeypatch.setenv("HERMES_HOME", str(profile_root))
+
+    store = OrganismRevisionStore()
+
+    assert store.root == default_root / "organism" / "gnothi_seauton"
+
+
+def test_default_store_reads_current_revision_after_profile_switch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    default_root = tmp_path / ".hermes"
+    monkeypatch.setattr(
+        hermes_constants, "get_default_hermes_root", lambda: default_root
+    )
+    artifact = _artifact("rev-1", collected_at="2026-07-11T00:00:00Z")
+
+    monkeypatch.setenv("HERMES_HOME", str(default_root))
+    pointer = OrganismRevisionStore().publish(
+        artifact, published_at="2026-07-11T00:01:00Z"
+    )
+
+    monkeypatch.setenv("HERMES_HOME", str(default_root / "profiles" / "reviewer"))
+    profile_store = OrganismRevisionStore()
+
+    assert profile_store.current() == artifact
+    assert (
+        json.loads(profile_store.current_path.read_text())["sha256"]
+        == pointer["sha256"]
+    )
 
 
 def test_publish_is_idempotent_but_refuses_conflicting_revision(tmp_path: Path):

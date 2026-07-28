@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from hermes_constants import get_hermes_home
+import hermes_constants
 from hermes_cli.gnothi.contract import validate_artifact
 from utils import atomic_replace
 
@@ -38,7 +38,11 @@ class OrganismRevisionStore:
     """Immutable local organism revisions with an atomic current pointer."""
 
     def __init__(self, root: Path | None = None) -> None:
-        self.root = root if root is not None else get_hermes_home() / "gnothi_seauton"
+        self.root = (
+            root
+            if root is not None
+            else hermes_constants.get_organism_home() / "gnothi_seauton"
+        )
         self.revisions_dir = self.root / "revisions"
         self.current_path = self.root / "current.json"
 
