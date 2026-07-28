@@ -156,8 +156,21 @@ def _conn(board: Optional[str] = None):
 # credentials from any legacy tables.
 # ---------------------------------------------------------------------------
 
+def _report_summary_dict(record: Any) -> dict[str, Any]:
+    """Serialize metadata for a lazy Logbook list without report bodies."""
+    return {
+        "id": record.id,
+        "board_slug": record.board_slug,
+        "report_type": _STORAGE_TO_REPORT_TYPE[record.report_type],
+        "subject_id": record.subject_id,
+        "terminal_run_id": record.terminal_run_id,
+        "source_version": record.source_version,
+        "generated_at": record.generated_at,
+    }
+
+
 def _report_dict(record: Any) -> dict[str, Any]:
-    """Serialize one persisted report into the public Logbook shape."""
+    """Serialize one persisted report into the public Logbook detail shape."""
     try:
         payload = json.loads(record.report_json)
     except (TypeError, ValueError):
@@ -166,15 +179,9 @@ def _report_dict(record: Any) -> dict[str, Any]:
         # it be exposed as executable/raw content.
         payload = {}
     return {
-        "id": record.id,
-        "board_slug": record.board_slug,
-        "report_type": _STORAGE_TO_REPORT_TYPE[record.report_type],
-        "subject_id": record.subject_id,
-        "terminal_run_id": record.terminal_run_id,
-        "source_version": record.source_version,
+        **_report_summary_dict(record),
         "report_json": payload,
         "report_markdown": record.report_markdown,
-        "generated_at": record.generated_at,
     }
 
 
@@ -204,7 +211,7 @@ def get_reports(
         )
         return {
             "reports": [
-                _report_dict(record)
+                _report_summary_dict(record)
                 for record in records
                 if record.board_slug == board
                 and record.report_type in _STORAGE_TO_REPORT_TYPE

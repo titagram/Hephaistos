@@ -2471,14 +2471,17 @@ def test_reports_list_and_detail_expose_local_completion_evidence(client):
         "/api/plugins/kanban/reports?report_type=task_completion&subject_id=t_123"
     )
     assert reports.status_code == 200, reports.text
-    assert reports.json()["reports"][0]["report_type"] == "task_completion"
-    assert reports.json()["reports"][0]["report_json"] == {
-        "task_id": "t_123", "summary": "finished",
-    }
+    summary = reports.json()["reports"][0]
+    assert summary["report_type"] == "task_completion"
+    assert "report_json" not in summary
+    assert "report_markdown" not in summary
 
     detail = client.get(f"/api/plugins/kanban/reports/{record.id}")
     assert detail.status_code == 200, detail.text
     assert detail.json()["report"]["report_markdown"].startswith("#")
+    assert detail.json()["report"]["report_json"] == {
+        "task_id": "t_123", "summary": "finished",
+    }
     assert "idempotency_key" not in detail.json()["report"]
 
 
