@@ -4994,6 +4994,35 @@ def complete_task(
     # Clean up the scratch workspace and any stale tmux session for the worker.
     _cleanup_workspace(conn, task_id)
     _done_task = get_task(conn, task_id)
+    try:
+        from hermes_cli.kanban_reports import project_after_task_completion
+        project_after_task_completion(conn, task_id, board=get_current_board())
+    except Exception as exc:
+        from hermes_cli.hades_backend_client import redact_secret
+        with write_txn(conn):
+            _append_event(
+                conn, task_id, "report_projection_failed",
+                {"error": redact_secret(str(exc))[:500], "retryable": True},
+                run_id=run_id,
+            )
+        # No final report means the derived OrgRun state remains blocked or
+        # reviewing; task completion above is deliberately never rolled back.
+        try:
+            from hermes_cli.org_run_store import (
+                refresh_org_run_state,
+                set_org_run_state,
+            )
+            rows = conn.execute(
+                "SELECT DISTINCT run_id, node_kind FROM kanban_org_nodes WHERE task_id = ?",
+                (task_id,),
+            ).fetchall()
+            for row in rows:
+                if row["node_kind"] == "finalization":
+                    set_org_run_state(conn, str(row["run_id"]), "reviewing")
+                else:
+                    refresh_org_run_state(conn, str(row["run_id"]))
+        except Exception:
+            pass
     _fire_kanban_lifecycle_hook(
         "kanban_task_completed",
         task_id,

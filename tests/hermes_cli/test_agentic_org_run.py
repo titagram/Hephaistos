@@ -537,6 +537,62 @@ def test_refresh_org_run_state_uses_durable_statuses_with_exact_precedence(
         assert refresh_org_run_state(conn, plan.run_id) == "cancelled"
 
 
+def test_complete_task_projects_local_reports_after_org_run_finalization(tmp_path):
+    """The completion path derives reports after, never instead of, local state."""
+    plan = _plan(risk="low", task_review=False, global_review=False)
+    with kb.connect(tmp_path / "kanban.db") as conn:
+        topology = materialize_org_run(
+            conn, plan, _validation(plan), board="default"
+        )
+        for task_id, summary in (
+            (topology.tasks["runtime"].execution_id, "runtime complete"),
+            (topology.integration_id, "integration complete"),
+            (topology.finalization_id, "finalization complete"),
+        ):
+            assert kb.claim_task(conn, task_id, claimer="report-projection")
+            assert kb.complete_task(conn, task_id, summary=summary)
+
+        reports = conn.execute(
+            "SELECT report_type, subject_id FROM kanban_reports ORDER BY id"
+        ).fetchall()
+        assert ("task", topology.tasks["runtime"].execution_id) in [
+            (row["report_type"], row["subject_id"]) for row in reports
+        ]
+        assert ("org_run_final", plan.run_id) in [
+            (row["report_type"], row["subject_id"]) for row in reports
+        ]
+        assert get_org_run(conn, plan.run_id).state == "completed"
+
+
+def test_final_report_projection_failure_keeps_completed_org_run_in_review(tmp_path, monkeypatch):
+    """A projection retry must not turn durable finalization into completion."""
+    plan = _plan(risk="low", task_review=False, global_review=False)
+    with kb.connect(tmp_path / "kanban.db") as conn:
+        topology = materialize_org_run(
+            conn, plan, _validation(plan), board="default"
+        )
+        for task_id in (
+            topology.tasks["runtime"].execution_id,
+            topology.integration_id,
+        ):
+            assert kb.claim_task(conn, task_id, claimer="report-projection-failure")
+            assert kb.complete_task(conn, task_id, summary="complete")
+
+        monkeypatch.setattr(
+            "hermes_cli.kanban_reports.project_after_task_completion",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("projection failed")),
+        )
+        assert kb.claim_task(conn, topology.finalization_id, claimer="report-projection-failure")
+        assert kb.complete_task(conn, topology.finalization_id, summary="final complete")
+
+        assert kb.get_task(conn, topology.finalization_id).status == "done"
+        assert get_org_run(conn, plan.run_id).state == "reviewing"
+        assert any(
+            event.kind == "report_projection_failed"
+            for event in kb.list_events(conn, topology.finalization_id)
+        )
+
+
 def _legacy_payload(*, run_id: str = "legacy-run-001") -> dict:
     return {
         "schema": "hades.execution-portfolio.v1",
