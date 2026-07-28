@@ -283,6 +283,14 @@ def decompose_task(
     """
     with kb.connect_closing() as conn:
         task = kb.get_task(conn, task_id)
+        if task is not None:
+            from hermes_cli.agentic_org_run import is_org_run_task
+            if is_org_run_task(conn, task_id):
+                return DecomposeOutcome(
+                    task_id,
+                    False,
+                    "OrgRun-managed task bypasses native decomposition",
+                )
     if task is None:
         return DecomposeOutcome(task_id, False, "unknown task id")
     if task.status != "triage":
@@ -468,10 +476,11 @@ def decompose_task(
 def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
     """Return task ids currently in the triage column."""
     with kb.connect_closing() as conn:
+        from hermes_cli.agentic_org_run import is_org_run_task
         rows = kb.list_tasks(
             conn,
             status="triage",
             tenant=tenant,
             limit=1000,
         )
-    return [row.id for row in rows]
+        return [row.id for row in rows if not is_org_run_task(conn, row.id)]

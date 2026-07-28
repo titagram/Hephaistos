@@ -5381,7 +5381,7 @@ def block_task(
     dependency_task_id: Optional[str] = None,
     expected_run_id: Optional[int] = None,
 ) -> bool:
-    """Transition ``running``/``ready`` → ``blocked`` (or route elsewhere).
+    """Transition ``running``/``ready``/``review`` → ``blocked`` (or route elsewhere).
 
     ``kind`` (one of :data:`VALID_BLOCK_KINDS`, or ``None`` for a legacy
     un-typed block) drives routing instead of every block landing in one
@@ -5497,7 +5497,7 @@ def block_task(
                        worker_pid    = NULL,
                        block_kind    = ?
                  WHERE id = ?
-                   AND status IN ('running', 'ready')
+                   AND status IN ('running', 'ready', 'review')
                 """ + ("" if expected_run_id is None else " AND current_run_id = ?"),
                 (kind, task_id) if expected_run_id is None
                 else (kind, task_id, int(expected_run_id)),
@@ -5536,9 +5536,10 @@ def block_task(
 
         # Truly-blocked kinds. Increment the unblock-loop counter when this is a
         # re-block for the SAME reason after a prior unblock. block_task only
-        # fires from running/ready (i.e. AFTER an unblock returned the task to
-        # the work pool), so a stored block_kind that matches the incoming kind
-        # means: blocked → unblocked → about-to-re-block for the same cause.
+        # fires from running/ready/review (i.e. AFTER an unblock returned the
+        # task to the work pool), so a stored block_kind that matches the
+        # incoming kind means: blocked → unblocked → about-to-re-block for the
+        # same cause.
         # An un-typed (None) block compares as "same" to a prior un-typed block.
         same_cause = prev_kind == kind
         recurrences = prev_recurrences + 1 if same_cause else 1
@@ -5556,7 +5557,7 @@ def block_task(
                        block_kind    = ?,
                        block_recurrences = ?
                  WHERE id = ?
-                   AND status IN ('running', 'ready')
+                   AND status IN ('running', 'ready', 'review')
                 """ + ("" if expected_run_id is None else " AND current_run_id = ?"),
                 (kind, recurrences, task_id) if expected_run_id is None
                 else (kind, recurrences, task_id, int(expected_run_id)),
@@ -5595,7 +5596,7 @@ def block_task(
                            block_kind    = ?,
                            block_recurrences = ?
                      WHERE id = ?
-                       AND status IN ('running', 'ready')
+                       AND status IN ('running', 'ready', 'review')
                     """,
                     (kind, recurrences, task_id),
                 )
@@ -5610,7 +5611,7 @@ def block_task(
                            block_kind    = ?,
                            block_recurrences = ?
                      WHERE id = ?
-                       AND status IN ('running', 'ready')
+                       AND status IN ('running', 'ready', 'review')
                        AND current_run_id = ?
                     """,
                     (kind, recurrences, task_id, int(expected_run_id)),
@@ -7876,6 +7877,25 @@ def _dispatch_admission_decision(
         return DispatchAdmission("defer", f"admission callback error: {exc}")
 
 
+def _org_run_role_unavailable_reason(
+    profile_exists,
+    assignee: str,
+) -> Optional[str]:
+    """Return a stable capability reason when an OrgRun role cannot run."""
+    if profile_exists is not None:
+        try:
+            if not profile_exists(assignee):
+                return f"profile_unavailable: {assignee}"
+        except Exception:
+            return f"profile_unavailable: {assignee}"
+    try:
+        if _resolve_worker_role_route(assignee) is None:
+            return f"role_route_unavailable: {assignee}"
+    except Exception:
+        return f"role_route_unavailable: {assignee}"
+    return None
+
+
 def dispatch_once(
     conn: sqlite3.Connection,
     *,
@@ -8149,7 +8169,29 @@ def _dispatch_once_locked(
             from hermes_cli.profiles import profile_exists  # local import: avoids cycle
         except Exception:
             profile_exists = None  # type: ignore[assignment]
-        if profile_exists is not None and not profile_exists(row_assignee):
+        from hermes_cli.agentic_org_run import is_org_run_task
+        managed_org_run_task = is_org_run_task(conn, row["id"])
+        if managed_org_run_task:
+            unavailable_reason = _org_run_role_unavailable_reason(
+                profile_exists,
+                row_assignee,
+            )
+            if unavailable_reason is not None:
+                if dry_run:
+                    result.auto_blocked.append(row["id"])
+                else:
+                    block_task(
+                        conn,
+                        row["id"],
+                        reason=unavailable_reason,
+                        kind="capability",
+                    )
+                continue
+        if (
+            not managed_org_run_task
+            and profile_exists is not None
+            and not profile_exists(row_assignee)
+        ):
             # Bucket separately from skipped_unassigned: the operator
             # cannot fix this by assigning a profile (the assignee IS the
             # intended owner — a terminal lane). Health telemetry uses
@@ -8324,7 +8366,29 @@ def _dispatch_once_locked(
             from hermes_cli.profiles import profile_exists
         except Exception:
             profile_exists = None  # type: ignore[assignment]
-        if profile_exists is not None and not profile_exists(row["assignee"]):
+        from hermes_cli.agentic_org_run import is_org_run_task
+        managed_org_run_task = is_org_run_task(conn, row["id"])
+        if managed_org_run_task:
+            unavailable_reason = _org_run_role_unavailable_reason(
+                profile_exists,
+                row["assignee"],
+            )
+            if unavailable_reason is not None:
+                if dry_run:
+                    result.auto_blocked.append(row["id"])
+                else:
+                    block_task(
+                        conn,
+                        row["id"],
+                        reason=unavailable_reason,
+                        kind="capability",
+                    )
+                continue
+        if (
+            not managed_org_run_task
+            and profile_exists is not None
+            and not profile_exists(row["assignee"])
+        ):
             result.skipped_nonspawnable.append(row["id"])
             continue
         if dry_run:

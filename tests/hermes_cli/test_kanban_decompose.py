@@ -15,6 +15,7 @@ import pytest
 
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_decompose as decomp
+from hermes_cli.org_run_store import insert_org_node, insert_org_run
 
 
 @pytest.fixture
@@ -72,6 +73,54 @@ def _patch_list_profiles(names: list[str]):
         patch("hermes_cli.profiles.profile_exists", side_effect=lambda x: x in names),
         patch("hermes_cli.profiles.get_active_profile_name", return_value=names[0] if names else "default"),
     ]
+
+
+def _mark_org_run_task(conn, task_id: str, *, run_id: str) -> None:
+    insert_org_run(
+        conn,
+        run_id=run_id,
+        board_slug="default",
+        plan_version=1,
+        plan_hash=f"hash-{run_id}",
+        base_commit="a" * 40,
+        origin="local",
+        state="materialized",
+        anchor_task_id=task_id,
+    )
+    insert_org_node(
+        conn,
+        run_id=run_id,
+        node_id=f"org-run:{run_id}:task:runtime",
+        task_id=task_id,
+        node_kind="execution",
+        plan_version=1,
+        contract_hash=f"contract-{run_id}",
+        logical_role="leaf",
+    )
+
+
+def test_decompose_bypasses_org_run_managed_triage_task(kanban_home):
+    with kb.connect() as conn:
+        task_id = kb.create_task(conn, title="managed", triage=True)
+        _mark_org_run_task(conn, task_id, run_id="managed-decompose")
+
+    with patch(
+        "agent.auxiliary_client.get_text_auxiliary_client",
+        side_effect=AssertionError("managed task reached auxiliary client"),
+    ):
+        outcome = decomp.decompose_task(task_id)
+
+    assert outcome.ok is False
+    assert outcome.reason == "OrgRun-managed task bypasses native decomposition"
+
+
+def test_list_triage_ids_excludes_org_run_managed_cards(kanban_home):
+    with kb.connect() as conn:
+        managed = kb.create_task(conn, title="managed", triage=True)
+        ordinary = kb.create_task(conn, title="ordinary", triage=True)
+        _mark_org_run_task(conn, managed, run_id="managed-list")
+
+    assert decomp.list_triage_ids() == [ordinary]
 
 
 def test_decompose_with_fanout_creates_children(kanban_home):
