@@ -21,7 +21,7 @@ from hermes_cli.gnothi.store import OrganismRevisionStore
 
 from .bootstrap import evolution_state_kind
 from .blueprint_repository import BlueprintRepository
-from .ledger import StoredEvent
+from .ledger import EvolutionLedgerError, StoredEvent
 from .organism_identity import OrganismIdentity, probe_organism_identity
 from .reconcile import _evaluate_open_ledger, read_evolution_snapshot
 from .suggestions import SuggestionRecord, SuggestionRepository
@@ -51,6 +51,8 @@ _MAX_REVISIONS = 50
 _MAX_PIPELINE_ROWS = 50
 _MAX_AUDIT_EVENTS = 100
 _MAX_TELOS_DIRECTORY_ENTRIES = _MAX_REVISIONS + 1
+_MAX_DASHBOARD_LIFECYCLE_EVENTS = 256
+_MAX_DASHBOARD_EVOLUTION_DIRECTORY_MEMBERS = 64
 
 # Build, canary, promotion, and stable are visible contractual stages only.
 # They deliberately remain unavailable until a real local runtime owns them.
@@ -658,8 +660,9 @@ class EvolutionDashboardService:
             return self._empty_pipeline(lifecycle_state)
 
         def query(ledger: Any) -> dict[str, Any]:
-            if ledger.verify_chain():
-                return self._empty_pipeline("corrupt")
+            chain_state = self._bounded_lifecycle_chain_state(ledger)
+            if chain_state != "ready":
+                return self._empty_pipeline(chain_state)
             try:
                 suggestion_repository = (
                     SuggestionRepository.from_verified_read_connection(
@@ -667,21 +670,21 @@ class EvolutionDashboardService:
                     )
                 )
                 blueprint_repository = BlueprintRepository(ledger)
-                attempt_total = int(
-                    ledger.connection.execute(
-                        "SELECT COUNT(*) FROM attempts"
-                    ).fetchone()[0]
-                )
-                attempts = ledger.connection.execute(
-                    """
-                    SELECT attempt_id, source_kind, state, created_at
-                    FROM attempts
-                    ORDER BY created_at DESC, attempt_id DESC
-                    LIMIT ?
-                    """,
-                    (limit,),
-                ).fetchall()
                 if attempt_id is None:
+                    attempt_total = int(
+                        ledger.connection.execute(
+                            "SELECT COUNT(*) FROM attempts"
+                        ).fetchone()[0]
+                    )
+                    attempts = ledger.connection.execute(
+                        """
+                        SELECT attempt_id, source_kind, state, created_at
+                        FROM attempts
+                        ORDER BY created_at DESC, attempt_id DESC
+                        LIMIT ?
+                        """,
+                        (limit,),
+                    ).fetchall()
                     selected_attempt = (
                         attempts[0]["attempt_id"] if attempts else None
                     )
@@ -706,11 +709,8 @@ class EvolutionDashboardService:
                     ).fetchone()
                     if selected_row is None:
                         return self._empty_pipeline("missing")
-                    attempts = [selected_row] + [
-                        row
-                        for row in attempts
-                        if row["attempt_id"] != attempt_id
-                    ][: limit - 1]
+                    attempts = [selected_row]
+                    attempt_total = 1
                     selected_attempt = attempt_id
                     blueprint_total = int(
                         ledger.connection.execute(
@@ -825,8 +825,9 @@ class EvolutionDashboardService:
             return self._empty_audit(lifecycle_state, after=after)
 
         def query(ledger: Any) -> dict[str, Any]:
-            if ledger.verify_chain():
-                return self._empty_audit("corrupt", after=after)
+            chain_state = self._bounded_lifecycle_chain_state(ledger)
+            if chain_state != "ready":
+                return self._empty_audit(chain_state, after=after)
             try:
                 total_events = int(
                     ledger.connection.execute(
@@ -873,13 +874,16 @@ class EvolutionDashboardService:
         if not self._root_is_directory():
             return identity, "blocked"
         evolution_root = self.root / "evolution"
-        state_kind = evolution_state_kind(evolution_root)
-        if state_kind == "uninitialized" or not _regular_file_exists(
-            evolution_root / "evolution.db"
-        ):
+        state_kind = evolution_state_kind(
+            evolution_root,
+            max_members=_MAX_DASHBOARD_EVOLUTION_DIRECTORY_MEMBERS,
+        )
+        if state_kind == "uninitialized":
             return identity, "not_ready"
         if state_kind != "existing":
             return identity, "blocked"
+        if not _regular_file_exists(evolution_root / "evolution.db"):
+            return identity, "not_ready"
         return identity, "ready"
 
     @staticmethod
@@ -889,6 +893,20 @@ class EvolutionDashboardService:
         except OSError:
             return False
         return not _is_link_or_reparse_point(info) and stat.S_ISDIR(info.st_mode)
+
+    @staticmethod
+    def _bounded_lifecycle_chain_state(ledger: Any) -> SnapshotState:
+        """Classify a complete lifecycle proof within the dashboard read cap."""
+        try:
+            return (
+                "corrupt"
+                if ledger.verify_chain_bounded(
+                    max_events=_MAX_DASHBOARD_LIFECYCLE_EVENTS
+                )
+                else "ready"
+            )
+        except EvolutionLedgerError:
+            return "blocked"
 
     @staticmethod
     def _pipeline_stages() -> list[dict[str, Any]]:
@@ -1476,7 +1494,10 @@ class EvolutionDashboardService:
 
     def _probe_generations(self, diagnostics: set[str]) -> dict[str, Any]:
         evolution_root = self.root / "evolution"
-        state_kind = evolution_state_kind(evolution_root)
+        state_kind = evolution_state_kind(
+            evolution_root,
+            max_members=_MAX_DASHBOARD_EVOLUTION_DIRECTORY_MEMBERS,
+        )
         if state_kind == "uninitialized":
             diagnostics.add("lifecycle_unavailable")
             return self._missing_generations()
@@ -1490,8 +1511,11 @@ class EvolutionDashboardService:
             return self._missing_generations()
 
         def query(ledger: Any) -> tuple[str, Any]:
-            if ledger.verify_chain():
+            chain_state = self._bounded_lifecycle_chain_state(ledger)
+            if chain_state == "corrupt":
                 return "event_chain_invalid", None
+            if chain_state != "ready":
+                return "lifecycle_unavailable", None
             return "ok", _evaluate_open_ledger(evolution_root, ledger, repair=False)
 
         try:
@@ -1505,6 +1529,11 @@ class EvolutionDashboardService:
             diagnostics.add("event_chain_invalid")
             result = self._missing_generations()
             result["state"] = "corrupt"
+            return result
+        if outcome == "lifecycle_unavailable":
+            diagnostics.add("lifecycle_unavailable")
+            result = self._missing_generations()
+            result["state"] = "blocked"
             return result
 
         if reconciliation.status == "coherent":

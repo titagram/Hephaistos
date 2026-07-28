@@ -61,8 +61,14 @@ def _stable_base() -> StableBaseIdentity:
     )
 
 
-def evolution_state_kind(root: Path) -> str:
+def evolution_state_kind(root: Path, *, max_members: int | None = None) -> str:
     """Classify state without creating paths: empty/lock-only is uninitialized."""
+    if max_members is not None and (
+        isinstance(max_members, bool)
+        or not isinstance(max_members, int)
+        or max_members < 1
+    ):
+        return "blocked"
     try:
         root_info = root.lstat()
     except FileNotFoundError:
@@ -71,7 +77,27 @@ def evolution_state_kind(root: Path) -> str:
         return "blocked"
     try:
         _validate_directory(root_info)
-        members = list(root.iterdir())
+        iterator = iter(root.iterdir())
+        if max_members is None:
+            try:
+                first_member = next(iterator)
+            except StopIteration:
+                return "uninitialized"
+            try:
+                next(iterator)
+            except StopIteration:
+                members = [first_member]
+            else:
+                return "existing"
+        else:
+            members = []
+            for _ in range(max_members + 1):
+                try:
+                    members.append(next(iterator))
+                except StopIteration:
+                    break
+            if len(members) > max_members:
+                return "blocked"
     except (
         LifecycleLockError,
         OSError,

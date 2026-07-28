@@ -18,6 +18,7 @@ from hermes_cli.evolution.ledger import (
     BlueprintDraft,
     EvolutionLedger,
     EvolutionLedgerError,
+    LifecycleEvent,
 )
 from hermes_cli.evolution.blueprint_contract import (
     BlueprintContractError,
@@ -957,6 +958,50 @@ def test_repository_get_reparses_and_reverifies_document(tmp_path: Path) -> None
     assert loaded.blueprint_id == created.blueprint_id
     assert loaded.state == "draft"
     assert loaded.created_at == created.created_at
+
+
+def test_blueprint_event_checks_cap_the_one_event_proof_at_one_plus_one_rows(
+    tmp_path: Path,
+) -> None:
+    """Replay and dashboard reads reject an oversized proposal-event set cheaply."""
+    repository, created = repository_with_one_blueprint(tmp_path)
+    ledger = repository.ledger
+    ledger.append_event(
+        LifecycleEvent(
+            event_id="blueprint-extra-event",
+            attempt_id=created.attempt_id,
+            generation_id=None,
+            event_type="dashboard_observed",
+            prior_state="draft",
+            next_state="draft",
+            actor="operator",
+            input_digests=(),
+            authorization_id=None,
+            reason_code="dashboard_observed",
+            reason_summary="Extra lifecycle evidence.",
+            created_at="2026-07-28T12:03:00.000000Z",
+        )
+    )
+    queries: list[str] = []
+    ledger.connection.set_trace_callback(queries.append)
+
+    with pytest.raises(BlueprintRepositoryError, match="blueprint_document_incoherent"):
+        repository.get(created.blueprint_id)
+    with pytest.raises(EvolutionLedgerError, match="incoherent_blueprint_draft"):
+        ledger.create_or_get_blueprint_draft(
+            suggestion_id="sug_alpha",
+            canonical_document_json=DOCUMENT_JSON,
+            canonical_digest=DOCUMENT_DIGEST,
+            input_digests=(DOCUMENT_DIGEST, "a" * 64),
+        )
+
+    event_queries = [
+        " ".join(query.split())
+        for query in queries
+        if "SELECT * FROM lifecycle_events WHERE attempt_id" in " ".join(query.split())
+    ]
+    assert len(event_queries) == 2
+    assert all(query.endswith("LIMIT 2") for query in event_queries)
 
 
 def test_repository_get_unknown_id_returns_none(tmp_path: Path) -> None:

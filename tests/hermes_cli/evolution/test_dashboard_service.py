@@ -1057,6 +1057,23 @@ def test_pipeline_binds_selected_attempt_to_its_blueprint_and_suggestion(
     ledger.connection.close()
 
 
+def test_pipeline_selected_attempt_uses_only_the_selected_attempt_scope(
+    tmp_path: Path,
+) -> None:
+    """An attempt detail view must not retain unrelated attempt page rows."""
+    root = tmp_path / "organism"
+    _, ledger, attempts = _seed_governance_state(root)
+    selected = attempts[0]
+
+    result = EvolutionDashboardService(root).pipeline(attempt_id=selected, limit=2)
+
+    assert result["state"] == "ready"
+    assert [row["attempt_id"] for row in result["attempts"]] == [selected]
+    assert result["total_attempts"] == 1
+    assert result["attempts_truncated"] is False
+    ledger.connection.close()
+
+
 def test_telos_fails_closed_when_revision_count_exceeds_the_read_cap(
     tmp_path: Path,
 ) -> None:
@@ -1163,6 +1180,76 @@ def test_corrupt_event_chain_disables_pipeline_and_audit_actions(
     assert service.audit()["state"] == "corrupt"
     assert service.audit()["mutable_actions"] == []
     ledger.connection.close()
+
+
+def test_dashboard_blocks_an_oversized_valid_lifecycle_chain(
+    tmp_path: Path,
+) -> None:
+    """A dashboard read cannot treat a verified prefix as a healthy lifecycle."""
+    root = tmp_path / "organism"
+    _, ledger, _ = _seed_governance_state(root)
+    for index in range(256):
+        ledger.append_event(
+            LifecycleEvent(
+                event_id=f"dashboard-budget-{index}",
+                attempt_id=None,
+                generation_id=None,
+                event_type="dashboard_budget_recorded",
+                prior_state=None,
+                next_state="draft",
+                actor="operator",
+                input_digests=(),
+                authorization_id=None,
+                reason_code="dashboard_budget_recorded",
+                reason_summary="Dashboard budget evidence recorded.",
+                created_at="2026-07-28T12:02:00.000000Z",
+            )
+        )
+    assert ledger.verify_chain() == []
+
+    service = EvolutionDashboardService(root)
+
+    pipeline = service.pipeline()
+    audit = service.audit()
+    snapshot = service.snapshot()
+
+    assert pipeline["state"] == "blocked"
+    assert pipeline["mutable_actions"] == []
+    assert audit["state"] == "blocked"
+    assert audit["mutable_actions"] == []
+    assert snapshot["generations"]["state"] == "blocked"
+    assert "lifecycle_unavailable" in snapshot["diagnostics"]
+    ledger.connection.close()
+
+
+def test_dashboard_bounds_the_evolution_directory_probe_before_materialization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An oversized evolution directory is unavailable, not a partial lifecycle."""
+    root = tmp_path / "organism"
+    create_organism_identity(root)
+    evolution_root = root / "evolution"
+    for index in range(66):
+        (evolution_root / f"untrusted-member-{index}").write_text(
+            "untrusted", encoding="utf-8"
+        )
+
+    seen_members: list[str] = []
+    original_iterdir = Path.iterdir
+
+    def tracked_iterdir(path: Path):
+        for child in original_iterdir(path):
+            if path == evolution_root:
+                seen_members.append(child.name)
+            yield child
+
+    monkeypatch.setattr(Path, "iterdir", tracked_iterdir)
+
+    result = EvolutionDashboardService(root).pipeline()
+
+    assert result["state"] == "blocked"
+    assert result["mutable_actions"] == []
+    assert len(seen_members) == 65
 
 
 def test_governance_reads_leave_an_absent_root_absent(tmp_path: Path) -> None:

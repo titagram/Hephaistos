@@ -25,6 +25,7 @@ _ATTEMPT_ID_PATTERN = re.compile(
     re.ASCII,
 )
 _EVENT_DIGEST_DOMAIN = "hermes-evolution-lifecycle-event-v1"
+_MAX_PROPOSAL_EVENTS = 1
 
 
 class BlueprintRepositoryError(RuntimeError):
@@ -204,10 +205,14 @@ class BlueprintRepository:
     ) -> None:
         try:
             rows = self.ledger.connection.execute(
-                "SELECT * FROM lifecycle_events WHERE attempt_id = ?",
-                (attempt_id,),
+                """
+                SELECT * FROM lifecycle_events
+                WHERE attempt_id = ?
+                LIMIT ?
+                """,
+                (attempt_id, _MAX_PROPOSAL_EVENTS + 1),
             ).fetchall()
-            if len(rows) != 1:
+            if len(rows) != _MAX_PROPOSAL_EVENTS:
                 raise BlueprintRepositoryError(
                     "blueprint_document_incoherent"
                 )
