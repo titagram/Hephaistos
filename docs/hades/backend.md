@@ -3,10 +3,12 @@
 ## Gnothi Seauton: local organism awareness
 
 `gnothi_seauton` is the local, evidence-backed description of the installed
-Hades organism. It inventories source anatomy, capabilities, runtime state,
-protected contracts, declared dependencies, and bounded experience events into
-immutable `hades.organism_graph.v1` revisions under
-`$HERMES_HOME/gnothi_seauton/`.
+Hades organism, shared across all Hermes profiles. It inventories source
+anatomy, capabilities, runtime state, protected contracts, declared
+dependencies, and bounded experience events into immutable
+`hades.organism_graph.v1` revisions under
+`<default Hermes root>/organism/gnothi_seauton/`. This single global organism
+is never remote-synced.
 
 Operator commands:
 
@@ -23,7 +25,7 @@ hades gnothi-seauton wiki
 The conversational `/gnothi_seauton` command is also available in the classic
 CLI, messaging gateway, and TUI. It submits a normal user turn, preserving the
 conversation's cached system-prompt prefix and tool schema. It is read-only:
-it inspects the current local revision through `hades gnothi-seauton` commands,
+it inspects the current global revision through `hades gnothi-seauton` commands,
 not graph tools. It does not rebuild, research, download, install, mutate
 configuration, or start an evolution.
 
@@ -53,8 +55,8 @@ unconfigured without creating that database.
 
 Ordinary `hades backend sync` never publishes, uploads, or otherwise includes
 organism artifacts in remote synchronization. It never triggers an organism
-build. Organism artifacts never enter remote sync; Gnothi revisions remain
-local-only, regardless of backend capabilities or graph scopes.
+build. The single global organism and its Gnothi revisions never enter remote
+sync, regardless of backend capabilities or graph scopes.
 
 The existing service-gated graph search and traversal tools accept only
 `scope=project` and fall back to the local synced project code-graph cache when
