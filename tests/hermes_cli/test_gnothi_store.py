@@ -154,6 +154,31 @@ def test_unreadable_legacy_profile_state_is_reported_without_importing(
     assert not global_root.exists()
 
 
+def test_dangling_legacy_pointer_is_reported_as_unreadable_without_importing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    default_root = tmp_path / ".hermes"
+    profile_root = default_root / "profiles" / "reviewer"
+    global_root = default_root / "organism" / "gnothi_seauton"
+    monkeypatch.setattr(
+        hermes_constants, "get_default_hermes_root", lambda: default_root
+    )
+    monkeypatch.setenv("HERMES_HOME", str(profile_root))
+    legacy_root = profile_root / "gnothi_seauton"
+    legacy_root.mkdir(parents=True)
+    (legacy_root / "current.json").symlink_to("missing-pointer.json")
+
+    result = OrganismQuery(OrganismRevisionStore()).status()
+
+    assert result == {
+        "status": "missing",
+        "actions": ["rebuild"],
+        "diagnostics": ["legacy_profile_state_unreadable"],
+    }
+    assert not global_root.exists()
+
+
 def test_publish_is_idempotent_but_refuses_conflicting_revision(tmp_path: Path):
     store = OrganismRevisionStore(root=tmp_path)
     artifact = _artifact("rev-1", collected_at="2026-07-11T00:00:00Z")

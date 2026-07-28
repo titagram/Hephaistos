@@ -41,10 +41,15 @@ def legacy_profile_store_state() -> str:
     canonical = hermes_constants.get_organism_home() / "gnothi_seauton"
     if legacy.absolute() == canonical.absolute():
         return "absent"
+    pointer = legacy / "current.json"
     try:
-        mode = (legacy / "current.json").stat().st_mode
+        pointer.lstat()
     except FileNotFoundError:
         return "absent"
+    except OSError:
+        return "unreadable"
+    try:
+        mode = pointer.stat().st_mode
     except OSError:
         return "unreadable"
     return "detected" if S_ISREG(mode) else "absent"
