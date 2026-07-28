@@ -41,11 +41,14 @@ export function OrganismView({ snapshot, onRefresh, onTrackJob }: OrganismViewPr
   const [kinds, setKinds] = useState<Set<string>>(new Set());
   const [surface, setSurface] = useState<OrganismSurface>("graph");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [inspectorOpen, setInspectorOpen] = useState(false);
   const [graphRootId, setGraphRootId] = useState<string | null>(null);
   const [dialog, setDialog] = useState<RevisionDialogMode | null>(null);
   const [mutationContext, setMutationContext] = useState<MutationContext | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [initializing, setInitializing] = useState(false);
+  const dialogTriggerRef = SDK.hooks.useRef<HTMLElement | null>(null);
+  const inspectorTriggerRef = SDK.hooks.useRef<HTMLElement | null>(null);
 
   const gnothiIsUnsafe = snapshot?.gnothi.state === "blocked" || snapshot?.gnothi.state === "corrupt";
   const hasSafeGraph = snapshot !== null
@@ -109,6 +112,7 @@ export function OrganismView({ snapshot, onRefresh, onTrackJob }: OrganismViewPr
     setKinds(new Set());
     setGraphRootId(null);
     setSelectedId(null);
+    setInspectorOpen(false);
   }, []);
 
   const expandSelectedNeighborhood = useCallback(() => {
@@ -141,10 +145,20 @@ export function OrganismView({ snapshot, onRefresh, onTrackJob }: OrganismViewPr
   }, [initializing, onRefresh]);
 
   const openInspector = useCallback((id: string) => {
+    if (typeof document !== "undefined" && document.activeElement instanceof HTMLElement) {
+      inspectorTriggerRef.current = document.activeElement;
+    }
     setSelectedId(id);
+    setInspectorOpen(true);
     if (typeof document !== "undefined") {
       globalThis.setTimeout(() => document.getElementById("evo-node-inspector")?.focus(), 0);
     }
+  }, []);
+
+  const closeInspector = useCallback(() => {
+    setInspectorOpen(false);
+    const trigger = inspectorTriggerRef.current;
+    if (trigger !== null && typeof document !== "undefined" && document.contains(trigger)) trigger.focus();
   }, []);
 
   const onJobStarted = useCallback((job: EvolutionJob) => {
@@ -194,8 +208,8 @@ export function OrganismView({ snapshot, onRefresh, onTrackJob }: OrganismViewPr
           <p>Revision {snapshot.gnothi.revision_id ?? "unavailable"} · {snapshot.gnothi.node_count ?? 0} nodes · {snapshot.gnothi.edge_count ?? 0} edges</p>
         </div>
         <div className="evo-organism__actions">
-          <button type="button" onClick={() => void openRebuild()}>Rebuild organism</button>
-          <button type="button" onClick={() => setDialog("compare")}>Compare revisions</button>
+          <button type="button" onClick={event => { dialogTriggerRef.current = event.currentTarget; void openRebuild(); }}>Rebuild organism</button>
+          <button type="button" onClick={event => { dialogTriggerRef.current = event.currentTarget; setDialog("compare"); }}>Compare revisions</button>
         </div>
       </header>
       {stateWarning !== null ? <p className={`evo-organism__notice evo-organism__notice--${snapshot.state}`}>{stateWarning}</p> : null}
@@ -217,9 +231,9 @@ export function OrganismView({ snapshot, onRefresh, onTrackJob }: OrganismViewPr
           ))}
         </fieldset>
         <button type="button" onClick={resetFilters}>Reset filters and graph</button>
-        <div className="evo-organism__surface-toggle" aria-label="Organism presentation">
-          <button type="button" aria-pressed={surface === "graph"} onClick={() => setSurface("graph")}>Graph</button>
-          <button type="button" aria-pressed={surface === "list"} onClick={() => setSurface("list")}>List</button>
+        <div className="evo-organism__surface-toggle" role="tablist" aria-label="Organism presentation">
+          <button id="evo-organism-graph-tab" type="button" role="tab" aria-controls="evo-organism-graph-panel" aria-selected={surface === "graph"} onClick={() => setSurface("graph")}>Graph</button>
+          <button id="evo-organism-list-tab" type="button" role="tab" aria-controls="evo-organism-list-panel" aria-selected={surface === "list"} onClick={() => setSurface("list")}>List</button>
         </div>
       </section>
       <section className="evo-organism__legend" aria-label="Relationship legend">
@@ -234,7 +248,12 @@ export function OrganismView({ snapshot, onRefresh, onTrackJob }: OrganismViewPr
       ) : null}
       {presentation !== null ? (
         <div className="evo-organism__surface">
-          <div className="evo-organism__visualization">
+          <div
+            id={surface === "graph" ? "evo-organism-graph-panel" : "evo-organism-list-panel"}
+            className="evo-organism__visualization"
+            role="tabpanel"
+            aria-labelledby={surface === "graph" ? "evo-organism-graph-tab" : "evo-organism-list-tab"}
+          >
             {surface === "graph" ? (
               <OrganismGraph
                 nodes={presentation.graph.nodes}
@@ -252,7 +271,14 @@ export function OrganismView({ snapshot, onRefresh, onTrackJob }: OrganismViewPr
               />
             )}
           </div>
-          <NodeInspector node={selectedNode} nodes={filtered.nodes} edges={filtered.edges} blockers={graph?.blockers ?? []} />
+          <NodeInspector
+            node={selectedNode}
+            nodes={filtered.nodes}
+            edges={filtered.edges}
+            blockers={graph?.blockers ?? []}
+            drawerOpen={inspectorOpen}
+            onClose={closeInspector}
+          />
         </div>
       ) : null}
       {dialog !== null ? (
@@ -261,6 +287,7 @@ export function OrganismView({ snapshot, onRefresh, onTrackJob }: OrganismViewPr
           context={dialog === "rebuild" ? mutationContext : null}
           onClose={() => setDialog(null)}
           onJobStarted={onJobStarted}
+          returnFocusRef={dialogTriggerRef}
         />
       ) : null}
     </section>

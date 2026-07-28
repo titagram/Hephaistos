@@ -1,5 +1,6 @@
 import { evolutionApi, type EvolutionCollector } from "../api";
 import { React, SDK } from "../sdk";
+import { useDialogFocus, type DialogFocusRef } from "./dialog-focus";
 import type {
   EvolutionJob,
   MutationContext,
@@ -25,6 +26,7 @@ export interface RevisionDialogProps {
   context: MutationContext | null;
   onClose(): void;
   onJobStarted(job: EvolutionJob): void;
+  returnFocusRef?: DialogFocusRef;
 }
 
 function mutationErrorMessage(error: unknown): string {
@@ -170,18 +172,34 @@ function CompareContents(): React.ReactElement {
   );
 }
 
-export function RevisionDialog({ mode, context, onClose, onJobStarted }: RevisionDialogProps): React.ReactElement {
+export function RevisionDialog({ mode, context, onClose, onJobStarted, returnFocusRef }: RevisionDialogProps): React.ReactElement {
+  const { useRef } = SDK.hooks;
   const title = mode === "rebuild" ? "Rebuild organism" : "Compare revisions";
+  const description = mode === "rebuild"
+    ? "Queue a read-only local organism rebuild after reviewing the current identity and snapshot digest."
+    : "Compare two immutable local organism revisions without changing the active revision.";
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  const { close, handleKeyDown } = useDialogFocus({ dialogRef, onClose, returnFocusRef });
   return (
-    <div className="evo-revision-dialog" role="dialog" aria-modal="true" aria-labelledby="evo-revision-dialog-title">
+    <div
+      ref={dialogRef}
+      className="evo-revision-dialog"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="evo-revision-dialog-title"
+      aria-describedby="evo-revision-dialog-description"
+      tabIndex={-1}
+      onKeyDown={handleKeyDown}
+    >
       <section className="evo-revision-dialog__content">
         <header>
           <h2 id="evo-revision-dialog-title">{title}</h2>
-          <button type="button" onClick={onClose} aria-label={`Close ${title}`}>Close</button>
+          <button type="button" onClick={close} aria-label={`Close ${title}`}>Close</button>
         </header>
+        <p id="evo-revision-dialog-description">{description}</p>
         {mode === "rebuild"
-          ? <RebuildContents context={context} onClose={onClose} onJobStarted={onJobStarted} />
-          : <CompareContents />}
+          ? <RebuildContents context={context} onClose={close} onJobStarted={onJobStarted} />
+          : <><CompareContents /><footer><button type="button" onClick={close}>Cancel</button></footer></>}
       </section>
     </div>
   );

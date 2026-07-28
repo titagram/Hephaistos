@@ -34,12 +34,15 @@ export function EvolutionShell(): React.ReactElement {
           </p>
         ) : null}
       </header>
-      <nav className="evo-shell__nav" aria-label="Evolution views">
+      <nav className="evo-shell__nav" role="tablist" aria-label="Evolution views">
         {VIEWS.map(item => (
           <button
             key={item.id}
             type="button"
-            aria-current={view === item.id ? "page" : undefined}
+            id={`evo-view-tab-${item.id}`}
+            role="tab"
+            aria-controls={`evo-view-panel-${item.id}`}
+            aria-selected={view === item.id}
             onClick={() => setView(item.id)}
           >
             {item.label}
@@ -64,7 +67,13 @@ export function EvolutionShell(): React.ReactElement {
         </section>
       ) : null}
       <StatusRail snapshot={store.snapshot} loading={store.loading} />
-      <section className="evo-shell__content" aria-label={`${VIEWS.find(item => item.id === view)?.label ?? "Evolution"} view`}>
+      <section
+        id={`evo-view-panel-${view}`}
+        className="evo-shell__content"
+        role="tabpanel"
+        aria-labelledby={`evo-view-tab-${view}`}
+        aria-label={`${VIEWS.find(item => item.id === view)?.label ?? "Evolution"} view`}
+      >
         {view === "overview" ? (
           <OverviewView
             snapshot={store.snapshot}

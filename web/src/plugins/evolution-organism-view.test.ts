@@ -57,6 +57,7 @@ describe("OrganismView bounded neighborhood expansion", () => {
             useCallback: <T,>(callback: T) => callback,
             useEffect: (effect: () => void | (() => void)) => { effect(); },
             useMemo: <T,>(factory: () => T) => factory(),
+            useRef: <T,>(initial: T) => ({ current: initial }),
             useState: <T,>(initial: T) => {
               const index = stateIndex++;
               if (state[index] === undefined) state[index] = initial;

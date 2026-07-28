@@ -500,6 +500,10 @@
   // ../plugins/evolution/dashboard/src/components/NodeInspector.tsx
   var MAX_INSPECTOR_ROWS = 12;
   var MAX_EVIDENCE_REFS = 8;
+  function healthLabel(node) {
+    const stateClass = nodeStateClass(node);
+    return stateClass.replace("evo-node--", "");
+  }
   function nodeById(nodes3, id2) {
     return nodes3.find((node) => node.id === id2) ?? null;
   }
@@ -510,15 +514,23 @@
     const ids = edges3.filter((edge) => direction === "outbound" ? edge.from === node.id : edge.to === node.id).map((edge) => direction === "outbound" ? edge.to : edge.from);
     return [...new Set(ids)].map((id2) => nodeById(nodes3, id2)).filter((value) => value !== null).sort((left, right) => left.id.localeCompare(right.id));
   }
-  function NodeInspector({ node, nodes: nodes3, edges: edges3, blockers }) {
+  function NodeInspector({ node, nodes: nodes3, edges: edges3, blockers, drawerOpen = false, onClose }) {
+    const close = () => onClose?.();
+    const handleKeyDown = (event3) => {
+      if (event3.key === "Escape" && drawerOpen && onClose !== void 0) {
+        event3.preventDefault();
+        close();
+      }
+    };
     if (node === null) {
-      return /* @__PURE__ */ React.createElement("aside", { id: "evo-node-inspector", className: "evo-node-inspector", tabIndex: -1, "aria-label": "Selected organism node" }, /* @__PURE__ */ React.createElement("h2", null, "Selected node"), /* @__PURE__ */ React.createElement("p", null, "Select a graph node or a list row to inspect bounded local details."));
+      return /* @__PURE__ */ React.createElement("aside", { id: "evo-node-inspector", className: "evo-node-inspector", "data-drawer-open": drawerOpen, tabIndex: -1, "aria-label": "Selected organism node", onKeyDown: handleKeyDown }, /* @__PURE__ */ React.createElement("h2", null, "Selected node"), /* @__PURE__ */ React.createElement("p", null, "Select a graph node or a list row to inspect bounded local details."), onClose !== void 0 ? /* @__PURE__ */ React.createElement("button", { className: "evo-node-inspector__close", type: "button", onClick: close }, "Close node inspector") : null);
     }
     const dependencies = relatedNodes(node, edges3, nodes3, "outbound");
     const dependents = relatedNodes(node, edges3, nodes3, "inbound");
     const affectedCapabilities = [...dependencies, ...dependents].filter((item) => item.kind === "capability").filter((item, index, list) => list.findIndex((candidate) => candidate.id === item.id) === index);
     const nodeBlockers = blockers.filter((blocker) => blocker.id === node.id || dependencies.some((item) => item.id === blocker.id) || dependents.some((item) => item.id === blocker.id));
-    return /* @__PURE__ */ React.createElement("aside", { id: "evo-node-inspector", className: "evo-node-inspector", tabIndex: -1, "aria-label": `Selected node ${node.label}` }, /* @__PURE__ */ React.createElement("h2", null, "Selected node"), /* @__PURE__ */ React.createElement("p", { className: nodeStateClass(node) }, node.label), /* @__PURE__ */ React.createElement("dl", null, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("dt", null, "Stable ID"), /* @__PURE__ */ React.createElement("dd", null, node.id)), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("dt", null, "Kind"), /* @__PURE__ */ React.createElement("dd", null, node.kind)), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("dt", null, "Owner"), /* @__PURE__ */ React.createElement("dd", null, node.owner_class)), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("dt", null, "Generation scope"), /* @__PURE__ */ React.createElement("dd", null, node.generation_scope))), /* @__PURE__ */ React.createElement("section", { className: "evo-node-inspector__section" }, /* @__PURE__ */ React.createElement("h3", null, "Dimensions"), Object.keys(node.state).length === 0 ? /* @__PURE__ */ React.createElement("p", null, "Unknown.") : /* @__PURE__ */ React.createElement("dl", null, Object.entries(node.state).slice(0, MAX_INSPECTOR_ROWS).map(([key, value]) => /* @__PURE__ */ React.createElement("div", { key }, /* @__PURE__ */ React.createElement("dt", null, key), /* @__PURE__ */ React.createElement("dd", null, value ? "yes" : "no"))))), /* @__PURE__ */ React.createElement("section", { className: "evo-node-inspector__section" }, /* @__PURE__ */ React.createElement("h3", null, "Evidence references"), /* @__PURE__ */ React.createElement("p", null, "Evidence freshness is not provided by this bounded graph response."), node.evidence_refs.length === 0 ? /* @__PURE__ */ React.createElement("p", null, "None reported.") : /* @__PURE__ */ React.createElement("ul", null, node.evidence_refs.slice(0, MAX_EVIDENCE_REFS).map((reference) => /* @__PURE__ */ React.createElement("li", { key: reference }, reference)))), /* @__PURE__ */ React.createElement(NodeRows, { title: "Dependencies", values: dependencies }), /* @__PURE__ */ React.createElement(NodeRows, { title: "Dependents", values: dependents }), /* @__PURE__ */ React.createElement(NodeRows, { title: "Blockers", values: nodeBlockers }), /* @__PURE__ */ React.createElement(NodeRows, { title: "Affected capabilities", values: affectedCapabilities }));
+    const health = healthLabel(node);
+    return /* @__PURE__ */ React.createElement("aside", { id: "evo-node-inspector", className: "evo-node-inspector", "data-drawer-open": drawerOpen, tabIndex: -1, "aria-label": `Selected node ${node.label}`, onKeyDown: handleKeyDown }, /* @__PURE__ */ React.createElement("h2", null, "Selected node"), onClose !== void 0 ? /* @__PURE__ */ React.createElement("button", { className: "evo-node-inspector__close", type: "button", onClick: close }, "Close node inspector") : null, /* @__PURE__ */ React.createElement("p", { className: "evo-node-inspector__label" }, node.label), /* @__PURE__ */ React.createElement("p", { className: `evo-node-inspector__health ${nodeStateClass(node)}`, role: "status" }, "Health: ", health), /* @__PURE__ */ React.createElement("dl", null, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("dt", null, "Stable ID"), /* @__PURE__ */ React.createElement("dd", null, node.id)), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("dt", null, "Kind"), /* @__PURE__ */ React.createElement("dd", null, node.kind)), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("dt", null, "Owner"), /* @__PURE__ */ React.createElement("dd", null, node.owner_class)), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("dt", null, "Generation scope"), /* @__PURE__ */ React.createElement("dd", null, node.generation_scope))), /* @__PURE__ */ React.createElement("section", { className: "evo-node-inspector__section" }, /* @__PURE__ */ React.createElement("h3", null, "Dimensions"), Object.keys(node.state).length === 0 ? /* @__PURE__ */ React.createElement("p", null, "Unknown.") : /* @__PURE__ */ React.createElement("dl", null, Object.entries(node.state).slice(0, MAX_INSPECTOR_ROWS).map(([key, value]) => /* @__PURE__ */ React.createElement("div", { key }, /* @__PURE__ */ React.createElement("dt", null, key), /* @__PURE__ */ React.createElement("dd", null, value ? "yes" : "no"))))), /* @__PURE__ */ React.createElement("section", { className: "evo-node-inspector__section" }, /* @__PURE__ */ React.createElement("h3", null, "Evidence references"), /* @__PURE__ */ React.createElement("p", null, "Evidence freshness is not provided by this bounded graph response."), node.evidence_refs.length === 0 ? /* @__PURE__ */ React.createElement("p", null, "None reported.") : /* @__PURE__ */ React.createElement("ul", null, node.evidence_refs.slice(0, MAX_EVIDENCE_REFS).map((reference) => /* @__PURE__ */ React.createElement("li", { key: reference }, reference)))), /* @__PURE__ */ React.createElement(NodeRows, { title: "Dependencies", values: dependencies }), /* @__PURE__ */ React.createElement(NodeRows, { title: "Dependents", values: dependents }), /* @__PURE__ */ React.createElement(NodeRows, { title: "Blockers", values: nodeBlockers }), /* @__PURE__ */ React.createElement(NodeRows, { title: "Affected capabilities", values: affectedCapabilities }));
   }
 
   // ../node_modules/cytoscape/dist/cytoscape.esm.mjs
@@ -30930,6 +30942,9 @@
   function isGraphArrowKey(key) {
     return key === "ArrowUp" || key === "ArrowDown" || key === "ArrowLeft" || key === "ArrowRight";
   }
+  function healthLabel2(node) {
+    return nodeStateClass(node).replace("evo-node--", "");
+  }
   function OrganismGraph({
     nodes: nodes3,
     edges: edges3,
@@ -30941,6 +30956,7 @@
     const containerRef = useRef(null);
     const cyRef = useRef(null);
     const elements = useMemo(() => toCytoscapeElements({ nodes: nodes3, edges: edges3 }), [nodes3, edges3]);
+    const selectedNode = nodes3.find((node) => node.id === selectedId) ?? null;
     useEffect(() => {
       if (containerRef.current === null) return;
       const cy = cytoscape({
@@ -31024,7 +31040,7 @@
         onKeyDown: handleKeyDown,
         style: { minHeight: "20rem", width: "100%" }
       }
-    ), /* @__PURE__ */ React.createElement("p", { id: "evo-organism-graph-keyboard-help", className: "evo-organism-graph__keyboard-help" }, "Use arrow keys to move between related nodes. Enter opens details. + and \u2212 zoom. 0 fits the graph. Escape clears selection."));
+    ), /* @__PURE__ */ React.createElement("p", { id: "evo-organism-graph-keyboard-help", className: "evo-organism-graph__keyboard-help" }, "Use arrow keys to move between related nodes. Enter opens details. + and \u2212 zoom. 0 fits the graph. Escape clears selection."), /* @__PURE__ */ React.createElement("p", { className: "evo-organism-graph__selection-status", role: "status" }, selectedNode === null ? "No graph node selected." : `Selected node ${selectedNode.label}. Health: ${healthLabel2(selectedNode)}.`));
   }
 
   // ../plugins/evolution/dashboard/src/components/OrganismList.tsx
@@ -31049,6 +31065,55 @@
         /* @__PURE__ */ React.createElement("span", null, node.id)
       ), outgoing.length > 0 ? /* @__PURE__ */ React.createElement("ul", { className: "evo-organism-list__relations", "aria-label": `Relationships from ${node.label}` }, outgoing.map((edge) => /* @__PURE__ */ React.createElement("li", { key: edge.id, className: edgeStyleClass(edge.kind) }, relationText(edge, nodesById)))) : null);
     })));
+  }
+
+  // ../plugins/evolution/dashboard/src/components/dialog-focus.ts
+  function focusableElements(container2) {
+    return [...container2.querySelectorAll(
+      'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+    )].filter((element3) => element3.getAttribute("aria-hidden") !== "true");
+  }
+  function useDialogFocus({ dialogRef, onClose, returnFocusRef }) {
+    const { useEffect } = SDK.hooks;
+    const restoreFocus = () => {
+      const trigger = returnFocusRef?.current;
+      if (trigger !== null && trigger !== void 0 && document.contains(trigger)) trigger.focus();
+    };
+    const close = () => {
+      onClose();
+      restoreFocus();
+    };
+    useEffect(() => {
+      const dialog = dialogRef.current;
+      if (dialog === null) return;
+      focusableElements(dialog)[0]?.focus();
+    }, []);
+    const handleKeyDown = (event3) => {
+      if (event3.key === "Escape") {
+        event3.preventDefault();
+        close();
+        return;
+      }
+      if (event3.key !== "Tab") return;
+      const dialog = dialogRef.current;
+      if (dialog === null) return;
+      const elements = focusableElements(dialog);
+      if (elements.length === 0) {
+        event3.preventDefault();
+        dialog.focus();
+        return;
+      }
+      const first2 = elements[0];
+      const last2 = elements.at(-1);
+      if (event3.shiftKey && document.activeElement === first2) {
+        event3.preventDefault();
+        last2.focus();
+      } else if (!event3.shiftKey && document.activeElement === last2) {
+        event3.preventDefault();
+        first2.focus();
+      }
+    };
+    return { close, handleKeyDown };
   }
 
   // ../plugins/evolution/dashboard/src/components/RevisionDialog.tsx
@@ -31136,9 +31201,26 @@
     if (revisions === null || revisions.items.length < 2) return /* @__PURE__ */ React.createElement("p", null, "Two immutable organism revisions are required for a semantic comparison.");
     return /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("p", null, "Compare two immutable local organism revisions."), /* @__PURE__ */ React.createElement("label", null, "Earlier revision", /* @__PURE__ */ React.createElement("select", { value: left, onChange: (event3) => setLeft(event3.target.value) }, revisions.items.map((item) => /* @__PURE__ */ React.createElement("option", { key: item.revision_id, value: item.revision_id }, item.revision_id)))), /* @__PURE__ */ React.createElement("label", null, "Later revision", /* @__PURE__ */ React.createElement("select", { value: right, onChange: (event3) => setRight(event3.target.value) }, revisions.items.map((item) => /* @__PURE__ */ React.createElement("option", { key: item.revision_id, value: item.revision_id }, item.revision_id)))), revisions.truncated ? /* @__PURE__ */ React.createElement("p", null, "Revision history is bounded. Choose from the listed immutable revisions.") : null, error3 !== null ? /* @__PURE__ */ React.createElement("p", { role: "alert" }, error3) : null, /* @__PURE__ */ React.createElement("button", { type: "button", onClick: () => void compare(), disabled: left === "" || right === "" || left === right }, "Compare revisions"), /* @__PURE__ */ React.createElement(DiffSummary, { diff: diff2 }));
   }
-  function RevisionDialog({ mode, context, onClose, onJobStarted }) {
+  function RevisionDialog({ mode, context, onClose, onJobStarted, returnFocusRef }) {
+    const { useRef } = SDK.hooks;
     const title = mode === "rebuild" ? "Rebuild organism" : "Compare revisions";
-    return /* @__PURE__ */ React.createElement("div", { className: "evo-revision-dialog", role: "dialog", "aria-modal": "true", "aria-labelledby": "evo-revision-dialog-title" }, /* @__PURE__ */ React.createElement("section", { className: "evo-revision-dialog__content" }, /* @__PURE__ */ React.createElement("header", null, /* @__PURE__ */ React.createElement("h2", { id: "evo-revision-dialog-title" }, title), /* @__PURE__ */ React.createElement("button", { type: "button", onClick: onClose, "aria-label": `Close ${title}` }, "Close")), mode === "rebuild" ? /* @__PURE__ */ React.createElement(RebuildContents, { context, onClose, onJobStarted }) : /* @__PURE__ */ React.createElement(CompareContents, null)));
+    const description = mode === "rebuild" ? "Queue a read-only local organism rebuild after reviewing the current identity and snapshot digest." : "Compare two immutable local organism revisions without changing the active revision.";
+    const dialogRef = useRef(null);
+    const { close, handleKeyDown } = useDialogFocus({ dialogRef, onClose, returnFocusRef });
+    return /* @__PURE__ */ React.createElement(
+      "div",
+      {
+        ref: dialogRef,
+        className: "evo-revision-dialog",
+        role: "dialog",
+        "aria-modal": "true",
+        "aria-labelledby": "evo-revision-dialog-title",
+        "aria-describedby": "evo-revision-dialog-description",
+        tabIndex: -1,
+        onKeyDown: handleKeyDown
+      },
+      /* @__PURE__ */ React.createElement("section", { className: "evo-revision-dialog__content" }, /* @__PURE__ */ React.createElement("header", null, /* @__PURE__ */ React.createElement("h2", { id: "evo-revision-dialog-title" }, title), /* @__PURE__ */ React.createElement("button", { type: "button", onClick: close, "aria-label": `Close ${title}` }, "Close")), /* @__PURE__ */ React.createElement("p", { id: "evo-revision-dialog-description" }, description), mode === "rebuild" ? /* @__PURE__ */ React.createElement(RebuildContents, { context, onClose: close, onJobStarted }) : /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement(CompareContents, null), /* @__PURE__ */ React.createElement("footer", null, /* @__PURE__ */ React.createElement("button", { type: "button", onClick: close }, "Cancel"))))
+    );
   }
 
   // ../plugins/evolution/dashboard/src/components/OrganismView.tsx
@@ -31163,11 +31245,14 @@
     const [kinds, setKinds] = useState(/* @__PURE__ */ new Set());
     const [surface, setSurface] = useState("graph");
     const [selectedId, setSelectedId] = useState(null);
+    const [inspectorOpen, setInspectorOpen] = useState(false);
     const [graphRootId, setGraphRootId] = useState(null);
     const [dialog, setDialog] = useState(null);
     const [mutationContext, setMutationContext] = useState(null);
     const [actionError, setActionError] = useState(null);
     const [initializing, setInitializing] = useState(false);
+    const dialogTriggerRef = SDK.hooks.useRef(null);
+    const inspectorTriggerRef = SDK.hooks.useRef(null);
     const gnothiIsUnsafe = snapshot?.gnothi.state === "blocked" || snapshot?.gnothi.state === "corrupt";
     const hasSafeGraph = snapshot !== null && snapshot.state !== "missing" && snapshot.state !== "blocked" && snapshot.state !== "corrupt" && !gnothiIsUnsafe && snapshot.gnothi.revision_id !== null;
     const expectedRevision = snapshot?.gnothi.revision_id ?? void 0;
@@ -31222,6 +31307,7 @@
       setKinds(/* @__PURE__ */ new Set());
       setGraphRootId(null);
       setSelectedId(null);
+      setInspectorOpen(false);
     }, []);
     const expandSelectedNeighborhood = useCallback(() => {
       if (selectedId !== null) setGraphRootId(selectedId);
@@ -31250,10 +31336,19 @@
       }
     }, [initializing, onRefresh]);
     const openInspector = useCallback((id2) => {
+      if (typeof document !== "undefined" && document.activeElement instanceof HTMLElement) {
+        inspectorTriggerRef.current = document.activeElement;
+      }
       setSelectedId(id2);
+      setInspectorOpen(true);
       if (typeof document !== "undefined") {
         globalThis.setTimeout(() => document.getElementById("evo-node-inspector")?.focus(), 0);
       }
+    }, []);
+    const closeInspector = useCallback(() => {
+      setInspectorOpen(false);
+      const trigger = inspectorTriggerRef.current;
+      if (trigger !== null && typeof document !== "undefined" && document.contains(trigger)) trigger.focus();
     }, []);
     const onJobStarted = useCallback((job) => {
       onTrackJob(job);
@@ -31271,30 +31366,56 @@
     const stateWarning = stateNotice(snapshot);
     const incompleteNotice = graph === null ? null : truncationNotice(graph);
     const filtered = presentation?.graph ?? filterGraph({ nodes: [], edges: [] }, filters);
-    return /* @__PURE__ */ React.createElement("section", { className: "evo-organism" }, /* @__PURE__ */ React.createElement("header", { className: "evo-organism__header" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("h2", null, "Organism"), /* @__PURE__ */ React.createElement("p", null, "Revision ", snapshot.gnothi.revision_id ?? "unavailable", " \xB7 ", snapshot.gnothi.node_count ?? 0, " nodes \xB7 ", snapshot.gnothi.edge_count ?? 0, " edges")), /* @__PURE__ */ React.createElement("div", { className: "evo-organism__actions" }, /* @__PURE__ */ React.createElement("button", { type: "button", onClick: () => void openRebuild() }, "Rebuild organism"), /* @__PURE__ */ React.createElement("button", { type: "button", onClick: () => setDialog("compare") }, "Compare revisions"))), stateWarning !== null ? /* @__PURE__ */ React.createElement("p", { className: `evo-organism__notice evo-organism__notice--${snapshot.state}` }, stateWarning) : null, graphError !== null ? /* @__PURE__ */ React.createElement("p", { className: "evo-organism__notice", role: "status" }, "The last valid graph remains visible. ", graphError) : null, incompleteNotice !== null ? /* @__PURE__ */ React.createElement("p", { className: "evo-organism__notice evo-organism__notice--truncated" }, incompleteNotice) : null, actionError !== null ? /* @__PURE__ */ React.createElement("p", { role: "alert" }, actionError) : null, /* @__PURE__ */ React.createElement("section", { className: "evo-organism__filters", "aria-label": "Organism graph filters" }, /* @__PURE__ */ React.createElement("label", null, "Search stable ID or label", /* @__PURE__ */ React.createElement("input", { value: search, onChange: (event3) => setSearch(event3.target.value), placeholder: "Filter graph" })), /* @__PURE__ */ React.createElement("fieldset", null, /* @__PURE__ */ React.createElement("legend", null, "Node kinds"), FILTER_KINDS.map((kind) => /* @__PURE__ */ React.createElement("label", { key: kind }, /* @__PURE__ */ React.createElement("input", { type: "checkbox", checked: kinds.has(kind), onChange: () => toggleKind(kind) }), kind))), /* @__PURE__ */ React.createElement("button", { type: "button", onClick: resetFilters }, "Reset filters and graph"), /* @__PURE__ */ React.createElement("div", { className: "evo-organism__surface-toggle", "aria-label": "Organism presentation" }, /* @__PURE__ */ React.createElement("button", { type: "button", "aria-pressed": surface === "graph", onClick: () => setSurface("graph") }, "Graph"), /* @__PURE__ */ React.createElement("button", { type: "button", "aria-pressed": surface === "list", onClick: () => setSurface("list") }, "List"))), /* @__PURE__ */ React.createElement("section", { className: "evo-organism__legend", "aria-label": "Relationship legend" }, /* @__PURE__ */ React.createElement("p", null, "Provides: solid arrow \xB7 Requires: dotted arrow \xB7 Depends on: dashed arrow"), /* @__PURE__ */ React.createElement("p", null, "Health states: healthy, degraded, stale, missing, unknown")), graphLoading && graph === null ? /* @__PURE__ */ React.createElement("p", { role: "status" }, "Loading the current immutable graph revision\u2026") : null, graph?.truncated && selectedNode !== null ? /* @__PURE__ */ React.createElement("button", { type: "button", onClick: expandSelectedNeighborhood, disabled: graphRootId === selectedNode.id }, graphRootId === selectedNode.id ? "Showing selected neighborhood" : "Expand selected neighborhood") : null, presentation !== null ? /* @__PURE__ */ React.createElement("div", { className: "evo-organism__surface" }, /* @__PURE__ */ React.createElement("div", { className: "evo-organism__visualization" }, surface === "graph" ? /* @__PURE__ */ React.createElement(
-      OrganismGraph,
+    return /* @__PURE__ */ React.createElement("section", { className: "evo-organism" }, /* @__PURE__ */ React.createElement("header", { className: "evo-organism__header" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("h2", null, "Organism"), /* @__PURE__ */ React.createElement("p", null, "Revision ", snapshot.gnothi.revision_id ?? "unavailable", " \xB7 ", snapshot.gnothi.node_count ?? 0, " nodes \xB7 ", snapshot.gnothi.edge_count ?? 0, " edges")), /* @__PURE__ */ React.createElement("div", { className: "evo-organism__actions" }, /* @__PURE__ */ React.createElement("button", { type: "button", onClick: (event3) => {
+      dialogTriggerRef.current = event3.currentTarget;
+      void openRebuild();
+    } }, "Rebuild organism"), /* @__PURE__ */ React.createElement("button", { type: "button", onClick: (event3) => {
+      dialogTriggerRef.current = event3.currentTarget;
+      setDialog("compare");
+    } }, "Compare revisions"))), stateWarning !== null ? /* @__PURE__ */ React.createElement("p", { className: `evo-organism__notice evo-organism__notice--${snapshot.state}` }, stateWarning) : null, graphError !== null ? /* @__PURE__ */ React.createElement("p", { className: "evo-organism__notice", role: "status" }, "The last valid graph remains visible. ", graphError) : null, incompleteNotice !== null ? /* @__PURE__ */ React.createElement("p", { className: "evo-organism__notice evo-organism__notice--truncated" }, incompleteNotice) : null, actionError !== null ? /* @__PURE__ */ React.createElement("p", { role: "alert" }, actionError) : null, /* @__PURE__ */ React.createElement("section", { className: "evo-organism__filters", "aria-label": "Organism graph filters" }, /* @__PURE__ */ React.createElement("label", null, "Search stable ID or label", /* @__PURE__ */ React.createElement("input", { value: search, onChange: (event3) => setSearch(event3.target.value), placeholder: "Filter graph" })), /* @__PURE__ */ React.createElement("fieldset", null, /* @__PURE__ */ React.createElement("legend", null, "Node kinds"), FILTER_KINDS.map((kind) => /* @__PURE__ */ React.createElement("label", { key: kind }, /* @__PURE__ */ React.createElement("input", { type: "checkbox", checked: kinds.has(kind), onChange: () => toggleKind(kind) }), kind))), /* @__PURE__ */ React.createElement("button", { type: "button", onClick: resetFilters }, "Reset filters and graph"), /* @__PURE__ */ React.createElement("div", { className: "evo-organism__surface-toggle", role: "tablist", "aria-label": "Organism presentation" }, /* @__PURE__ */ React.createElement("button", { id: "evo-organism-graph-tab", type: "button", role: "tab", "aria-controls": "evo-organism-graph-panel", "aria-selected": surface === "graph", onClick: () => setSurface("graph") }, "Graph"), /* @__PURE__ */ React.createElement("button", { id: "evo-organism-list-tab", type: "button", role: "tab", "aria-controls": "evo-organism-list-panel", "aria-selected": surface === "list", onClick: () => setSurface("list") }, "List"))), /* @__PURE__ */ React.createElement("section", { className: "evo-organism__legend", "aria-label": "Relationship legend" }, /* @__PURE__ */ React.createElement("p", null, "Provides: solid arrow \xB7 Requires: dotted arrow \xB7 Depends on: dashed arrow"), /* @__PURE__ */ React.createElement("p", null, "Health states: healthy, degraded, stale, missing, unknown")), graphLoading && graph === null ? /* @__PURE__ */ React.createElement("p", { role: "status" }, "Loading the current immutable graph revision\u2026") : null, graph?.truncated && selectedNode !== null ? /* @__PURE__ */ React.createElement("button", { type: "button", onClick: expandSelectedNeighborhood, disabled: graphRootId === selectedNode.id }, graphRootId === selectedNode.id ? "Showing selected neighborhood" : "Expand selected neighborhood") : null, presentation !== null ? /* @__PURE__ */ React.createElement("div", { className: "evo-organism__surface" }, /* @__PURE__ */ React.createElement(
+      "div",
       {
-        nodes: presentation.graph.nodes,
-        edges: presentation.graph.edges,
-        selectedId,
-        onSelect: setSelectedId,
-        onOpenInspector: openInspector
-      }
-    ) : /* @__PURE__ */ React.createElement(
-      OrganismList,
+        id: surface === "graph" ? "evo-organism-graph-panel" : "evo-organism-list-panel",
+        className: "evo-organism__visualization",
+        role: "tabpanel",
+        "aria-labelledby": surface === "graph" ? "evo-organism-graph-tab" : "evo-organism-list-tab"
+      },
+      surface === "graph" ? /* @__PURE__ */ React.createElement(
+        OrganismGraph,
+        {
+          nodes: presentation.graph.nodes,
+          edges: presentation.graph.edges,
+          selectedId,
+          onSelect: setSelectedId,
+          onOpenInspector: openInspector
+        }
+      ) : /* @__PURE__ */ React.createElement(
+        OrganismList,
+        {
+          nodes: presentation.list.nodes,
+          edges: presentation.list.edges,
+          selectedId,
+          onSelect: openInspector
+        }
+      )
+    ), /* @__PURE__ */ React.createElement(
+      NodeInspector,
       {
-        nodes: presentation.list.nodes,
-        edges: presentation.list.edges,
-        selectedId,
-        onSelect: openInspector
+        node: selectedNode,
+        nodes: filtered.nodes,
+        edges: filtered.edges,
+        blockers: graph?.blockers ?? [],
+        drawerOpen: inspectorOpen,
+        onClose: closeInspector
       }
-    )), /* @__PURE__ */ React.createElement(NodeInspector, { node: selectedNode, nodes: filtered.nodes, edges: filtered.edges, blockers: graph?.blockers ?? [] })) : null, dialog !== null ? /* @__PURE__ */ React.createElement(
+    )) : null, dialog !== null ? /* @__PURE__ */ React.createElement(
       RevisionDialog,
       {
         mode: dialog,
         context: dialog === "rebuild" ? mutationContext : null,
         onClose: () => setDialog(null),
-        onJobStarted
+        onJobStarted,
+        returnFocusRef: dialogTriggerRef
       }
     ) : null);
   }
@@ -31683,7 +31804,8 @@
     action,
     onClose,
     onConfirmed,
-    onStale
+    onStale,
+    returnFocusRef
   }) {
     const { useEffect, useRef, useState } = SDK.hooks;
     const [prepared, setPrepared] = useState(null);
@@ -31692,7 +31814,9 @@
     const [error3, setError] = useState(null);
     const [hasExpired, setHasExpired] = useState(false);
     const confirmedRef = useRef(false);
+    const dialogRef = useRef(null);
     const title = action === "activate" ? "Activate Telos revision" : "Roll back Telos revision";
+    const { close, handleKeyDown } = useDialogFocus({ dialogRef, onClose, returnFocusRef });
     useEffect(() => {
       if (prepared === null) {
         setHasExpired(false);
@@ -31724,7 +31848,7 @@
     const handleStale = async (nextError) => {
       const recovery = staleTransitionRecovery(nextError);
       if (recovery === null) return false;
-      onClose();
+      close();
       await onStale(recovery.warning);
       return true;
     };
@@ -31760,7 +31884,7 @@
           phrase
         });
         await onConfirmed();
-        onClose();
+        close();
       } catch (nextError) {
         if (!await handleStale(nextError)) setError(errorMessage4(nextError));
       } finally {
@@ -31769,7 +31893,7 @@
     };
     const isPreparedExpired = prepared !== null && (hasExpired || expired(prepared));
     const canConfirm = prepared !== null && !isPreparedExpired && isExactConfirmationPhrase(phrase, prepared.required_phrase) && !submitting && !confirmedRef.current;
-    return /* @__PURE__ */ React.createElement("div", { className: "evo-confirmation-dialog", role: "dialog", "aria-modal": "true", "aria-labelledby": "evo-telos-confirmation-title", "aria-describedby": "evo-telos-confirmation-description" }, /* @__PURE__ */ React.createElement("section", { className: "evo-confirmation-dialog__content" }, /* @__PURE__ */ React.createElement("header", null, /* @__PURE__ */ React.createElement("h2", { id: "evo-telos-confirmation-title" }, title)), /* @__PURE__ */ React.createElement("p", { id: "evo-telos-confirmation-description" }, "This is a consequential local Telos pointer change. Prepare the server-issued confirmation before it can be confirmed once."), /* @__PURE__ */ React.createElement("dl", null, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("dt", null, "Organism"), /* @__PURE__ */ React.createElement("dd", null, prepared?.organism_id ?? organismId)), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("dt", null, "Current digest"), /* @__PURE__ */ React.createElement("dd", null, prepared?.current_digest ?? currentDigest)), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("dt", null, "Target digest"), /* @__PURE__ */ React.createElement("dd", null, prepared?.target_digest ?? targetDigest)), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("dt", null, "Action"), /* @__PURE__ */ React.createElement("dd", null, action)), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("dt", null, "Consequences"), /* @__PURE__ */ React.createElement("dd", null, confirmationConsequences(action))), prepared !== null ? /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("dt", null, "Expires"), /* @__PURE__ */ React.createElement("dd", null, prepared.expires_at)) : null), prepared === null ? /* @__PURE__ */ React.createElement("button", { type: "button", onClick: () => void prepare(), disabled: submitting }, submitting ? "Preparing\u2026" : "Prepare confirmation") : /* @__PURE__ */ React.createElement("label", null, "Type the exact server phrase", /* @__PURE__ */ React.createElement("input", { value: phrase, onChange: (event3) => setPhrase(event3.target.value), autoComplete: "off", "aria-describedby": "evo-telos-required-phrase", disabled: submitting || isPreparedExpired }), /* @__PURE__ */ React.createElement("span", { id: "evo-telos-required-phrase" }, prepared.required_phrase)), prepared !== null && isPreparedExpired ? /* @__PURE__ */ React.createElement("p", { role: "alert" }, "This confirmation expired. Close it and prepare a new transition.") : null, error3 !== null ? /* @__PURE__ */ React.createElement("p", { role: "alert" }, error3) : null, /* @__PURE__ */ React.createElement("footer", null, /* @__PURE__ */ React.createElement("button", { type: "button", onClick: onClose, disabled: submitting }, "Cancel"), prepared !== null ? /* @__PURE__ */ React.createElement("button", { type: "button", onClick: () => void confirm(), disabled: !canConfirm }, "Confirm ", action) : null)));
+    return /* @__PURE__ */ React.createElement("div", { ref: dialogRef, className: "evo-confirmation-dialog", role: "dialog", "aria-modal": "true", "aria-labelledby": "evo-telos-confirmation-title", "aria-describedby": "evo-telos-confirmation-description", tabIndex: -1, onKeyDown: handleKeyDown }, /* @__PURE__ */ React.createElement("section", { className: "evo-confirmation-dialog__content" }, /* @__PURE__ */ React.createElement("header", null, /* @__PURE__ */ React.createElement("h2", { id: "evo-telos-confirmation-title" }, title)), /* @__PURE__ */ React.createElement("p", { id: "evo-telos-confirmation-description" }, "This is a consequential local Telos pointer change. Prepare the server-issued confirmation before it can be confirmed once."), /* @__PURE__ */ React.createElement("dl", null, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("dt", null, "Organism"), /* @__PURE__ */ React.createElement("dd", null, prepared?.organism_id ?? organismId)), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("dt", null, "Current digest"), /* @__PURE__ */ React.createElement("dd", null, prepared?.current_digest ?? currentDigest)), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("dt", null, "Target digest"), /* @__PURE__ */ React.createElement("dd", null, prepared?.target_digest ?? targetDigest)), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("dt", null, "Action"), /* @__PURE__ */ React.createElement("dd", null, action)), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("dt", null, "Consequences"), /* @__PURE__ */ React.createElement("dd", null, confirmationConsequences(action))), prepared !== null ? /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("dt", null, "Expires"), /* @__PURE__ */ React.createElement("dd", null, prepared.expires_at)) : null), prepared === null ? /* @__PURE__ */ React.createElement("button", { type: "button", onClick: () => void prepare(), disabled: submitting }, submitting ? "Preparing\u2026" : "Prepare confirmation") : /* @__PURE__ */ React.createElement("label", null, "Type the exact server phrase", /* @__PURE__ */ React.createElement("input", { value: phrase, onChange: (event3) => setPhrase(event3.target.value), autoComplete: "off", "aria-describedby": "evo-telos-required-phrase", disabled: submitting || isPreparedExpired }), /* @__PURE__ */ React.createElement("span", { id: "evo-telos-required-phrase" }, prepared.required_phrase)), prepared !== null && isPreparedExpired ? /* @__PURE__ */ React.createElement("p", { role: "alert" }, "This confirmation expired. Close it and prepare a new transition.") : null, error3 !== null ? /* @__PURE__ */ React.createElement("p", { role: "alert" }, error3) : null, /* @__PURE__ */ React.createElement("footer", null, /* @__PURE__ */ React.createElement("button", { type: "button", onClick: close, disabled: submitting }, "Cancel"), prepared !== null ? /* @__PURE__ */ React.createElement("button", { type: "button", onClick: () => void confirm(), disabled: !canConfirm }, "Confirm ", action) : null)));
   }
 
   // ../plugins/evolution/dashboard/src/components/TelosDiff.tsx
@@ -31834,7 +31958,7 @@
     return revisions.find((item) => item?.digest === digest) ?? null;
   }
   function TelosView({ snapshot, onRefresh }) {
-    const { useCallback, useEffect, useMemo, useState } = SDK.hooks;
+    const { useCallback, useEffect, useMemo, useRef, useState } = SDK.hooks;
     const [telos, setTelos] = useState(null);
     const [draft, setDraft] = useState(null);
     const [savedRevision, setSavedRevision] = useState(null);
@@ -31844,6 +31968,7 @@
     const [saving, setSaving] = useState(false);
     const [error3, setError] = useState(null);
     const [warning, setWarning] = useState(null);
+    const transitionTriggerRef = useRef(null);
     const load = useCallback(async () => {
       setLoading(true);
       try {
@@ -31901,7 +32026,13 @@
     if (unsafe) return /* @__PURE__ */ React.createElement("section", { className: "evo-telos", "aria-live": "polite" }, /* @__PURE__ */ React.createElement("h2", null, "Telos is unavailable"), /* @__PURE__ */ React.createElement("p", null, "Telos details and changes are hidden until the local organism is safe to inspect."));
     if (telos === null || draft === null) return /* @__PURE__ */ React.createElement("section", { className: "evo-telos" }, /* @__PURE__ */ React.createElement("p", { role: "alert" }, error3 ?? "Telos data is unavailable."));
     const revisions = [telos.active_revision, ...telos.history, savedRevision].filter((item) => item !== null).filter((item, index, items) => items.findIndex((candidate) => candidate.digest === item.digest) === index);
-    return /* @__PURE__ */ React.createElement("section", { className: "evo-telos", "aria-labelledby": "evo-telos-heading" }, /* @__PURE__ */ React.createElement("header", null, /* @__PURE__ */ React.createElement("h2", { id: "evo-telos-heading" }, "Telos"), /* @__PURE__ */ React.createElement("p", null, "Active digest: ", telos.active_digest ?? "No active Telos revision")), warning !== null ? /* @__PURE__ */ React.createElement("p", { role: "status" }, warning) : null, error3 !== null ? /* @__PURE__ */ React.createElement("p", { role: "alert" }, error3) : null, /* @__PURE__ */ React.createElement(TelosEditor, { draft, parentDigest: telos.active_digest, disabled: saving, onChange: setDraft }), /* @__PURE__ */ React.createElement("button", { type: "button", onClick: () => void saveDraft(), disabled: saving }, saving ? "Saving inert draft\u2026" : "Save inert Telos draft"), /* @__PURE__ */ React.createElement("section", { "aria-labelledby": "evo-telos-history-heading" }, /* @__PURE__ */ React.createElement("h3", { id: "evo-telos-history-heading" }, "Bounded revision history"), /* @__PURE__ */ React.createElement("p", null, "The latest ", HISTORY_LIMIT, " inactive revisions are available for comparison and transition."), telos.truncated ? /* @__PURE__ */ React.createElement("p", null, "Additional immutable Telos history exists but is not displayed in this bounded view.") : null, /* @__PURE__ */ React.createElement("label", null, "Compare or transition target", /* @__PURE__ */ React.createElement("select", { value: selectedDigest ?? "", onChange: (event3) => setSelectedDigest(event3.target.value || null) }, /* @__PURE__ */ React.createElement("option", { value: "" }, "Select an immutable Telos revision"), revisions.map((revision) => /* @__PURE__ */ React.createElement("option", { key: revision.digest, value: revision.digest }, revision.digest, revision.digest === telos.active_digest ? " (active)" : ""))))), /* @__PURE__ */ React.createElement(TelosDiff, { current, target: selected }), /* @__PURE__ */ React.createElement("div", { className: "evo-telos__actions" }, /* @__PURE__ */ React.createElement("button", { type: "button", onClick: () => setDialogAction("activate"), disabled: !canTransition }, "Activate selected revision"), /* @__PURE__ */ React.createElement("button", { type: "button", onClick: () => setDialogAction("rollback"), disabled: !canTransition }, "Roll back to selected revision")), dialogAction !== null && current !== null && selected !== null ? /* @__PURE__ */ React.createElement(
+    return /* @__PURE__ */ React.createElement("section", { className: "evo-telos", "aria-labelledby": "evo-telos-heading" }, /* @__PURE__ */ React.createElement("header", null, /* @__PURE__ */ React.createElement("h2", { id: "evo-telos-heading" }, "Telos"), /* @__PURE__ */ React.createElement("p", null, "Active digest: ", telos.active_digest ?? "No active Telos revision")), warning !== null ? /* @__PURE__ */ React.createElement("p", { role: "status" }, warning) : null, error3 !== null ? /* @__PURE__ */ React.createElement("p", { role: "alert" }, error3) : null, /* @__PURE__ */ React.createElement(TelosEditor, { draft, parentDigest: telos.active_digest, disabled: saving, onChange: setDraft }), /* @__PURE__ */ React.createElement("button", { type: "button", onClick: () => void saveDraft(), disabled: saving }, saving ? "Saving inert draft\u2026" : "Save inert Telos draft"), /* @__PURE__ */ React.createElement("section", { "aria-labelledby": "evo-telos-history-heading" }, /* @__PURE__ */ React.createElement("h3", { id: "evo-telos-history-heading" }, "Bounded revision history"), /* @__PURE__ */ React.createElement("p", null, "The latest ", HISTORY_LIMIT, " inactive revisions are available for comparison and transition."), telos.truncated ? /* @__PURE__ */ React.createElement("p", null, "Additional immutable Telos history exists but is not displayed in this bounded view.") : null, /* @__PURE__ */ React.createElement("label", null, "Compare or transition target", /* @__PURE__ */ React.createElement("select", { value: selectedDigest ?? "", onChange: (event3) => setSelectedDigest(event3.target.value || null) }, /* @__PURE__ */ React.createElement("option", { value: "" }, "Select an immutable Telos revision"), revisions.map((revision) => /* @__PURE__ */ React.createElement("option", { key: revision.digest, value: revision.digest }, revision.digest, revision.digest === telos.active_digest ? " (active)" : ""))))), /* @__PURE__ */ React.createElement(TelosDiff, { current, target: selected }), /* @__PURE__ */ React.createElement("div", { className: "evo-telos__actions" }, /* @__PURE__ */ React.createElement("button", { type: "button", onClick: (event3) => {
+      transitionTriggerRef.current = event3.currentTarget;
+      setDialogAction("activate");
+    }, disabled: !canTransition }, "Activate selected revision"), /* @__PURE__ */ React.createElement("button", { type: "button", onClick: (event3) => {
+      transitionTriggerRef.current = event3.currentTarget;
+      setDialogAction("rollback");
+    }, disabled: !canTransition }, "Roll back to selected revision")), dialogAction !== null && current !== null && selected !== null ? /* @__PURE__ */ React.createElement(
       StrongConfirmationDialog,
       {
         organismId: snapshot.organism?.id_prefix ?? "local organism",
@@ -31913,7 +32044,8 @@
           await onRefresh();
           await load();
         },
-        onStale: recoverStale
+        onStale: recoverStale,
+        returnFocusRef: transitionTriggerRef
       }
     ) : null);
   }
@@ -31930,25 +32062,38 @@
     const [view, setView] = useState(initialView());
     const store = useEvolutionSnapshot();
     const facet = store.snapshot === null ? null : organismFacet(store.snapshot, null);
-    return /* @__PURE__ */ React.createElement("main", { className: "evo-shell" }, /* @__PURE__ */ React.createElement("header", { className: "evo-shell__header" }, /* @__PURE__ */ React.createElement("h1", null, "Evolution"), /* @__PURE__ */ React.createElement("p", null, "Local organism \xB7 all profiles"), facet !== null && facet.organism !== null ? /* @__PURE__ */ React.createElement("p", null, "Organism ", facet.organism.id_prefix, " \xB7 Lineage ", facet.organism.lineage_prefix) : null), /* @__PURE__ */ React.createElement("nav", { className: "evo-shell__nav", "aria-label": "Evolution views" }, VIEWS.map((item) => /* @__PURE__ */ React.createElement(
+    return /* @__PURE__ */ React.createElement("main", { className: "evo-shell" }, /* @__PURE__ */ React.createElement("header", { className: "evo-shell__header" }, /* @__PURE__ */ React.createElement("h1", null, "Evolution"), /* @__PURE__ */ React.createElement("p", null, "Local organism \xB7 all profiles"), facet !== null && facet.organism !== null ? /* @__PURE__ */ React.createElement("p", null, "Organism ", facet.organism.id_prefix, " \xB7 Lineage ", facet.organism.lineage_prefix) : null), /* @__PURE__ */ React.createElement("nav", { className: "evo-shell__nav", role: "tablist", "aria-label": "Evolution views" }, VIEWS.map((item) => /* @__PURE__ */ React.createElement(
       "button",
       {
         key: item.id,
         type: "button",
-        "aria-current": view === item.id ? "page" : void 0,
+        id: `evo-view-tab-${item.id}`,
+        role: "tab",
+        "aria-controls": `evo-view-panel-${item.id}`,
+        "aria-selected": view === item.id,
         onClick: () => setView(item.id)
       },
       item.label
-    ))), store.warning !== null ? /* @__PURE__ */ React.createElement("section", { className: "evo-warning", role: "status", "aria-live": "polite" }, /* @__PURE__ */ React.createElement("p", null, store.warning.message), /* @__PURE__ */ React.createElement("button", { type: "button", onClick: () => void store.refresh(), disabled: store.refreshing }, "Refresh now")) : null, store.activeJob !== null ? /* @__PURE__ */ React.createElement("section", { className: "evo-job-strip", role: "status", "aria-live": "polite" }, /* @__PURE__ */ React.createElement("p", null, store.activeJob.kind === "observer_scan" ? scanJobProgress(store.activeJob) : `${store.activeJob.kind.replaceAll("_", " ")}: ${store.activeJob.state} (${store.activeJob.progress}%)`)) : null, /* @__PURE__ */ React.createElement(StatusRail, { snapshot: store.snapshot, loading: store.loading }), /* @__PURE__ */ React.createElement("section", { className: "evo-shell__content", "aria-label": `${VIEWS.find((item) => item.id === view)?.label ?? "Evolution"} view` }, view === "overview" ? /* @__PURE__ */ React.createElement(
-      OverviewView,
+    ))), store.warning !== null ? /* @__PURE__ */ React.createElement("section", { className: "evo-warning", role: "status", "aria-live": "polite" }, /* @__PURE__ */ React.createElement("p", null, store.warning.message), /* @__PURE__ */ React.createElement("button", { type: "button", onClick: () => void store.refresh(), disabled: store.refreshing }, "Refresh now")) : null, store.activeJob !== null ? /* @__PURE__ */ React.createElement("section", { className: "evo-job-strip", role: "status", "aria-live": "polite" }, /* @__PURE__ */ React.createElement("p", null, store.activeJob.kind === "observer_scan" ? scanJobProgress(store.activeJob) : `${store.activeJob.kind.replaceAll("_", " ")}: ${store.activeJob.state} (${store.activeJob.progress}%)`)) : null, /* @__PURE__ */ React.createElement(StatusRail, { snapshot: store.snapshot, loading: store.loading }), /* @__PURE__ */ React.createElement(
+      "section",
       {
-        snapshot: store.snapshot,
-        activeJob: store.activeJob,
-        onRefresh: store.refresh,
-        onTrackJob: store.trackJob,
-        onNavigate: setView
-      }
-    ) : view === "organism" ? /* @__PURE__ */ React.createElement(OrganismView, { snapshot: store.snapshot, onRefresh: store.refresh, onTrackJob: store.trackJob }) : view === "telos" ? /* @__PURE__ */ React.createElement(TelosView, { snapshot: store.snapshot, onRefresh: store.refresh }) : /* @__PURE__ */ React.createElement(PipelineView, { snapshot: store.snapshot, onRefresh: store.refresh })));
+        id: `evo-view-panel-${view}`,
+        className: "evo-shell__content",
+        role: "tabpanel",
+        "aria-labelledby": `evo-view-tab-${view}`,
+        "aria-label": `${VIEWS.find((item) => item.id === view)?.label ?? "Evolution"} view`
+      },
+      view === "overview" ? /* @__PURE__ */ React.createElement(
+        OverviewView,
+        {
+          snapshot: store.snapshot,
+          activeJob: store.activeJob,
+          onRefresh: store.refresh,
+          onTrackJob: store.trackJob,
+          onNavigate: setView
+        }
+      ) : view === "organism" ? /* @__PURE__ */ React.createElement(OrganismView, { snapshot: store.snapshot, onRefresh: store.refresh, onTrackJob: store.trackJob }) : view === "telos" ? /* @__PURE__ */ React.createElement(TelosView, { snapshot: store.snapshot, onRefresh: store.refresh }) : /* @__PURE__ */ React.createElement(PipelineView, { snapshot: store.snapshot, onRefresh: store.refresh })
+    ));
   }
 
   // ../plugins/evolution/dashboard/src/index.tsx

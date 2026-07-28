@@ -7,11 +7,18 @@ void React;
 const MAX_INSPECTOR_ROWS = 12;
 const MAX_EVIDENCE_REFS = 8;
 
+function healthLabel(node: GraphNode): string {
+  const stateClass = nodeStateClass(node);
+  return stateClass.replace("evo-node--", "");
+}
+
 export interface NodeInspectorProps {
   node: GraphNode | null;
   nodes: GraphNode[];
   edges: GraphEdge[];
   blockers: GraphNode[];
+  drawerOpen?: boolean;
+  onClose?(): void;
 }
 
 function nodeById(nodes: GraphNode[], id: string): GraphNode | null {
@@ -41,12 +48,21 @@ function relatedNodes(node: GraphNode, edges: GraphEdge[], nodes: GraphNode[], d
     .sort((left, right) => left.id.localeCompare(right.id));
 }
 
-export function NodeInspector({ node, nodes, edges, blockers }: NodeInspectorProps): React.ReactElement {
+export function NodeInspector({ node, nodes, edges, blockers, drawerOpen = false, onClose }: NodeInspectorProps): React.ReactElement {
+  const close = () => onClose?.();
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLElement>) => {
+    if (event.key === "Escape" && drawerOpen && onClose !== undefined) {
+      event.preventDefault();
+      close();
+    }
+  };
+
   if (node === null) {
     return (
-      <aside id="evo-node-inspector" className="evo-node-inspector" tabIndex={-1} aria-label="Selected organism node">
+      <aside id="evo-node-inspector" className="evo-node-inspector" data-drawer-open={drawerOpen} tabIndex={-1} aria-label="Selected organism node" onKeyDown={handleKeyDown}>
         <h2>Selected node</h2>
         <p>Select a graph node or a list row to inspect bounded local details.</p>
+        {onClose !== undefined ? <button className="evo-node-inspector__close" type="button" onClick={close}>Close node inspector</button> : null}
       </aside>
     );
   }
@@ -57,11 +73,14 @@ export function NodeInspector({ node, nodes, edges, blockers }: NodeInspectorPro
     .filter(item => item.kind === "capability")
     .filter((item, index, list) => list.findIndex(candidate => candidate.id === item.id) === index);
   const nodeBlockers = blockers.filter(blocker => blocker.id === node.id || dependencies.some(item => item.id === blocker.id) || dependents.some(item => item.id === blocker.id));
+  const health = healthLabel(node);
 
   return (
-    <aside id="evo-node-inspector" className="evo-node-inspector" tabIndex={-1} aria-label={`Selected node ${node.label}`}>
+    <aside id="evo-node-inspector" className="evo-node-inspector" data-drawer-open={drawerOpen} tabIndex={-1} aria-label={`Selected node ${node.label}`} onKeyDown={handleKeyDown}>
       <h2>Selected node</h2>
-      <p className={nodeStateClass(node)}>{node.label}</p>
+      {onClose !== undefined ? <button className="evo-node-inspector__close" type="button" onClick={close}>Close node inspector</button> : null}
+      <p className="evo-node-inspector__label">{node.label}</p>
+      <p className={`evo-node-inspector__health ${nodeStateClass(node)}`} role="status">Health: {health}</p>
       <dl>
         <div><dt>Stable ID</dt><dd>{node.id}</dd></div>
         <div><dt>Kind</dt><dd>{node.kind}</dd></div>

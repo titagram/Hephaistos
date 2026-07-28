@@ -1,6 +1,6 @@
 import cytoscape from "cytoscape";
 import { React, SDK } from "../sdk";
-import { neighborId, toCytoscapeElements, type GraphArrowKey } from "../graph-model";
+import { neighborId, nodeStateClass, toCytoscapeElements, type GraphArrowKey } from "../graph-model";
 import type { GraphEdge, GraphNode } from "../types";
 
 void React;
@@ -71,6 +71,10 @@ function isGraphArrowKey(key: string): key is GraphArrowKey {
   return key === "ArrowUp" || key === "ArrowDown" || key === "ArrowLeft" || key === "ArrowRight";
 }
 
+function healthLabel(node: GraphNode): string {
+  return nodeStateClass(node).replace("evo-node--", "");
+}
+
 export function OrganismGraph({
   nodes,
   edges,
@@ -82,6 +86,7 @@ export function OrganismGraph({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const cyRef = useRef<cytoscape.Core | null>(null);
   const elements = useMemo(() => toCytoscapeElements({ nodes, edges }), [nodes, edges]);
+  const selectedNode = nodes.find(node => node.id === selectedId) ?? null;
 
   useEffect(() => {
     if (containerRef.current === null) return;
@@ -178,6 +183,9 @@ export function OrganismGraph({
       />
       <p id="evo-organism-graph-keyboard-help" className="evo-organism-graph__keyboard-help">
         Use arrow keys to move between related nodes. Enter opens details. + and − zoom. 0 fits the graph. Escape clears selection.
+      </p>
+      <p className="evo-organism-graph__selection-status" role="status">
+        {selectedNode === null ? "No graph node selected." : `Selected node ${selectedNode.label}. Health: ${healthLabel(selectedNode)}.`}
       </p>
     </section>
   );

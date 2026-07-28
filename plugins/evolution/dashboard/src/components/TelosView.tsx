@@ -37,7 +37,7 @@ function transitionTarget(response: TelosResponse | null, saved: TelosRevision |
 }
 
 export function TelosView({ snapshot, onRefresh }: TelosViewProps): React.ReactElement {
-  const { useCallback, useEffect, useMemo, useState } = SDK.hooks;
+  const { useCallback, useEffect, useMemo, useRef, useState } = SDK.hooks;
   const [telos, setTelos] = useState<TelosResponse | null>(null);
   const [draft, setDraft] = useState<TelosDraft | null>(null);
   const [savedRevision, setSavedRevision] = useState<TelosRevision | null>(null);
@@ -47,6 +47,7 @@ export function TelosView({ snapshot, onRefresh }: TelosViewProps): React.ReactE
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [warning, setWarning] = useState<string | null>(null);
+  const transitionTriggerRef = useRef<HTMLElement | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -134,8 +135,8 @@ export function TelosView({ snapshot, onRefresh }: TelosViewProps): React.ReactE
       </section>
       <TelosDiff current={current} target={selected} />
       <div className="evo-telos__actions">
-        <button type="button" onClick={() => setDialogAction("activate")} disabled={!canTransition}>Activate selected revision</button>
-        <button type="button" onClick={() => setDialogAction("rollback")} disabled={!canTransition}>Roll back to selected revision</button>
+        <button type="button" onClick={event => { transitionTriggerRef.current = event.currentTarget; setDialogAction("activate"); }} disabled={!canTransition}>Activate selected revision</button>
+        <button type="button" onClick={event => { transitionTriggerRef.current = event.currentTarget; setDialogAction("rollback"); }} disabled={!canTransition}>Roll back to selected revision</button>
       </div>
       {dialogAction !== null && current !== null && selected !== null ? (
         <StrongConfirmationDialog
@@ -146,6 +147,7 @@ export function TelosView({ snapshot, onRefresh }: TelosViewProps): React.ReactE
           onClose={() => setDialogAction(null)}
           onConfirmed={async () => { await onRefresh(); await load(); }}
           onStale={recoverStale}
+          returnFocusRef={transitionTriggerRef}
         />
       ) : null}
     </section>

@@ -2,6 +2,7 @@ import { evolutionApi } from "../api";
 import { React, SDK } from "../sdk";
 import { confirmationConsequences, isExactConfirmationPhrase, staleTransitionRecovery } from "../telos-model";
 import type { TelosTransitionPreparation } from "../types";
+import { useDialogFocus, type DialogFocusRef } from "./dialog-focus";
 
 void React;
 
@@ -13,6 +14,7 @@ export interface StrongConfirmationDialogProps {
   onClose(): void;
   onConfirmed(): Promise<void>;
   onStale(warning: string): Promise<void>;
+  returnFocusRef?: DialogFocusRef;
 }
 
 function errorMessage(error: unknown): string {
@@ -33,6 +35,7 @@ export function StrongConfirmationDialog({
   onClose,
   onConfirmed,
   onStale,
+  returnFocusRef,
 }: StrongConfirmationDialogProps): React.ReactElement {
   const { useEffect, useRef, useState } = SDK.hooks;
   const [prepared, setPrepared] = useState<TelosTransitionPreparation | null>(null);
@@ -41,7 +44,9 @@ export function StrongConfirmationDialog({
   const [error, setError] = useState<string | null>(null);
   const [hasExpired, setHasExpired] = useState(false);
   const confirmedRef = useRef(false);
+  const dialogRef = useRef<HTMLDivElement | null>(null);
   const title = action === "activate" ? "Activate Telos revision" : "Roll back Telos revision";
+  const { close, handleKeyDown } = useDialogFocus({ dialogRef, onClose, returnFocusRef });
 
   useEffect(() => {
     if (prepared === null) {
@@ -78,7 +83,7 @@ export function StrongConfirmationDialog({
   const handleStale = async (nextError: unknown) => {
     const recovery = staleTransitionRecovery(nextError);
     if (recovery === null) return false;
-    onClose();
+    close();
     await onStale(recovery.warning);
     return true;
   };
@@ -116,7 +121,7 @@ export function StrongConfirmationDialog({
         phrase,
       });
       await onConfirmed();
-      onClose();
+      close();
     } catch (nextError) {
       if (!await handleStale(nextError)) setError(errorMessage(nextError));
     } finally {
@@ -127,7 +132,7 @@ export function StrongConfirmationDialog({
   const isPreparedExpired = prepared !== null && (hasExpired || expired(prepared));
   const canConfirm = prepared !== null && !isPreparedExpired && isExactConfirmationPhrase(phrase, prepared.required_phrase) && !submitting && !confirmedRef.current;
   return (
-    <div className="evo-confirmation-dialog" role="dialog" aria-modal="true" aria-labelledby="evo-telos-confirmation-title" aria-describedby="evo-telos-confirmation-description">
+    <div ref={dialogRef} className="evo-confirmation-dialog" role="dialog" aria-modal="true" aria-labelledby="evo-telos-confirmation-title" aria-describedby="evo-telos-confirmation-description" tabIndex={-1} onKeyDown={handleKeyDown}>
       <section className="evo-confirmation-dialog__content">
         <header><h2 id="evo-telos-confirmation-title">{title}</h2></header>
         <p id="evo-telos-confirmation-description">This is a consequential local Telos pointer change. Prepare the server-issued confirmation before it can be confirmed once.</p>
@@ -151,7 +156,7 @@ export function StrongConfirmationDialog({
         {prepared !== null && isPreparedExpired ? <p role="alert">This confirmation expired. Close it and prepare a new transition.</p> : null}
         {error !== null ? <p role="alert">{error}</p> : null}
         <footer>
-          <button type="button" onClick={onClose} disabled={submitting}>Cancel</button>
+          <button type="button" onClick={close} disabled={submitting}>Cancel</button>
           {prepared !== null ? <button type="button" onClick={() => void confirm()} disabled={!canConfirm}>Confirm {action}</button> : null}
         </footer>
       </section>
