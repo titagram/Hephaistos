@@ -75,7 +75,17 @@ def test_skill_and_org_run_docs_make_parent_review_the_default():
     assert "Apply this rule recursively at every level" in operations
     assert "The direct parent normally checks each direct child" in operations
     assert escalation in operations
-    assert (
-        "6. Require evidence, parent review, and integration tests before publication."
-        in operations
-    )
+
+
+def test_skill_states_the_local_model_free_orgrun_contract():
+    skill = SKILL.read_text(encoding="utf-8")
+
+    for phrase in [
+        "Agentic-Kanban is local and never synchronizes cards with the backend",
+        "OrgRun never calls a model",
+        "The orchestrator authors the plan; OrgRun materializes the DAG",
+        "Native triage decomposition does not apply to OrgRun cards",
+        "Swarm is an explicit alternative, never an OrgRun stage",
+        "Final Development Report",
+    ]:
+        assert phrase in skill

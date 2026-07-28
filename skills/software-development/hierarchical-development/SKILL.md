@@ -8,7 +8,7 @@ description: Use when coordinating delegated or durable Hades OrgRuns.
 Classify the request first.
 
 - Use ephemeral delegation only for a short, self-contained task that can be abandoned safely with the parent session.
-- Use a durable Hades OrgRun for multi-task, restart-safe, cross-workspace, backend-mapped, or integration-sensitive work.
+- Use a durable Hades OrgRun for multi-task, restart-safe, cross-workspace, or integration-sensitive work.
 
 ## Delegation routing
 
@@ -42,20 +42,23 @@ Questions and answers between siblings require an explicit dependency, shared in
 
 The direct parent performs normal review of each direct child's scope, evidence packet, verification, and residual risk. Escalate to a dedicated non-delegating independent reviewer only when independent review is explicitly requested or the result is high-risk, disputed, or escalated. A reviewer reports findings first and returns a bounded pass/fail conclusion; it does not command leaves.
 
-For durable work, require a validated execution portfolio with repository-relative write scopes, dependencies, assignees, risk, and acceptance evidence. Materialize it with `hades org validate` then `hades org materialize`; do not upload raw plans, source, transcripts, reasoning, or secrets to the backend.
+For durable work, the orchestrator writes a `hades.implementation-plan.v1` with repository-relative write scopes, dependencies, logical roles, risk, acceptance criteria, and verification. Agentic-Kanban is local and never synchronizes cards with the backend. OrgRun never calls a model. The orchestrator authors the plan; OrgRun materializes the DAG. Keep plans local: do not upload raw plans, source, transcripts, reasoning, or secrets.
 
 Execution protocol:
 
-1. The planner decomposes bounded tasks and declares scope.
-2. The marshal checks dependency order, overlap conflicts, and open blocking decisions.
-3. Leaves implement only inside their declared scope and return evidence: changed files, test commands/results, commit or patch reference, and residual risks.
-4. The direct parent verifies the evidence and scope; use a dedicated reviewer only under the escalation rule above.
-5. The integration worker applies accepted work and runs the integration suite. Never auto-push or auto-merge.
-6. Publish a backend result only after local completion evidence, integration, and org review have all passed.
+1. The orchestrator writes `hades.implementation-plan.v1`.
+2. Run `hades org validate <plan.json> --board <board>`, then `hades org materialize <plan.json> --board <board>` with an explicit board.
+3. OrgRun validates and writes the initial DAG atomically; do not create it card-by-card.
+4. The Kanban dispatcher schedules the DAG. Orchestrator, leaf, and reviewer are logical roles/profiles; they are not OrgRun stages.
+5. Leaves implement only inside their declared scope and return local evidence: changed files, test commands/results, commit or patch reference, and residual risks. Leaf and reviewer work only through their direct-parent authority.
+6. The direct parent verifies evidence and scope; use a dedicated reviewer only under the escalation rule above. The integration worker applies accepted work and runs the integration suite. Never auto-push or auto-merge.
+7. Changes to the plan use a versioned `hades org amend` operation. Completion produces local task reports and one Final Development Report.
+
+Native triage decomposition does not apply to OrgRun cards: use it only for ordinary unmanaged triage cards. Swarm is an explicit alternative, never an OrgRun stage; start it only when deliberately choosing manual swarm work instead of an OrgRun.
 
 Routing uses configured logical roles (`orchestrator`, `leaf`, `reviewer`) only. Do not accept or invent provider/model choices from task arguments. Keep one model and byte-stable system prompt per conversation.
 
-Escalate instead of guessing when the contract drifts, a remote lease is missing/lost, scope overlaps cannot be serialized, tests fail, or an interface decision remains unresolved. Keep results bounded and redact secrets.
+Escalate instead of guessing when the contract drifts, scope overlaps cannot be serialized, tests fail, or an interface decision remains unresolved. Keep results bounded and redact secrets.
 
 When a gate discovers new remediation work, create the remediation card first,
 then call `kanban_block` with `kind="dependency"` and that card's id as

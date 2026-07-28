@@ -1,90 +1,57 @@
 # Hades OrgRun operations
 
-## Scope and authority
+## Operating model
 
-An OrgRun is a local Kanban DAG for executing a validated Hades portfolio. The backend owns remote mandate and lease lifecycle; the local board owns execution, worktree state, evidence, integration, and review.
+An OrgRun is a local, model-free way to version and materialize an implementation plan as an Agentic-Kanban DAG. Agentic-Kanban is local and never synchronizes cards with the backend. `hades kanban sync` and `hades org sync` therefore return the typed non-retryable boundary `agentic_kanban_has_no_remote_sync`.
 
-| Mode | Remote reads | Remote writes | Local behavior |
-|---|---:|---:|---|
-| `off` | No | No | Local-only Kanban work continues. |
-| `pull_only` | Yes | No | Remote work is imported as `triage`; no claim, heartbeat, or result publish occurs. |
-| `mirror` | Yes | Bounded lifecycle only | A mapped task claims its remote lease before mutable work; verified results publish only after the integration gate. |
+OrgRun never calls a model. The orchestrator authors the plan; OrgRun materializes the DAG. The Kanban dispatcher schedules ready cards. `orchestrator`, `leaf`, and `reviewer` are logical roles resolved by local routing, not lifecycle stages or model choices stored in the plan.
 
-`mirror` is opt-in. It must not be enabled until backend capability and profile routing are verified. Local-only cards are never uploaded merely because sync is enabled.
+Use the `hades.implementation-plan.v1` plan format. It contains bounded tasks, repository-relative write scopes, dependencies, risk, acceptance criteria, verification, and logical roles. Plans must not contain provider, model, or credential fields.
 
-### Remote mandate projection
+## Create and inspect a run
 
-The project-manager Kanban is authoritative and may contain imperfect natural-language mandates. Hades stores only the stable remote task ID and observed version on the local OrgRun anchor; local execution/review cards are a derived organizational DAG, not replicated backend rows. Every observation is scoped by the backend project UUID. Work from another project must never be imported or correlated, even when another Hades instance is active there.
+The orchestrator writes the plan, then the operator validates and materializes it on an explicit local board:
 
-When an accepted remote version changes, Hades marks that projection stale, invalidates its local evidence, and pauses only the dependent local subtree plus its integration products. It does not silently accept the new wording. A human must review the change, rebuild affected contracts when necessary, and explicitly accept the new version before work resumes.
-
-Clarification questions, local decisions, progress summaries, and verified completion proposals are bounded, append-only Persephone messages with stable idempotency IDs. They are information records only: Hades never rewrites a project-manager card. Automatic read-only information exchange is allowed; any proposal that would cause a remote change remains subject to human approval. Cursor/offline state is explicit, retries retain the stable message ID, and switching sync to `off` performs no network work.
-
-Proposal publication always derives the backend project UUID from the durable OrgRun topology. A caller-supplied expected project may only narrow this authority; a mismatch is rejected before persistence. Proposals enter the durable Persephone outbox before any network attempt, then use the normal capability-gated retry/dead-letter sender. This preserves offline and restart recovery without bypassing queue policy.
-
-Evidence packets used by projected execution are registered with project, OrgRun anchor, remote mandate, node and mandate-version provenance. A mandate version change marks matching packets stale in the evidence store; stale or cross-project packet references are rejected by the consumption/publication validator. Accepting new wording does not revive old evidence.
-
-Reconciliation follows `current → awaiting_human → accepted`. Acceptance requires an identified human, approval evidence, and replacement contract hashes/version entries for the complete affected subtree. The transition is single-use and atomic: partial or rejected approval leaves the subtree blocked. Eligible nodes resume according to their dependency gates, while evidence remains invalid until regenerated against the accepted contracts.
-
-Replacement contracts are canonical parsed orchestrator contracts, not caller-supplied hash labels. The local authoritative contract store records their canonical serialization, calculated hash, mandate version and contract version under a compare-and-swap guard. Evidence registration and proposal publication require an exact match across project, OrgRun, mandate, node, accepted mandate version and stored contract hash. Pages returned by backend sync are validated item-by-item for the same project UUID; one missing or foreign project ID rejects the whole page and preserves the prior cursor.
-
-Human acceptance authority comes only from an approved durable Persephone/O2 inbox row whose project, OrgRun anchor, remote mandate, observed version, and action all match exactly. The audited actor is read from that row. Reconciliation consumes its message ID once in the same local transaction as contract installation and node resumption, so forged dictionaries, replay, and concurrent stale acceptance cannot authorize work. Direct mandate import is limited to the first observation or an identical still-current observation; it cannot bypass an awaiting or completed reconciliation.
-
-Standalone contract installation and human reconciliation share one transaction-aware CAS primitive. A replacement must match the exact stored contract version, increase `contract_version`, and change the canonical contract hash before the approval can be consumed or any node resumed. Supplying the old contract, an identical hash, or a same/lower version rolls back the entire attempt and leaves the mandate awaiting human action.
-
-## Delegation preflight
-
-Resolve local model routing before materializing or dispatching an OrgRun:
-
-| Routing state | Operator action |
-|---|---|
-| Missing or incomplete | Run `hades delegation setup`. The wizard starts model onboarding when no authenticated models are available. |
-| Valid for `orchestrator`, `leaf`, and `reviewer` | Preserve it; setup must not prompt or overwrite the existing routing. |
-| User explicitly requests different models or capacity limits | Run `hades delegation configure`, inspect the full configuration preview, then confirm the single atomic write. |
-
-Do not use `configure` as an automatic upgrade step. Both commands select only models already authenticated through Hades; routing data never contains credentials.
-
-Every orchestrator dispatch requires a structured task contract containing objective, deliverable, in/out scope, workspace, write scope, input evidence, dependencies, acceptance criteria, required verification, and return schema. Reject the dispatch before child creation when the contract is missing or invalid.
-
-Only a leaf's direct parent may command that leaf or modify its task contract. The root/main agent may inspect or query a leaf for information, but must not command it or change its task contract unless it is that leaf's direct parent. Apply this rule recursively at every level: each orchestrator commands and revises contracts only for its direct children, and every child reports through its parent chain.
-
-Review responsibility follows the same delegation tree. The direct parent normally checks each direct child's declared scope, evidence packet, verification records, and residual risks. Use the non-delegating `reviewer` role only when independent review is explicitly requested or the result is high-risk, disputed, or escalated; its output is findings-first with a bounded pass/fail conclusion. Evidence packets contain bounded facts and references, never transcripts or hidden reasoning.
-
-## Gate sequence
-
-```text
-execution evidence → task review → integration-ready
-  → integration → org review → local completion evidence
-  → bounded remote publish → synthesis
+```bash
+hades org validate plan.json --board <board>
+hades org materialize plan.json --board <board>
+hades org show <run-id> --board <board>
 ```
 
-Remote publication is refused when integration or org review is not `done`, when completion evidence is incomplete, or when the execution node has no usable lease. The system does not auto-push, auto-merge, or auto-create a pull request.
+Materialization validates the plan and writes the initial DAG atomically. Do not create an OrgRun card-by-card. Use `hades org show` to inspect the plan version, state, topology, blocked work, and dispatchable work; use `hades org list --board <board>` to find runs on that board.
 
-## Rollout
+An amendment is the only way to change an existing managed plan:
 
-1. Run `hades org validate portfolio.json`.
-2. Run `hades org materialize portfolio.json`; inspect `hades org show <org_run_id>`.
-3. Enable `pull_only` and confirm imported cards remain in `triage`.
-4. Verify assignees, backend capability, workspace binding, and lease behavior in a non-production board.
-5. Enable `mirror` only for mapped work items; monitor deferred admissions and lease failures.
-6. Require evidence, parent review, and integration tests before publication.
+```bash
+hades org amend amendment.json --board <board>
+```
 
-## Rollback and incident response
+The amendment is versioned against its base plan version. Revalidate its changed scopes and dependencies before applying it; do not edit managed cards directly to simulate a plan change.
 
-- Switch to `off` to stop all new backend traffic. Do not delete the local board or evidence.
-- A remote claim refusal is a coordination defer, not a local worker failure; replan or investigate the lease owner.
-- If backend connectivity is lost after a claim, preserve local evidence and do not publish a guessed result. Retry only through an idempotent lifecycle path after lease audit.
-- If an interface or scope decision is unresolved, stop the impacted subtree and record a typed blocker/decision notice.
-- If integration tests fail, leave completion/publish nodes incomplete and attach bounded failure evidence to the local board.
+## States and recovery
 
-## Operator signals
+| State | Meaning | Operator action |
+|---|---|---|
+| `draft` | Plan record exists but is not ready to schedule. | Complete and validate the plan. |
+| `validated` | The plan passed structural and routing checks. | Materialize it on the intended board. |
+| `materialized` | The complete initial DAG exists locally. | Inspect it, then allow dispatcher scheduling. |
+| `running` | Leaf work is active or ready behind dependencies. | Monitor evidence and direct-parent review. |
+| `integrating` | Accepted leaf work awaits integration. | Run the integration checks and attach local evidence. |
+| `reviewing` | Integrated work awaits parent or explicitly required independent review. | Record the review conclusion and remediation. |
+| `completed` | All required local work, checks, and reports are complete. | Inspect and retain the reports. |
+| `blocked` | A dependency, scope decision, failed check, or amendment conflict prevents progress. | Record the blocker, resolve it, then amend or resume through the DAG. |
+| `cancelled` | The local run is intentionally stopped. | Preserve its local evidence; create a new plan if work restarts. |
 
-Inspect each OrgRun snapshot for `phase`, `blocked`, and `dispatchable` IDs. Track these local signals per rollout:
+For a blocked run, identify the named dependency or decision in `hades org show`, create any necessary remediation through the plan amendment, and let dependency gates reopen the affected nodes. Do not bypass a blocked card with direct edits or a new unmanaged duplicate.
 
-- admission defers and supersedes;
-- remote claim/heartbeat/publish failures;
-- tasks blocked by scope or interface decisions;
-- integration and org-review pass/fail rate;
-- completion-to-synthesis latency.
+## Authority, triage, and swarm
 
-Do not place secrets, raw source, reasoning, transcripts, or absolute paths in backend-facing messages or evidence references.
+Only a leaf's direct parent may command that leaf or modify its task contract. The root/main agent may inspect or query a leaf for information, but must not command it or change its task contract unless it is that leaf's direct parent. Apply this rule recursively at every level. The direct parent normally checks each direct child's declared scope, evidence packet, verification records, and residual risks. Independent review is only when independent review is explicitly requested or the result is high-risk, disputed, or escalated.
+
+Native triage decomposition does not apply to OrgRun cards. It remains available for ordinary unmanaged triage cards, which are separate from a materialized plan. Swarm is an explicit alternative, never an OrgRun stage: choose it manually for a separate swarm task, rather than inserting it into a managed run.
+
+## Reports
+
+Leaves return local task reports with changed files, verification commands and results, commit or patch references, and residual risk. Inspect these reports and the run status in the dashboard's local Kanban view. When the run completes, inspect the generated Final Development Report there as the local synthesis of task evidence, integration, and review results.
+
+Never auto-push or auto-merge. Keep reports local and redact secrets, raw source, hidden reasoning, and transcripts.

@@ -284,6 +284,31 @@ def test_hades_coordination_skill_exists_with_local_only_guardrails():
     assert "do not write the resolved model" in lowered
 
 
+def test_org_run_operations_describes_a_local_model_free_dag():
+    text = (HADES_DOCS / "org-run-operations.md").read_text(encoding="utf-8")
+    lowered = text.lower()
+
+    for phrase in [
+        "agentic-kanban is local and never synchronizes cards with the backend",
+        "orgrun never calls a model",
+        "the orchestrator authors the plan; orgrun materializes the dag",
+        "native triage decomposition does not apply to orgrun cards",
+        "swarm is an explicit alternative, never an orgrun stage",
+        "final development report",
+        "agentic_kanban_has_no_remote_sync",
+    ]:
+        assert phrase in lowered
+
+    for forbidden in [
+        "pull_only",
+        "mirror",
+        "remote lease",
+        "remote publish",
+        "execution portfolio",
+    ]:
+        assert forbidden not in lowered
+
+
 def test_hades_support_runbook_covers_launch_failures_without_secret_collection():
     text = (HADES_DOCS / "support-runbook.md").read_text(encoding="utf-8")
     lowered = text.lower()
