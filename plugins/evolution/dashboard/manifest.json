@@ -1,0 +1,14 @@
+{
+  "name": "evolution",
+  "label": "Evolution",
+  "description": "Local Gnothi Seauton and Autopoiesis control center",
+  "icon": "Activity",
+  "version": "1.0.0",
+  "tab": {
+    "path": "/evolution",
+    "position": "after:plugins"
+  },
+  "entry": "dist/index.js",
+  "css": "dist/style.css",
+  "api": "plugin_api.py"
+}
