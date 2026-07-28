@@ -1494,6 +1494,8 @@ def test_command_dispatch_gnothi_sends_read_only_prompt(server):
         "type": "send",
         "message": build_gnothi_prompt(arg),
     }
+    assert "scope=organism" not in response["result"]["message"]
+    assert "hades gnothi-seauton explain <capability> --json" in response["result"]["message"]
 
 
 def test_pending_input_commands_includes_gnothi(server):

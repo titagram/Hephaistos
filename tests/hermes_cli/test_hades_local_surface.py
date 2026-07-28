@@ -71,7 +71,10 @@ def test_gnothi_slash_queues_read_only_prompt():
 
     cli._handle_gnothi_seauton_command("/gnothi_seauton explain runtime")
 
-    assert cli._pending_input.get_nowait() == build_gnothi_prompt("explain runtime")
+    prompt = cli._pending_input.get_nowait()
+    assert prompt == build_gnothi_prompt("explain runtime")
+    assert "scope=organism" not in prompt
+    assert "hades gnothi-seauton explain <capability> --json" in prompt
 
 
 def test_hades_slash_uninstall_requires_noninteractive_confirmation(monkeypatch):
