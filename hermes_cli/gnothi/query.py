@@ -3,7 +3,10 @@ from __future__ import annotations
 from collections import defaultdict, deque
 from typing import Any
 
-from hermes_cli.gnothi.store import OrganismRevisionStore
+from hermes_cli.gnothi.store import (
+    OrganismRevisionStore,
+    legacy_profile_store_present,
+)
 
 MAX_RESULTS = 200
 
@@ -15,7 +18,10 @@ class OrganismQuery:
     def status(self) -> dict[str, Any]:
         artifact = self.store.current()
         if not artifact:
-            return {"status": "missing", "actions": ["rebuild"]}
+            result = {"status": "missing", "actions": ["rebuild"]}
+            if legacy_profile_store_present():
+                result["diagnostics"] = ["legacy_profile_state_detected"]
+            return result
         contract = artifact["organism_contract"]
         coverage = contract.get("coverage", {})
         unknown = sorted(

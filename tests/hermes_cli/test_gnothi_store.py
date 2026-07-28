@@ -5,6 +5,7 @@ import pytest
 
 import hermes_constants
 from hermes_cli.gnothi.contract import new_artifact
+from hermes_cli.gnothi.query import OrganismQuery
 from hermes_cli.gnothi.store import OrganismRevisionStore
 
 
@@ -93,6 +94,33 @@ def test_default_store_reads_current_revision_after_profile_switch(
         json.loads(profile_store.current_path.read_text())["sha256"]
         == pointer["sha256"]
     )
+
+
+def test_legacy_profile_store_is_reported_but_not_imported(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    default_root = tmp_path / ".hermes"
+    profile_root = default_root / "profiles" / "reviewer"
+    global_root = default_root / "organism" / "gnothi_seauton"
+    monkeypatch.setattr(
+        hermes_constants, "get_default_hermes_root", lambda: default_root
+    )
+    monkeypatch.setenv("HERMES_HOME", str(profile_root))
+    legacy_store = OrganismRevisionStore(root=profile_root / "gnothi_seauton")
+    legacy_store.publish(
+        _artifact("legacy-rev", collected_at="2026-07-11T00:00:00Z"),
+        published_at="2026-07-11T00:01:00Z",
+    )
+
+    result = OrganismQuery(OrganismRevisionStore()).status()
+
+    assert result == {
+        "status": "missing",
+        "actions": ["rebuild"],
+        "diagnostics": ["legacy_profile_state_detected"],
+    }
+    assert not global_root.exists()
 
 
 def test_publish_is_idempotent_but_refuses_conflicting_revision(tmp_path: Path):

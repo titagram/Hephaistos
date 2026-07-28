@@ -34,6 +34,15 @@ def _utc_now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
+def legacy_profile_store_present() -> bool:
+    """Return whether the active profile retains a legacy Gnothi pointer."""
+    legacy = hermes_constants.get_hermes_home() / "gnothi_seauton"
+    canonical = hermes_constants.get_organism_home() / "gnothi_seauton"
+    if legacy.absolute() == canonical.absolute():
+        return False
+    return (legacy / "current.json").is_file()
+
+
 class OrganismRevisionStore:
     """Immutable local organism revisions with an atomic current pointer."""
 

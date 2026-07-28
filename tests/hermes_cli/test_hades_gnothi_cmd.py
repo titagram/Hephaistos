@@ -1,6 +1,9 @@
 import argparse
+import json
 from pathlib import Path
 
+from hermes_cli.gnothi.builder import build_organism_revision
+from hermes_cli.gnothi.collectors.base import CollectorResult
 from hermes_cli.gnothi.contract import new_artifact
 from hermes_cli.gnothi.store import OrganismRevisionStore
 from hermes_cli.hades_gnothi_cmd import build_gnothi_parser, gnothi_command
@@ -39,6 +42,71 @@ def test_missing_status_is_actionable_and_returns_one(tmp_path, monkeypatch, cap
     output = capsys.readouterr().out
     assert '"status": "missing"' in output
     assert "rebuild" in output
+
+
+def test_rebuild_publishes_fresh_global_revision_without_copying_legacy(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import hermes_constants
+
+    class FreshCollector:
+        def __init__(self, name: str):
+            self.name = name
+
+        def collect(self, context):
+            return CollectorResult(
+                name=self.name,
+                status="current",
+                nodes=[],
+                edges=[],
+                evidence=[],
+                fingerprint=f"sha256:fresh-{self.name}",
+                verified_at="2026-07-12T00:00:00Z",
+                error_code=None,
+            )
+
+    default_root = tmp_path / ".hermes"
+    profile_root = default_root / "profiles" / "reviewer"
+    monkeypatch.setattr(
+        hermes_constants, "get_default_hermes_root", lambda: default_root
+    )
+    monkeypatch.setenv("HERMES_HOME", str(profile_root))
+    legacy = OrganismRevisionStore(root=profile_root / "gnothi_seauton")
+    legacy_artifact = new_artifact(
+        revision_id="legacy-rev", generation_id="git:legacy", generation_scope="stable",
+        head_commit="legacy", collected_at="2026-07-11T00:00:00Z",
+    )
+    legacy_artifact["organism_contract"]["status"] = "current"
+    legacy_pointer = legacy.publish(
+        legacy_artifact,
+        published_at="2026-07-11T00:01:00Z",
+    )
+
+    fresh = build_organism_revision(
+        tmp_path,
+        collectors=[
+            FreshCollector(name)
+            for name in ("source", "capabilities", "runtime", "contracts")
+        ],
+        now="2026-07-12T00:00:00Z",
+        store=OrganismRevisionStore(),
+    )
+
+    global_store = OrganismRevisionStore()
+    assert (
+        global_store.current()["organism_contract"]["revision_id"]
+        == fresh["organism_contract"]["revision_id"]
+    )
+    assert global_store.current_path.parent != legacy.current_path.parent
+    assert global_store.current_path.is_file()
+    assert global_store.current_path.read_text() != legacy.current_path.read_text()
+    assert not (
+        global_store.current_path.parent / "revisions" / "legacy-rev.json"
+    ).exists()
+    assert legacy_pointer["sha256"] != json.loads(
+        global_store.current_path.read_text()
+    )["sha256"]
 
 
 def test_status_reports_drift_and_targeted_actions(tmp_path, monkeypatch, capsys):
