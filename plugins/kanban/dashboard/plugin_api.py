@@ -50,10 +50,25 @@ from pydantic import BaseModel, Field
 
 from hermes_cli import kanban_db
 from hermes_cli import kanban_diagnostics as kd
+from hermes_cli import kanban_reports
 
 log = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+# Reports are persisted with the compact internal ``task`` type.  The
+# dashboard API deliberately presents a stable, descriptive public contract
+# instead, so Logbook callers never need to know how evidence is stored.
+_REPORT_TYPE_TO_STORAGE = {
+    "task_completion": "task",
+    "org_run_final": "org_run_final",
+    "org_run_cancelled": "org_run_cancelled",
+}
+_STORAGE_TO_REPORT_TYPE = {
+    storage: public for public, storage in _REPORT_TYPE_TO_STORAGE.items()
+}
+_VALID_REPORT_TYPES = frozenset(_REPORT_TYPE_TO_STORAGE)
 
 
 # ---------------------------------------------------------------------------
@@ -133,6 +148,89 @@ def _conn(board: Optional[str] = None):
     except Exception as exc:
         log.warning("kanban init_db failed: %s", exc)
     return kanban_db.connect(board=board)
+
+
+# ---------------------------------------------------------------------------
+# Local evidence reports — the Logbook reads deterministic, already-redacted
+# reports only.  It does not expose task worker logs, model reasoning, or
+# credentials from any legacy tables.
+# ---------------------------------------------------------------------------
+
+def _report_dict(record: Any) -> dict[str, Any]:
+    """Serialize one persisted report into the public Logbook shape."""
+    try:
+        payload = json.loads(record.report_json)
+    except (TypeError, ValueError):
+        # Reports are generated locally as canonical JSON.  A malformed legacy
+        # row should not turn a read-only dashboard view into a 500, nor should
+        # it be exposed as executable/raw content.
+        payload = {}
+    return {
+        "id": record.id,
+        "board_slug": record.board_slug,
+        "report_type": _STORAGE_TO_REPORT_TYPE[record.report_type],
+        "subject_id": record.subject_id,
+        "terminal_run_id": record.terminal_run_id,
+        "source_version": record.source_version,
+        "report_json": payload,
+        "report_markdown": record.report_markdown,
+        "generated_at": record.generated_at,
+    }
+
+
+@router.get("/reports")
+def get_reports(
+    report_type: Optional[str] = Query(None),
+    subject_id: Optional[str] = Query(None),
+    run_id: Optional[str] = Query(None),
+    board: Optional[str] = Query(None),
+):
+    """List local task/OrgRun evidence for the selected Agentic-Kanban board."""
+    # Resolve once before opening the DB. Resolving it again after the query
+    # would let a concurrent current-board switch change the record filter.
+    board = _resolve_board(board) or kanban_db.get_current_board()
+    if report_type is not None and report_type not in _VALID_REPORT_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail="report_type must be one of: " + ", ".join(sorted(_VALID_REPORT_TYPES)),
+        )
+    conn = _conn(board=board)
+    try:
+        records = kanban_reports.list_reports(
+            conn,
+            report_type=_REPORT_TYPE_TO_STORAGE.get(report_type) if report_type else None,
+            subject_id=subject_id,
+            run_id=run_id,
+        )
+        return {
+            "reports": [
+                _report_dict(record)
+                for record in records
+                if record.board_slug == board
+                and record.report_type in _STORAGE_TO_REPORT_TYPE
+            ],
+        }
+    finally:
+        conn.close()
+
+
+@router.get("/reports/{report_id}")
+def get_report(report_id: int, board: Optional[str] = Query(None)):
+    """Return one local evidence report, scoped to the selected board."""
+    # Use the same resolved slug for the DB connection and access check.
+    board = _resolve_board(board) or kanban_db.get_current_board()
+    conn = _conn(board=board)
+    try:
+        record = kanban_reports.get_report(conn, report_id)
+        if (
+            record is None
+            or record.board_slug != board
+            or record.report_type not in _STORAGE_TO_REPORT_TYPE
+        ):
+            raise HTTPException(status_code=404, detail="report not found")
+        return {"report": _report_dict(record)}
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------------------

@@ -2442,3 +2442,105 @@ def test_dashboard_failed_card_highlight_class_exists():
     assert "hermes-kanban-card--failed" in js
     assert "hermes-kanban-card--failed" in css
     assert "failedIds" in js
+
+
+# ---------------------------------------------------------------------------
+# GET /reports and GET /reports/:id — local completion evidence
+# ---------------------------------------------------------------------------
+
+
+def test_reports_list_and_detail_expose_local_completion_evidence(client):
+    """The Logbook API presents safe, parsed local reports by public type."""
+    from hermes_cli.org_run_store import insert_report
+
+    with kb.connect_closing() as conn:
+        record = insert_report(
+            conn,
+            board_slug="default",
+            report_type="task",  # Internal storage name; the API is canonical.
+            subject_id="t_123",
+            terminal_run_id=7,
+            source_version=1,
+            report_json=json.dumps({"task_id": "t_123", "summary": "finished"}),
+            report_markdown="# Development report: t_123\n\nFinished.",
+            generated_at=1_700_000_000,
+            idempotency_key="dashboard-report-test:t_123",
+        )
+
+    reports = client.get(
+        "/api/plugins/kanban/reports?report_type=task_completion&subject_id=t_123"
+    )
+    assert reports.status_code == 200, reports.text
+    assert reports.json()["reports"][0]["report_type"] == "task_completion"
+    assert reports.json()["reports"][0]["report_json"] == {
+        "task_id": "t_123", "summary": "finished",
+    }
+
+    detail = client.get(f"/api/plugins/kanban/reports/{record.id}")
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["report"]["report_markdown"].startswith("#")
+    assert "idempotency_key" not in detail.json()["report"]
+
+
+def test_reports_reject_unknown_report_type(client):
+    response = client.get("/api/plugins/kanban/reports?report_type=worker_log")
+
+    assert response.status_code == 400
+    assert "report_type" in response.json()["detail"]
+
+
+def test_reports_resolve_current_board_once_per_request(client, monkeypatch):
+    """A concurrent board switch cannot change a report request's scope mid-read."""
+    from hermes_cli.org_run_store import insert_report
+
+    with kb.connect_closing() as conn:
+        insert_report(
+            conn,
+            board_slug="default",
+            report_type="task",
+            subject_id="t_current",
+            terminal_run_id=9,
+            source_version=1,
+            report_json=json.dumps({"task_id": "t_current"}),
+            report_markdown="# Current board report",
+            generated_at=1_700_000_001,
+            idempotency_key="dashboard-current-board-report",
+        )
+
+    api_module = sys.modules["hermes_dashboard_plugin_kanban_test"]
+    calls: list[str] = []
+
+    def current_board_once():
+        calls.append("current")
+        return "default"
+
+    monkeypatch.setattr(api_module.kanban_db, "get_current_board", current_board_once)
+
+    response = client.get("/api/plugins/kanban/reports")
+
+    assert response.status_code == 200, response.text
+    assert [report["subject_id"] for report in response.json()["reports"]] == ["t_current"]
+    assert calls == ["current"]
+
+
+def test_agentic_kanban_bundle_identity_and_logbook_contract():
+    repo_root = Path(__file__).resolve().parents[2]
+    manifest = json.loads(
+        (repo_root / "plugins" / "kanban" / "dashboard" / "manifest.json").read_text()
+    )
+    bundle = (repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "index.js").read_text()
+    css = (repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "style.css").read_text()
+
+    assert manifest["label"] == "Agentic-Kanban"
+    assert '"Agentic-Kanban"' in bundle
+    assert '"Board"' in bundle and '"Logbook"' in bundle
+    assert '"Native triage decomposition"' in bundle
+    assert '"Orchestration settings"' not in bundle
+    assert '"Local only"' not in bundle
+    assert '"Backend synced"' not in bundle
+    assert 't.origin === "remote"' not in bundle
+    assert ".hermes-kanban-tabs" in css
+    assert ".hermes-kanban-report-list" in css
+    assert ".hermes-kanban-report-detail" in css
+    assert "reportRequestRef" in bundle
+    assert "detailRequestRef" in bundle

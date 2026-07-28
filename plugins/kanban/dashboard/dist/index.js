@@ -506,6 +506,7 @@
 
   function KanbanPage() {
     const { t } = useI18n();
+    const [activeView, setActiveView] = useState("board");
     const [board, setBoard] = useState(() => readSelectedBoard() || null);
     const [boardList, setBoardList] = useState([]);      // [{slug, name, counts, ...}]
     const [showNewBoard, setShowNewBoard] = useState(false);
@@ -1029,6 +1030,25 @@
 
     return h(ErrorBoundary, null,
       h("div", { className: "hermes-kanban flex flex-col gap-4" },
+        h("div", { className: "flex items-center justify-between gap-3" },
+          h("h1", { className: "text-lg font-semibold" }, "Agentic-Kanban"),
+          h("div", { className: "hermes-kanban-tabs", role: "tablist", "aria-label": "Agentic-Kanban view" },
+            h("button", {
+              type: "button",
+              role: "tab",
+              "aria-selected": activeView === "board",
+              className: activeView === "board" ? "is-active" : "",
+              onClick: function () { setActiveView("board"); },
+            }, "Board"),
+            h("button", {
+              type: "button",
+              role: "tab",
+              "aria-selected": activeView === "logbook",
+              className: activeView === "logbook" ? "is-active" : "",
+              onClick: function () { setActiveView("logbook"); },
+            }, "Logbook"),
+          ),
+        ),
         h(BoardSwitcher, {
           board: board,
           boardList: boardList,
@@ -1042,6 +1062,11 @@
             return createNewBoard(payload).then(function () { setShowNewBoard(false); });
           },
         }) : null,
+        activeView === "logbook" ? h(LogbookView, {
+          key: board || "current",
+          boardSlug: board,
+          renderMarkdown: renderMd,
+        }) : h(React.Fragment, null,
         h(OrchestrationPanel, null),
         h(AttentionStrip, {
           boardData,
@@ -1049,7 +1074,6 @@
         }),
           h(BoardToolbar, {
             board: boardData,
-          sync: boardData.sync,
           tenantFilter, setTenantFilter,
           assigneeFilter, setAssigneeFilter,
           includeArchived, setIncludeArchived,
@@ -1099,7 +1123,101 @@
           assignees: (boardData && boardData.assignees) || [],
           eventTick: taskEventTick[selectedTaskId] || 0,
         }) : null,
+        ),
       ),
+    );
+  }
+
+  // Lazy-loaded report browser. The root keeps board/filter/selection state,
+  // so entering the Logbook never discards a user's in-progress Board view.
+  function LogbookView(props) {
+    const [reports, setReports] = useState([]);
+    const [selected, setSelected] = useState(null);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState(null);
+    const reportRequestRef = useRef(0);
+    const detailRequestRef = useRef(0);
+
+    const loadReports = useCallback(function () {
+      const requestId = ++reportRequestRef.current;
+      ++detailRequestRef.current;
+      setLoading(true);
+      setReports([]);
+      setSelected(null);
+      setError(null);
+      return SDK.fetchJSON(withBoard(`${API}/reports`, props.boardSlug))
+        .then(function (data) {
+          if (requestId !== reportRequestRef.current) return;
+          setReports((data && data.reports) || []);
+          setError(null);
+        })
+        .catch(function (err) {
+          if (requestId === reportRequestRef.current) setError(String(err.message || err));
+        })
+        .finally(function () {
+          if (requestId === reportRequestRef.current) setLoading(false);
+        });
+    }, [props.boardSlug]);
+
+    useEffect(function () {
+      loadReports();
+      return function () {
+        ++reportRequestRef.current;
+        ++detailRequestRef.current;
+      };
+    }, [loadReports]);
+
+    const openReport = function (report) {
+      const requestId = ++detailRequestRef.current;
+      setSelected({ loading: true, report: report });
+      SDK.fetchJSON(withBoard(`${API}/reports/${encodeURIComponent(report.id)}`, props.boardSlug))
+        .then(function (data) {
+          if (requestId === detailRequestRef.current) {
+            setSelected({ loading: false, report: data.report });
+          }
+        })
+        .catch(function (err) {
+          if (requestId === detailRequestRef.current) {
+            setSelected({ loading: false, report: report, error: String(err.message || err) });
+          }
+        });
+    };
+
+    return h("div", { className: "flex flex-col gap-3" },
+      h("div", { className: "flex items-center justify-between gap-3" },
+        h("div", { className: "text-sm text-muted-foreground" },
+          "Local completion evidence for this board."),
+        h(Button, { onClick: loadReports, size: "sm" }, "Refresh logbook"),
+      ),
+      error ? h("div", { className: "text-xs text-destructive" }, error) : null,
+      h("div", { className: "hermes-kanban-report-list" },
+        loading ? h("div", { className: "text-sm text-muted-foreground" }, "Loading reports…") :
+        reports.length === 0 ? h("div", { className: "text-sm text-muted-foreground" },
+          "No completion reports yet.") :
+        reports.map(function (report) {
+          const selectedId = selected && selected.report && selected.report.id;
+          const kind = report.report_type === "task_completion" ? "Task completion" :
+            report.report_type === "org_run_final" ? "OrgRun final" : "OrgRun cancelled";
+          return h("button", {
+            key: report.id,
+            type: "button",
+            className: selectedId === report.id ? "is-active" : "",
+            onClick: function () { openReport(report); },
+          },
+            h("span", { className: "font-medium" }, kind),
+            h("span", { className: "text-xs text-muted-foreground" },
+              report.subject_id + (report.terminal_run_id != null ? ` · run ${report.terminal_run_id}` : "")),
+          );
+        }),
+      ),
+      selected ? h("div", { className: "hermes-kanban-report-detail" },
+        selected.loading ? h("div", { className: "text-sm text-muted-foreground" }, "Loading report…") :
+        selected.error ? h("div", { className: "text-sm text-destructive" }, selected.error) :
+        h(MarkdownBlock, {
+          source: selected.report.report_markdown,
+          enabled: props.renderMarkdown,
+        }),
+      ) : null,
     );
   }
 
@@ -1525,8 +1643,8 @@
   }
 
   // ---------------------------------------------------------------------
-  // OrchestrationPanel — collapsible settings panel for the kanban
-  // orchestrator (orchestrator profile picker, default assignee picker,
+  // OrchestrationPanel — collapsible settings panel for native triage
+  // decomposition (orchestrator profile picker, default assignee picker,
   // auto-decompose toggle, plus per-profile description editing with
   // auto-generate). Backed by /orchestration + /profiles endpoints.
   // ---------------------------------------------------------------------
@@ -1615,9 +1733,8 @@
       });
     };
 
-    const headerLabel = expanded
-      ? "▾ Orchestration settings"
-      : "▸ Orchestration settings";
+    const panelTitle = "Native triage decomposition";
+    const headerLabel = expanded ? "▾ " + panelTitle : "▸ " + panelTitle;
 
     // Mode pill — always visible (collapsed or expanded). One click flips
     // between Auto and Manual. Auto = dispatcher decomposes new triage tasks
@@ -1628,8 +1745,8 @@
     const modePillTitle = settings === null
       ? "Loading mode…"
       : (autoOn
-          ? "Orchestration: Auto — the dispatcher decomposes new triage tasks automatically every tick. Click to switch to Manual (pre-PR behavior)."
-          : "Orchestration: Manual — triage tasks stay in triage until you click ⚗ Decompose on each card. Click to switch to Auto.");
+          ? "Native triage: Auto — the dispatcher decomposes manually created triage cards automatically every tick. Click to switch to Manual."
+          : "Native triage: Manual — manually created triage cards stay in triage until you click ⚗ Decompose. Click to switch to Auto.");
     const modePill = h("button", {
       type: "button",
       onClick: function () {
@@ -1644,7 +1761,7 @@
                     ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
                     : "border-muted-foreground/30 bg-muted/30 text-muted-foreground"),
     },
-      "Orchestration: ",
+      "Native triage: ",
       h("span", { className: "ml-1 font-semibold" },
         settings === null ? "…" : (autoOn ? "Auto" : "Manual"))
     );
@@ -1656,7 +1773,7 @@
           type: "button",
           onClick: function () { setExpanded(true); },
           className: "underline text-muted-foreground hover:text-foreground",
-          title: "Configure the kanban orchestrator (profile picker, default assignee, auto-decompose, profile descriptions)",
+          title: "Configure native triage decomposition (profile picker, default assignee, auto-decompose, profile descriptions)",
         }, headerLabel),
       );
     }
@@ -1680,6 +1797,8 @@
         msg ? h("div", {
           className: msg.ok ? "hermes-kanban-msg-ok" : "hermes-kanban-msg-err",
         }, msg.text) : null,
+        h("div", { className: "text-xs text-muted-foreground" },
+          "Applies only to manually created triage cards. OrgRun plans keep their own versioned DAG, authority, and role routing."),
 
         settings ? h("div", { className: "grid gap-3 sm:grid-cols-3" },
           h("div", { className: "flex flex-col gap-1" },
@@ -1698,7 +1817,7 @@
             h("div", { className: "text-[10px] text-muted-foreground" },
               "Resolved: " + (settings.resolved_orchestrator_profile || "default")),
             h("div", { className: "text-[10px] text-muted-foreground" },
-              "Owns the root task after fan-out (wakes back up to judge completion). Does not drive how tasks split — configure the decomposer model under auxiliary.kanban_decomposer."),
+              "Used only when decomposing manually created triage cards. Configure the decomposer model under auxiliary.kanban_decomposer."),
           ),
           h("div", { className: "flex flex-col gap-1" },
             h(Label, { className: "text-xs text-muted-foreground" },
@@ -1726,12 +1845,12 @@
                   saveSettings({ auto_decompose: checked === true });
                 },
               }),
-              "Auto-decompose triage tasks",
+              "Auto-decompose native triage cards",
             ),
             h("div", { className: "text-[10px] text-muted-foreground" },
               settings.auto_decompose
-                ? "The dispatcher decomposes new triage tasks automatically."
-                : "Triage tasks stay in triage until you click ⚗ Decompose."),
+                ? "The dispatcher decomposes manually created triage cards automatically."
+                : "Manually created triage cards stay in triage until you click ⚗ Decompose."),
           ),
         ) : h("div", { className: "text-xs text-muted-foreground" },
           "Loading…"),
@@ -1740,7 +1859,7 @@
           h(Label, { className: "text-xs text-muted-foreground" },
             "Profile descriptions"),
           h("div", { className: "text-[10px] text-muted-foreground pb-2" },
-            "Descriptions guide the decomposer's routing. Click ⚗ to auto-generate, or edit and save."),
+            "Descriptions guide routing for native triage decomposition. Click ⚗ to auto-generate, or edit and save."),
           profiles.length === 0
             ? h("div", { className: "text-xs text-muted-foreground" }, "No profiles installed.")
             : h("div", { className: "flex flex-col gap-2" },
@@ -2012,15 +2131,6 @@
     const { t } = useI18n();
     const tenants = (props.board && props.board.tenants) || [];
     const assignees = (props.board && props.board.assignees) || [];
-    const sync = props.sync;
-    const syncLabel = !sync ? null
-      : sync.state === "local_only" ? "Local only"
-      : sync.state === "backend_offline" ? "Backend offline"
-      : sync.state === "sync_error" ? "Sync error"
-      : "Backend synced";
-    const syncTitle = sync && sync.last_error
-      ? `${syncLabel}: ${sync.last_error}`
-      : syncLabel;
     return h("div", { className: "flex flex-wrap items-end gap-3" },
       h("div", { className: "flex flex-col gap-1",
                  title: "Fuzzy-match tasks by id, title, or description. Matches across all columns." },
@@ -2075,10 +2185,6 @@
         tx(t, "lanesByProfile", "Lanes by profile"),
       ),
       h("div", { className: "flex-1" }),
-      syncLabel ? h("span", {
-        className: "hermes-kanban-sync-status hermes-kanban-sync-status--" + sync.state,
-        title: syncTitle,
-      }, syncLabel) : null,
       h(Button, {
         onClick: props.onNudgeDispatch,
         size: "sm",
@@ -2600,15 +2706,6 @@
             t.priority > 0
               ? h(Badge, { className: "hermes-kanban-priority",
                            title: `Priority ${t.priority}. Higher-priority tasks are claimed first by the dispatcher.` }, `P${t.priority}`)
-              : null,
-            t.origin === "remote"
-              ? h(Badge, {
-                  variant: "outline",
-                  className: "hermes-kanban-remote-badge",
-                  title: t.remote_sync_status === "deferred"
-                    ? "Remote card deferred while its backend lease is unavailable."
-                    : "Remote-origin card; dispatch requires a backend lease.",
-                }, "Remote")
               : null,
             t.tenant
               ? h(Badge, { variant: "outline", className: "hermes-kanban-tag",
