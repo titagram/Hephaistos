@@ -25,6 +25,7 @@ from hermes_cli.implementation_plan import (
 )
 from hermes_cli.kanban_portfolio import create_org_run
 from hermes_cli.org_run_store import get_org_run, list_org_nodes
+from hermes_cli.org_run_store import insert_report, refresh_org_run_state
 from tools.delegation_routing import DelegationProfile
 
 
@@ -424,6 +425,95 @@ def test_owned_materialization_commits_before_emitting_exactly_one_hook(
         assert hook["in_transaction"] is False
         assert hook["task_status"] == "done"
         assert hook["counts"] == (6, 1, 1, 6)
+
+
+def test_refresh_org_run_state_uses_durable_statuses_with_exact_precedence(
+    tmp_path,
+):
+    plan = _plan()
+    with kb.connect(tmp_path / "kanban.db") as conn:
+        topology = materialize_org_run(
+            conn,
+            plan,
+            _validation(plan),
+            board="default",
+            activate=False,
+        )
+        execution_id = topology.tasks["runtime"].execution_id
+
+        assert refresh_org_run_state(conn, plan.run_id) == "materialized"
+
+        conn.execute(
+            "UPDATE tasks SET status='running' WHERE id=?",
+            (execution_id,),
+        )
+        conn.commit()
+        assert refresh_org_run_state(conn, plan.run_id) == "running"
+
+        conn.execute("UPDATE tasks SET status='done' WHERE id=?", (execution_id,))
+        conn.execute(
+            "UPDATE tasks SET status='running' WHERE id=?",
+            (topology.integration_id,),
+        )
+        conn.commit()
+        assert refresh_org_run_state(conn, plan.run_id) == "integrating"
+
+        conn.execute(
+            "UPDATE tasks SET status='done' WHERE id=?",
+            (topology.integration_id,),
+        )
+        conn.execute(
+            "UPDATE tasks SET status='running' WHERE id=?",
+            (topology.review_id,),
+        )
+        conn.commit()
+        assert refresh_org_run_state(conn, plan.run_id) == "reviewing"
+
+        conn.execute(
+            "UPDATE tasks SET status='done' WHERE id=?",
+            (topology.review_id,),
+        )
+        conn.execute(
+            "UPDATE tasks SET status='done' WHERE id=?",
+            (topology.finalization_id,),
+        )
+        conn.commit()
+        assert refresh_org_run_state(conn, plan.run_id) == "reviewing"
+
+        insert_report(
+            conn,
+            board_slug="default",
+            report_type="org_run_final",
+            subject_id=plan.run_id,
+            terminal_run_id=None,
+            source_version=1,
+            report_json="{}",
+            report_markdown="# Final",
+            generated_at=123,
+            idempotency_key=f"org-run:{plan.run_id}:final-report:v1",
+        )
+        assert refresh_org_run_state(conn, plan.run_id) == "completed"
+
+        conn.execute(
+            "UPDATE kanban_org_runs SET plan_version=2 WHERE run_id=?",
+            (plan.run_id,),
+        )
+        conn.commit()
+        assert refresh_org_run_state(conn, plan.run_id) == "reviewing"
+
+        conn.execute(
+            "UPDATE tasks SET status='blocked' WHERE id=?",
+            (execution_id,),
+        )
+        conn.commit()
+        assert refresh_org_run_state(conn, plan.run_id) == "blocked"
+
+        conn.execute(
+            "UPDATE kanban_org_runs SET state='cancelled' WHERE run_id=?",
+            (plan.run_id,),
+        )
+        conn.commit()
+        assert refresh_org_run_state(conn, plan.run_id) == "cancelled"
 
 
 def _legacy_payload(*, run_id: str = "legacy-run-001") -> dict:

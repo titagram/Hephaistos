@@ -191,6 +191,111 @@ def set_org_run_state(
             raise KeyError(f"unknown OrgRun: {run_id}")
 
 
+def update_org_run_plan(
+    conn: sqlite3.Connection,
+    run_id: str,
+    *,
+    plan_version: int,
+    plan_hash: str,
+    now: int | None = None,
+) -> None:
+    """Advance the current immutable plan pointer inside the caller's transaction."""
+    with write_txn(conn):
+        updated = conn.execute(
+            "UPDATE kanban_org_runs "
+            "SET plan_version = ?, plan_hash = ?, updated_at = ? "
+            "WHERE run_id = ?",
+            (int(plan_version), plan_hash, _timestamp(now), run_id),
+        )
+        if updated.rowcount != 1:
+            raise KeyError(f"unknown OrgRun: {run_id}")
+
+
+def set_org_nodes_state(
+    conn: sqlite3.Connection,
+    run_id: str,
+    node_ids: tuple[str, ...],
+    state: str,
+) -> None:
+    """Update durable lifecycle state for an exact set of owned nodes."""
+    if not node_ids:
+        return
+    placeholders = ",".join("?" for _ in node_ids)
+    with write_txn(conn):
+        updated = conn.execute(
+            f"UPDATE kanban_org_nodes SET state = ? "
+            f"WHERE run_id = ? AND node_id IN ({placeholders})",
+            (state, run_id, *node_ids),
+        )
+        if updated.rowcount != len(node_ids):
+            raise ValueError(f"OrgRun {run_id} has incomplete stored topology")
+
+
+def refresh_org_run_state(conn: sqlite3.Connection, run_id: str) -> str:
+    """Derive and persist OrgRun state solely from durable Kanban rows."""
+    with write_txn(conn):
+        run = get_org_run(conn, run_id)
+        if run is None:
+            raise KeyError(f"unknown OrgRun: {run_id}")
+        if run.state == "cancelled":
+            return "cancelled"
+
+        rows = conn.execute(
+            "SELECT n.node_kind, t.status "
+            "FROM kanban_org_nodes AS n "
+            "JOIN tasks AS t ON t.id = n.task_id "
+            "WHERE n.run_id = ? AND n.state = 'active'",
+            (run_id,),
+        ).fetchall()
+        by_kind: dict[str, list[str]] = {}
+        for row in rows:
+            by_kind.setdefault(str(row["node_kind"]), []).append(
+                str(row["status"])
+            )
+
+        required_statuses = [
+            status
+            for kind, statuses in by_kind.items()
+            if kind != "anchor"
+            for status in statuses
+        ]
+        finalization_done = "done" in by_kind.get("finalization", ())
+        final_report_exists = conn.execute(
+            "SELECT 1 FROM kanban_reports "
+            "WHERE board_slug = ? AND subject_id = ? "
+            "AND source_version = ? "
+            "AND report_type IN ('org_run', 'org_run_final') LIMIT 1",
+            (run.board_slug, run_id, run.plan_version),
+        ).fetchone() is not None
+        global_review_started = any(
+            status in {"running", "done"}
+            for status in by_kind.get("global_review", ())
+        )
+        integration_started = any(
+            status in {"running", "done"}
+            for status in by_kind.get("integration", ())
+        )
+        execution_started = any(
+            status in {"running", "done"}
+            for status in by_kind.get("execution", ())
+        )
+
+        if "blocked" in required_statuses:
+            state = "blocked"
+        elif finalization_done and final_report_exists:
+            state = "completed"
+        elif global_review_started:
+            state = "reviewing"
+        elif integration_started:
+            state = "integrating"
+        elif execution_started:
+            state = "running"
+        else:
+            state = "materialized"
+        set_org_run_state(conn, run_id, state)
+        return state
+
+
 def insert_plan_version(
     conn: sqlite3.Connection,
     *,

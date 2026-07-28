@@ -2,22 +2,25 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import hashlib
 import json
+from pathlib import Path
 import re
 import sqlite3
 import time
-from typing import Any
+from typing import Any, Callable
 
 from hermes_cli import kanban_db as kb
 from hermes_cli.implementation_plan import (
     IMPLEMENTATION_PLAN_SCHEMA,
+    ImplementationAmendment,
     ImplementationPlan,
     ImplementationTask,
     PlanValidation,
     canonical_plan_json,
     parse_implementation_plan,
+    validate_implementation_plan,
 )
 from hermes_cli.org_run_store import (
     get_org_run,
@@ -25,6 +28,8 @@ from hermes_cli.org_run_store import (
     insert_org_run,
     insert_plan_version,
     list_org_nodes,
+    set_org_nodes_state,
+    update_org_run_plan,
 )
 
 
@@ -141,6 +146,52 @@ def _planned_node_keys(plan: ImplementationPlan) -> tuple[str, ...]:
         keys.append(f"org-run:{plan.run_id}:review")
     keys.append(f"org-run:{plan.run_id}:finalize")
     return tuple(keys)
+
+
+def _expected_plan_node_roles(
+    plan: ImplementationPlan,
+) -> tuple[tuple[str, str, str], ...]:
+    return (
+        (f"org-run:{plan.run_id}:anchor", "anchor", "orchestrator"),
+        *(
+            (
+                _task_node_key(plan.run_id, task.id),
+                "execution",
+                task.role,
+            )
+            for task in plan.tasks
+        ),
+        *(
+            (
+                f"{_task_node_key(plan.run_id, task.id)}:review",
+                "task_review",
+                "reviewer",
+            )
+            for task in plan.tasks
+            if _review_required(task)
+        ),
+        (
+            f"org-run:{plan.run_id}:integration",
+            "integration",
+            "orchestrator",
+        ),
+        *(
+            [
+                (
+                    f"org-run:{plan.run_id}:review",
+                    "global_review",
+                    "reviewer",
+                )
+            ]
+            if _global_review_required(plan)
+            else []
+        ),
+        (
+            f"org-run:{plan.run_id}:finalize",
+            "finalization",
+            "orchestrator",
+        ),
+    )
 
 
 def _reject_unowned_task_keys(
@@ -520,6 +571,531 @@ def materialize_org_run(
     return topology
 
 
+def _load_plan_version(
+    conn: sqlite3.Connection,
+    run_id: str,
+    plan_version: int,
+) -> ImplementationPlan:
+    row = conn.execute(
+        "SELECT plan_json FROM kanban_org_plan_versions "
+        "WHERE run_id = ? AND plan_version = ?",
+        (run_id, int(plan_version)),
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"OrgRun {run_id} has no plan version {plan_version}")
+    try:
+        plan = parse_implementation_plan(json.loads(row["plan_json"]))
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError(
+            f"OrgRun {run_id} has invalid plan version {plan_version}"
+        ) from exc
+    if plan.run_id != run_id:
+        raise ValueError(f"OrgRun {run_id} has invalid stored plan identity")
+    return plan
+
+
+def _apply_amendment_to_plan(
+    plan: ImplementationPlan,
+    amendment: ImplementationAmendment,
+) -> ImplementationPlan:
+    if amendment.run_id != plan.run_id:
+        raise ValueError(
+            f"amendment run_id {amendment.run_id} does not match {plan.run_id}"
+        )
+    current_ids = {task.id for task in plan.tasks}
+    replacements = {
+        replacement.replaces: replacement.task
+        for replacement in amendment.replace_tasks
+    }
+    cancelled = set(amendment.cancel_task_ids)
+    targets = set(replacements) | cancelled
+    missing = sorted(targets - current_ids)
+    if missing:
+        raise ValueError(f"unknown amendment target: {', '.join(missing)}")
+
+    replacement_ids = {
+        old_id: task.id for old_id, task in replacements.items()
+    }
+
+    def rewrite_dependencies(task: ImplementationTask) -> ImplementationTask:
+        dependencies: list[str] = []
+        for dependency in task.depends_on:
+            if dependency in cancelled:
+                continue
+            rewritten = replacement_ids.get(dependency, dependency)
+            if rewritten not in dependencies:
+                dependencies.append(rewritten)
+        return replace(task, depends_on=tuple(dependencies))
+
+    tasks: list[ImplementationTask] = []
+    for task in plan.tasks:
+        if task.id in cancelled:
+            continue
+        replacement = replacements.get(task.id)
+        tasks.append(rewrite_dependencies(replacement or task))
+    tasks.extend(rewrite_dependencies(task) for task in amendment.add_tasks)
+    if not tasks:
+        raise ValueError("implementation amendment cannot remove every task")
+    return replace(plan, tasks=tuple(tasks))
+
+
+def _amendment_replay_topology(
+    conn: sqlite3.Connection,
+    run,
+    amendment: ImplementationAmendment,
+) -> OrgRunTopology | None:
+    if run.plan_version != amendment.base_plan_version + 1:
+        return None
+    try:
+        base_plan = _load_plan_version(
+            conn,
+            amendment.run_id,
+            amendment.base_plan_version,
+        )
+        candidate = _apply_amendment_to_plan(base_plan, amendment)
+    except ValueError:
+        return None
+    candidate_hash = hashlib.sha256(
+        canonical_plan_json(candidate).encode("utf-8")
+    ).hexdigest()
+    if candidate_hash != run.plan_hash:
+        return None
+    return load_org_run_topology(conn, amendment.run_id)
+
+
+def _new_amendment_node_keys(
+    plan: ImplementationPlan,
+    task_ids: set[str],
+    *,
+    add_global_review: bool,
+) -> tuple[str, ...]:
+    keys: list[str] = []
+    by_id = {task.id: task for task in plan.tasks}
+    for task_id in sorted(task_ids):
+        task = by_id[task_id]
+        keys.append(_task_node_key(plan.run_id, task_id))
+        if _review_required(task):
+            keys.append(f"{_task_node_key(plan.run_id, task_id)}:review")
+    if add_global_review:
+        keys.append(f"org-run:{plan.run_id}:review")
+    return tuple(keys)
+
+
+def _reject_amendment_key_collisions(
+    conn: sqlite3.Connection,
+    run_id: str,
+    node_keys: tuple[str, ...],
+) -> None:
+    if not node_keys:
+        return
+    placeholders = ",".join("?" for _ in node_keys)
+    historical = conn.execute(
+        f"SELECT node_id FROM kanban_org_nodes "
+        f"WHERE run_id = ? AND node_id IN ({placeholders}) LIMIT 1",
+        (run_id, *node_keys),
+    ).fetchone()
+    if historical is not None:
+        raise ValueError(
+            f"OrgRun node id was already used: {historical['node_id']}"
+        )
+    collision = conn.execute(
+        f"SELECT idempotency_key FROM tasks "
+        f"WHERE idempotency_key IN ({placeholders}) "
+        f"AND status != 'archived' LIMIT 1",
+        node_keys,
+    ).fetchone()
+    if collision is not None:
+        raise ValueError(
+            "pre-existing OrgRun task key requires explicit adoption: "
+            f"{collision['idempotency_key']}"
+        )
+
+
+def _archive_amendment_targets(
+    conn: sqlite3.Connection,
+    run_id: str,
+    target_ids: set[str],
+) -> tuple[str, ...]:
+    node_ids: list[str] = []
+    for task_id in sorted(target_ids):
+        prefix = _task_node_key(run_id, task_id)
+        rows = conn.execute(
+            "SELECT node_id, task_id FROM kanban_org_nodes "
+            "WHERE run_id = ? AND state = 'active' "
+            "AND node_id IN (?, ?)",
+            (run_id, prefix, f"{prefix}:review"),
+        ).fetchall()
+        for row in rows:
+            if not kb.archive_task(conn, str(row["task_id"])):
+                raise ValueError(
+                    f"cannot amend task {task_id}: card is already archived"
+                )
+            node_ids.append(str(row["node_id"]))
+    set_org_nodes_state(conn, run_id, tuple(node_ids), "cancelled")
+    return tuple(node_ids)
+
+
+def _assert_amendment_targets_unstarted(
+    conn: sqlite3.Connection,
+    run_id: str,
+    target_ids: set[str],
+) -> None:
+    for task_id in sorted(target_ids):
+        prefix = _task_node_key(run_id, task_id)
+        rows = conn.execute(
+            "SELECT n.node_kind, t.status "
+            "FROM kanban_org_nodes AS n "
+            "JOIN tasks AS t ON t.id = n.task_id "
+            "WHERE n.run_id = ? AND n.state = 'active' "
+            "AND n.node_id IN (?, ?)",
+            (run_id, prefix, f"{prefix}:review"),
+        ).fetchall()
+        if not any(row["node_kind"] == "execution" for row in rows):
+            raise ValueError(f"unknown amendment target: {task_id}")
+        started = sorted(
+            str(row["node_kind"])
+            for row in rows
+            if row["status"] in {"done", "running"}
+        )
+        if started:
+            raise ValueError(
+                f"cannot amend started task {task_id}: {', '.join(started)}"
+            )
+
+
+def _reconcile_parent_links(
+    conn: sqlite3.Connection,
+    child_id: str,
+    *,
+    expected_parent_ids: set[str],
+    managed_parent_ids: set[str],
+) -> None:
+    current = set(kb.parent_ids(conn, child_id))
+    for parent_id in sorted((current & managed_parent_ids) - expected_parent_ids):
+        kb.unlink_tasks(conn, parent_id, child_id)
+    for parent_id in sorted(expected_parent_ids - current):
+        kb.link_tasks(conn, parent_id, child_id)
+
+
+def apply_org_run_amendment(
+    conn: sqlite3.Connection,
+    amendment: ImplementationAmendment,
+    *,
+    board: str | None,
+    repository: Path,
+    profile_exists: Callable[[str], bool],
+) -> OrgRunTopology:
+    """Atomically apply one validated amendment to a local OrgRun."""
+    if conn.in_transaction:
+        raise ValueError(
+            "apply_org_run_amendment cannot run inside an existing transaction"
+        )
+    with kb.write_txn(conn):
+        run = get_org_run(conn, amendment.run_id)
+        if run is None:
+            raise KeyError(f"unknown OrgRun: {amendment.run_id}")
+        if run.origin != "local":
+            raise ValueError("only local OrgRuns can be amended")
+        board_slug = board if board is not None else kb.get_current_board()
+        if board_slug != run.board_slug:
+            raise ValueError(
+                f"OrgRun {amendment.run_id} belongs to board {run.board_slug}"
+            )
+        if run.plan_version != amendment.base_plan_version:
+            replay = _amendment_replay_topology(conn, run, amendment)
+            if replay is not None:
+                return replay
+            raise ValueError(
+                "stale base_plan_version: "
+                f"expected {run.plan_version}, got {amendment.base_plan_version}"
+            )
+
+        current_plan = _load_plan_version(
+            conn,
+            amendment.run_id,
+            run.plan_version,
+        )
+        current_topology = load_org_run_topology(conn, amendment.run_id)
+        if current_topology is None:
+            raise ValueError(
+                f"OrgRun {amendment.run_id} has incomplete stored topology"
+            )
+        targets = {
+            *(replacement.replaces for replacement in amendment.replace_tasks),
+            *amendment.cancel_task_ids,
+        }
+        _assert_amendment_targets_unstarted(
+            conn,
+            amendment.run_id,
+            targets,
+        )
+        amended_plan = _apply_amendment_to_plan(current_plan, amendment)
+        validation = validate_implementation_plan(
+            amended_plan,
+            repository=repository,
+            profile_exists=profile_exists,
+            role_route_exists=lambda _role: True,
+        )
+        new_version = run.plan_version + 1
+
+        new_task_ids = {
+            *(task.id for task in amendment.add_tasks),
+            *(replacement.task.id for replacement in amendment.replace_tasks),
+        }
+        current_global_review = current_topology.review_id is not None
+        amended_global_review = _global_review_required(amended_plan)
+        add_global_review = amended_global_review and not current_global_review
+        node_keys = _new_amendment_node_keys(
+            amended_plan,
+            new_task_ids,
+            add_global_review=add_global_review,
+        )
+        _reject_amendment_key_collisions(
+            conn,
+            amendment.run_id,
+            node_keys,
+        )
+
+        active_nodes = [
+            node for node in list_org_nodes(conn, amendment.run_id)
+            if node.state == "active"
+        ]
+        managed_task_ids = {node.task_id for node in active_nodes}
+        _archive_amendment_targets(conn, amendment.run_id, targets)
+
+        execution_ids = {
+            task_id: topology.execution_id
+            for task_id, topology in current_topology.tasks.items()
+            if task_id not in targets
+        }
+        review_ids = {
+            task_id: topology.review_id
+            for task_id, topology in current_topology.tasks.items()
+            if task_id not in targets and topology.review_id is not None
+        }
+        runnable_kwargs = _runnable_workspace_kwargs(board)
+        triage = run.state == "materialized"
+        node_specs: list[_NodeSpec] = []
+
+        for task in amended_plan.tasks:
+            if task.id not in new_task_ids:
+                continue
+            node_id = _task_node_key(amendment.run_id, task.id)
+            execution_ids[task.id] = kb.create_task(
+                conn,
+                title=task.title,
+                body=(
+                    f"{amended_plan.objective}\n\n"
+                    f"Acceptance criteria:\n- "
+                    + "\n- ".join(task.acceptance_criteria)
+                    + "\n\nVerification:\n- "
+                    + "\n- ".join(task.verification)
+                ),
+                assignee=_profile(validation, task.role),
+                created_by=_CREATED_BY,
+                parents=[current_topology.anchor_id],
+                triage=triage,
+                idempotency_key=node_id,
+                board=board,
+                **runnable_kwargs,
+            )
+
+        for task in amended_plan.tasks:
+            if task.id not in new_task_ids or not _review_required(task):
+                continue
+            node_id = f"{_task_node_key(amendment.run_id, task.id)}:review"
+            review_ids[task.id] = kb.create_task(
+                conn,
+                title=f"Review: {task.title}",
+                body=(
+                    "Independently verify this implementation task, its declared "
+                    "scope, acceptance criteria, and focused test evidence."
+                ),
+                assignee=_profile(validation, "reviewer"),
+                created_by=_CREATED_BY,
+                parents=[execution_ids[task.id]],
+                skills=_REVIEW_SKILLS,
+                idempotency_key=node_id,
+                board=board,
+                **runnable_kwargs,
+            )
+
+        terminal_task_ids = {
+            task.id: review_ids.get(task.id, execution_ids[task.id])
+            for task in amended_plan.tasks
+        }
+        terminal_node_ids = {
+            task.id: (
+                f"{_task_node_key(amendment.run_id, task.id)}:review"
+                if task.id in review_ids
+                else _task_node_key(amendment.run_id, task.id)
+            )
+            for task in amended_plan.tasks
+        }
+        managed_task_ids.update(execution_ids.values())
+        managed_task_ids.update(review_ids.values())
+
+        for task in amended_plan.tasks:
+            dependency_ids = validation.ordered_dependencies.get(task.id, ())
+            expected_parents = {
+                terminal_task_ids[parent_id] for parent_id in dependency_ids
+            }
+            _reconcile_parent_links(
+                conn,
+                execution_ids[task.id],
+                expected_parent_ids=expected_parents,
+                managed_parent_ids=managed_task_ids - {current_topology.anchor_id},
+            )
+            if task.id not in new_task_ids:
+                continue
+            dependency_node_ids = tuple(
+                terminal_node_ids[parent_id] for parent_id in dependency_ids
+            )
+            node_specs.append(
+                _NodeSpec(
+                    node_id=_task_node_key(amendment.run_id, task.id),
+                    task_id=execution_ids[task.id],
+                    node_kind="execution",
+                    logical_role=task.role,
+                    task_contract=_task_contract(task),
+                    dependency_node_ids=(
+                        f"org-run:{amendment.run_id}:anchor",
+                        *dependency_node_ids,
+                    ),
+                )
+            )
+            if task.id in review_ids:
+                node_specs.append(
+                    _NodeSpec(
+                        node_id=(
+                            f"{_task_node_key(amendment.run_id, task.id)}:review"
+                        ),
+                        task_id=review_ids[task.id],
+                        node_kind="task_review",
+                        logical_role="reviewer",
+                        task_contract={
+                            "task_id": task.id,
+                            "acceptance_criteria": list(task.acceptance_criteria),
+                            "verification": list(task.verification),
+                        },
+                        dependency_node_ids=(
+                            _task_node_key(amendment.run_id, task.id),
+                        ),
+                    )
+                )
+
+        expected_integration_parents = set(terminal_task_ids.values())
+        _reconcile_parent_links(
+            conn,
+            current_topology.integration_id,
+            expected_parent_ids=expected_integration_parents,
+            managed_parent_ids=managed_task_ids,
+        )
+
+        global_review_id = current_topology.review_id
+        final_parent_id = current_topology.integration_id
+        if add_global_review:
+            review_node_id = f"org-run:{amendment.run_id}:review"
+            global_review_id = kb.create_task(
+                conn,
+                title=f"Review integrated OrgRun {amendment.run_id}",
+                body=(
+                    "Independently verify the integrated objective, acceptance "
+                    "criteria, and regression evidence."
+                ),
+                assignee=_profile(validation, "reviewer"),
+                created_by=_CREATED_BY,
+                parents=[current_topology.integration_id],
+                skills=_REVIEW_SKILLS,
+                idempotency_key=review_node_id,
+                board=board,
+                **runnable_kwargs,
+            )
+            node_specs.append(
+                _NodeSpec(
+                    node_id=review_node_id,
+                    task_id=global_review_id,
+                    node_kind="global_review",
+                    logical_role="reviewer",
+                    task_contract={
+                        "objective": amended_plan.objective,
+                        "acceptance_criteria": list(
+                            amended_plan.acceptance_criteria
+                        ),
+                    },
+                    dependency_node_ids=(
+                        f"org-run:{amendment.run_id}:integration",
+                    ),
+                )
+            )
+            managed_task_ids.add(global_review_id)
+        elif current_global_review and not amended_global_review:
+            assert global_review_id is not None
+            review_status = kb.get_task(conn, global_review_id).status
+            if review_status in {"done", "running"}:
+                raise ValueError(
+                    "cannot remove a started global review during amendment"
+                )
+            if not kb.archive_task(conn, global_review_id):
+                raise ValueError("cannot archive the obsolete global review")
+            set_org_nodes_state(
+                conn,
+                amendment.run_id,
+                (f"org-run:{amendment.run_id}:review",),
+                "cancelled",
+            )
+            global_review_id = None
+
+        if global_review_id is not None:
+            final_parent_id = global_review_id
+        _reconcile_parent_links(
+            conn,
+            current_topology.finalization_id,
+            expected_parent_ids={final_parent_id},
+            managed_parent_ids=managed_task_ids,
+        )
+
+        for spec in node_specs:
+            insert_org_node(
+                conn,
+                run_id=amendment.run_id,
+                node_id=spec.node_id,
+                task_id=spec.task_id,
+                node_kind=spec.node_kind,
+                plan_version=new_version,
+                contract_hash=_contract_hash(
+                    node_kind=spec.node_kind,
+                    logical_role=spec.logical_role,
+                    task_contract=spec.task_contract,
+                    dependency_node_ids=spec.dependency_node_ids,
+                    plan_version=new_version,
+                    base_commit=amended_plan.base_commit,
+                ),
+                logical_role=spec.logical_role,
+            )
+
+        insert_plan_version(
+            conn,
+            run_id=amendment.run_id,
+            plan_version=new_version,
+            plan_hash=validation.plan_hash,
+            plan_json=canonical_plan_json(amended_plan),
+            reason=amendment.reason,
+        )
+        update_org_run_plan(
+            conn,
+            amendment.run_id,
+            plan_version=new_version,
+            plan_hash=validation.plan_hash,
+        )
+        topology = load_org_run_topology(conn, amendment.run_id)
+        if topology is None:
+            raise ValueError(
+                f"OrgRun {amendment.run_id} has incomplete stored topology"
+            )
+        return topology
+
+
 def _logical_task_id(run_id: str, node_id: str, node_kind: str) -> str | None:
     new_prefix = f"org-run:{run_id}:task:"
     legacy_prefix = f"org-run:{run_id}:"
@@ -559,6 +1135,7 @@ def _validate_stored_node_provenance(
         ) from exc
 
     expected_records: set[tuple[str, str, str, str]]
+    current_plan: ImplementationPlan | None = None
     if plan_payload.get("schema") == IMPLEMENTATION_PLAN_SCHEMA:
         try:
             plan = parse_implementation_plan(plan_payload)
@@ -568,33 +1145,8 @@ def _validate_stored_node_provenance(
             ) from exc
         if plan.run_id != run_id:
             raise ValueError(f"OrgRun {run_id} has incomplete stored topology")
-        expected_specs = [
-            (f"org-run:{run_id}:anchor", "anchor", "orchestrator"),
-            *(
-                (
-                    _task_node_key(run_id, task.id),
-                    "execution",
-                    task.role,
-                )
-                for task in plan.tasks
-            ),
-            *(
-                (
-                    f"{_task_node_key(run_id, task.id)}:review",
-                    "task_review",
-                    "reviewer",
-                )
-                for task in plan.tasks
-                if _review_required(task)
-            ),
-            (f"org-run:{run_id}:integration", "integration", "orchestrator"),
-            *(
-                [(f"org-run:{run_id}:review", "global_review", "reviewer")]
-                if _global_review_required(plan)
-                else []
-            ),
-            (f"org-run:{run_id}:finalize", "finalization", "orchestrator"),
-        ]
+        current_plan = plan
+        expected_specs = _expected_plan_node_roles(plan)
         expected_node_ids = {node_id for node_id, _, _ in expected_specs}
         placeholders = ",".join("?" for _ in expected_node_ids)
         task_rows = conn.execute(
@@ -633,9 +1185,52 @@ def _validate_stored_node_provenance(
     else:
         raise ValueError(f"OrgRun {run_id} has incomplete stored topology")
 
+    if any(node.state not in {"active", "cancelled"} for node in nodes):
+        raise ValueError(f"OrgRun {run_id} has incomplete stored topology")
+    if current_plan is not None:
+        for node in nodes:
+            if node.state != "cancelled":
+                continue
+            historical = conn.execute(
+                "SELECT plan_json FROM kanban_org_plan_versions "
+                "WHERE run_id = ? AND plan_version = ?",
+                (run_id, node.plan_version),
+            ).fetchone()
+            try:
+                historical_plan = parse_implementation_plan(
+                    json.loads(historical["plan_json"])
+                )
+            except (KeyError, TypeError, ValueError):
+                raise ValueError(
+                    f"OrgRun {run_id} has incomplete stored topology"
+                ) from None
+            historical_specs = {
+                node_id: (node_kind, logical_role)
+                for node_id, node_kind, logical_role
+                in _expected_plan_node_roles(historical_plan)
+            }
+            if historical_specs.get(node.node_id) != (
+                node.node_kind,
+                node.logical_role,
+            ):
+                raise ValueError(
+                    f"OrgRun {run_id} has incomplete stored topology"
+                )
+            task_row = conn.execute(
+                "SELECT idempotency_key FROM tasks WHERE id = ?",
+                (node.task_id,),
+            ).fetchone()
+            if (
+                task_row is None
+                or task_row["idempotency_key"] != node.node_id
+            ):
+                raise ValueError(
+                    f"OrgRun {run_id} has incomplete stored topology"
+                )
     actual_records = {
         (node.node_id, node.task_id, node.node_kind, node.logical_role)
         for node in nodes
+        if node.state == "active"
     }
     if actual_records != expected_records:
         raise ValueError(f"OrgRun {run_id} has incomplete stored topology")
@@ -664,6 +1259,8 @@ def load_org_run_topology(
     finalization_id: str | None = None
     anchor_task_ids: list[str] = []
     for node in nodes:
+        if node.state != "active":
+            continue
         logical_task_id = _logical_task_id(run_id, node.node_id, node.node_kind)
         if node.node_kind == "anchor":
             anchor_task_ids.append(node.task_id)

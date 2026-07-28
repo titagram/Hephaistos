@@ -14,6 +14,7 @@ from tools.delegation_routing import ALLOWED_ROLES
 
 
 IMPLEMENTATION_PLAN_SCHEMA = "hades.implementation-plan.v1"
+IMPLEMENTATION_AMENDMENT_SCHEMA = "hades.implementation-amendment.v1"
 RISK_LEVELS = frozenset({"low", "medium", "high"})
 _RUNTIME_ROLES = ("orchestrator", "leaf", "reviewer")
 _FORBIDDEN_KEY_PARTS = ("provider", "model", "credential")
@@ -53,6 +54,23 @@ class PlanValidation:
     routed_roles: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class ReplacementTask:
+    replaces: str
+    task: ImplementationTask
+
+
+@dataclass(frozen=True)
+class ImplementationAmendment:
+    schema: str
+    run_id: str
+    base_plan_version: int
+    reason: str
+    add_tasks: tuple[ImplementationTask, ...]
+    replace_tasks: tuple[ReplacementTask, ...]
+    cancel_task_ids: tuple[str, ...]
+
+
 def _text(value: Any, field: str) -> str:
     result = str(value or "").strip()
     if not result:
@@ -87,6 +105,37 @@ def _reject_provider_keys(value: Any) -> None:
             _reject_provider_keys(nested)
 
 
+def _parse_task(raw: Any, field: str) -> ImplementationTask:
+    if not isinstance(raw, Mapping):
+        raise ValueError(f"{field} must be an object")
+    role = _text(raw.get("role"), f"{field}.role")
+    if role not in ALLOWED_ROLES:
+        raise ValueError(f"unsupported role: {role}")
+    risk = _text(raw.get("risk"), f"{field}.risk")
+    if risk not in RISK_LEVELS:
+        raise ValueError(f"{field}.risk is invalid: {risk}")
+    write_scope = _string_list(raw.get("write_scope", []), f"{field}.write_scope")
+    return ImplementationTask(
+        id=_text(raw.get("id"), f"{field}.id"),
+        title=_text(raw.get("title"), f"{field}.title"),
+        role=role,
+        risk=risk,
+        write_scope=tuple(_scope_path(item) for item in write_scope),
+        depends_on=_string_list(raw.get("depends_on", []), f"{field}.depends_on"),
+        acceptance_criteria=_string_list(
+            raw.get("acceptance_criteria"),
+            f"{field}.acceptance_criteria",
+            non_empty=True,
+        ),
+        verification=_string_list(
+            raw.get("verification"),
+            f"{field}.verification",
+            non_empty=True,
+        ),
+        independent_review=bool(raw.get("independent_review", False)),
+    )
+
+
 def parse_implementation_plan(payload: Mapping[str, Any]) -> ImplementationPlan:
     """Parse a pure local implementation plan without provider configuration."""
     if not isinstance(payload, Mapping):
@@ -98,30 +147,10 @@ def parse_implementation_plan(payload: Mapping[str, Any]) -> ImplementationPlan:
     raw_tasks = payload.get("tasks")
     if not isinstance(raw_tasks, list) or not raw_tasks:
         raise ValueError("tasks must be a non-empty list")
-    tasks: list[ImplementationTask] = []
-    for index, raw in enumerate(raw_tasks):
-        if not isinstance(raw, Mapping):
-            raise ValueError(f"tasks[{index}] must be an object")
-        role = _text(raw.get("role"), f"tasks[{index}].role")
-        if role not in ALLOWED_ROLES:
-            raise ValueError(f"unsupported role: {role}")
-        risk = _text(raw.get("risk"), f"tasks[{index}].risk")
-        if risk not in RISK_LEVELS:
-            raise ValueError(f"tasks[{index}].risk is invalid: {risk}")
-        write_scope = _string_list(raw.get("write_scope", []), f"tasks[{index}].write_scope")
-        tasks.append(ImplementationTask(
-            id=_text(raw.get("id"), f"tasks[{index}].id"),
-            title=_text(raw.get("title"), f"tasks[{index}].title"),
-            role=role,
-            risk=risk,
-            write_scope=tuple(_scope_path(item) for item in write_scope),
-            depends_on=_string_list(raw.get("depends_on", []), f"tasks[{index}].depends_on"),
-            acceptance_criteria=_string_list(
-                raw.get("acceptance_criteria"), f"tasks[{index}].acceptance_criteria", non_empty=True
-            ),
-            verification=_string_list(raw.get("verification"), f"tasks[{index}].verification", non_empty=True),
-            independent_review=bool(raw.get("independent_review", False)),
-        ))
+    tasks = [
+        _parse_task(raw, f"tasks[{index}]")
+        for index, raw in enumerate(raw_tasks)
+    ]
     return ImplementationPlan(
         schema=schema,
         run_id=_text(payload.get("run_id"), "run_id"),
@@ -131,6 +160,85 @@ def parse_implementation_plan(payload: Mapping[str, Any]) -> ImplementationPlan:
         tasks=tuple(tasks),
         independent_review=bool(payload.get("independent_review", False)),
         origin=_text(payload.get("origin", "local"), "origin"),
+    )
+
+
+def parse_implementation_amendment(
+    payload: Mapping[str, Any],
+) -> ImplementationAmendment:
+    """Parse a provider-free amendment to one local implementation plan."""
+    if not isinstance(payload, Mapping):
+        raise ValueError("implementation amendment must be an object")
+    _reject_provider_keys(payload)
+    schema = _text(payload.get("schema"), "schema")
+    if schema != IMPLEMENTATION_AMENDMENT_SCHEMA:
+        raise ValueError(f"unsupported implementation amendment schema: {schema}")
+
+    raw_version = payload.get("base_plan_version")
+    if (
+        isinstance(raw_version, bool)
+        or not isinstance(raw_version, int)
+        or raw_version < 1
+    ):
+        raise ValueError("base_plan_version must be a positive integer")
+
+    raw_add = payload.get("add_tasks")
+    raw_replace = payload.get("replace_tasks")
+    raw_cancel = payload.get("cancel_task_ids")
+    if not isinstance(raw_add, list):
+        raise ValueError("add_tasks must be a list")
+    if not isinstance(raw_replace, list):
+        raise ValueError("replace_tasks must be a list")
+    cancel_task_ids = _string_list(raw_cancel, "cancel_task_ids")
+
+    add_tasks = tuple(
+        _parse_task(raw, f"add_tasks[{index}]")
+        for index, raw in enumerate(raw_add)
+    )
+    replacements: list[ReplacementTask] = []
+    for index, raw in enumerate(raw_replace):
+        if not isinstance(raw, Mapping):
+            raise ValueError(f"replace_tasks[{index}] must be an object")
+        replacements.append(
+            ReplacementTask(
+                replaces=_text(
+                    raw.get("replaces"),
+                    f"replace_tasks[{index}].replaces",
+                ),
+                task=_parse_task(
+                    raw.get("task"),
+                    f"replace_tasks[{index}].task",
+                ),
+            )
+        )
+
+    if not add_tasks and not replacements and not cancel_task_ids:
+        raise ValueError("implementation amendment cannot be empty")
+
+    operation_targets = [
+        *(replacement.replaces for replacement in replacements),
+        *cancel_task_ids,
+    ]
+    if len(operation_targets) != len(set(operation_targets)):
+        raise ValueError("implementation amendment has a repeated target id")
+
+    new_task_ids = [
+        *(task.id for task in add_tasks),
+        *(replacement.task.id for replacement in replacements),
+    ]
+    if len(new_task_ids) != len(set(new_task_ids)):
+        raise ValueError("implementation amendment has a repeated new task id")
+    if set(new_task_ids) & set(operation_targets):
+        raise ValueError("implementation amendment reuses a target id")
+
+    return ImplementationAmendment(
+        schema=schema,
+        run_id=_text(payload.get("run_id"), "run_id"),
+        base_plan_version=raw_version,
+        reason=_text(payload.get("reason"), "reason"),
+        add_tasks=add_tasks,
+        replace_tasks=tuple(replacements),
+        cancel_task_ids=cancel_task_ids,
     )
 
 
