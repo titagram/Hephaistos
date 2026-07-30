@@ -182,6 +182,40 @@ class TestMemoryEndpoints:
         )
         assert r.status_code == 400
 
+    def test_status_exposes_discovered_provider_availability_compatibly(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(
+            "plugins.memory.discover_memory_providers",
+            lambda: [
+                (
+                    "hades_backend",
+                    "Stores memory in the active Hades backend.",
+                    False,
+                )
+            ],
+        )
+
+        providers = self.client.get("/api/memory").json()["providers"]
+
+        assert providers == [
+            {
+                "name": "hades_backend",
+                "description": "Stores memory in the active Hades backend.",
+                "available": False,
+                # Compatibility for older clients that consumed this
+                # historically misnamed availability field.
+                "configured": False,
+            }
+        ]
+
+    def test_config_schema_leaves_provider_options_to_memory_discovery(self):
+        field = self.client.get("/api/config/schema").json()["fields"][
+            "memory.provider"
+        ]
+
+        assert "options" not in field
+
     def test_reset_targets(self):
         from hermes_constants import get_hermes_home
 

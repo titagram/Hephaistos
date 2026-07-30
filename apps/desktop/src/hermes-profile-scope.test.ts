@@ -3,9 +3,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   checkHermesUpdate,
   getActionStatus,
+  getMemoryProviderConfig,
+  getMemoryProviderOAuthStatus,
+  getMemoryStatus,
   getStatus,
   restartGateway,
+  saveHermesConfig,
+  saveMemoryProviderConfig,
+  selectMemoryProvider,
   setApiRequestProfile,
+  startMemoryProviderOAuth,
   updateHermes
 } from './hermes'
 
@@ -45,5 +52,27 @@ describe('backend action helpers are profile-scoped', () => {
     for (const call of api.mock.calls) {
       expect(call[0].profile).toBe('coder')
     }
+  })
+
+  it('forwards the active profile to every memory API helper', () => {
+    setApiRequestProfile('hades')
+
+    void getMemoryStatus()
+    void selectMemoryProvider('hades_backend')
+    void saveHermesConfig({ memory: { provider: 'hades_backend' } })
+    void getMemoryProviderConfig('hades_backend')
+    void saveMemoryProviderConfig('hades_backend', { endpoint: 'https://memory.example' })
+    void getMemoryProviderOAuthStatus('hades_backend')
+    void startMemoryProviderOAuth('hades_backend')
+
+    expect(api.mock.calls.map(([request]) => [request.path, request.profile])).toEqual([
+      ['/api/memory', 'hades'],
+      ['/api/memory/provider', 'hades'],
+      ['/api/config', 'hades'],
+      ['/api/memory/providers/hades_backend/config', 'hades'],
+      ['/api/memory/providers/hades_backend/config', 'hades'],
+      ['/api/memory/providers/hades_backend/oauth/status', 'hades'],
+      ['/api/memory/providers/hades_backend/oauth/start', 'hades']
+    ])
   })
 })

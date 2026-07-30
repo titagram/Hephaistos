@@ -592,11 +592,6 @@ _SCHEMA_OVERRIDES: Dict[str, Dict[str, Any]] = {
         "description": "Input behavior while agent is running",
         "options": ["interrupt", "queue", "steer"],
     },
-    "memory.provider": {
-        "type": "select",
-        "description": "Memory provider plugin",
-        "options": ["builtin", "honcho"],
-    },
     "approvals.mode": {
         "type": "select",
         "description": "Dangerous command approval mode",
@@ -9809,11 +9804,14 @@ async def get_memory_status():
 
     providers = []
     try:
-        for name, description, configured in discover_memory_providers():
+        for name, description, available in discover_memory_providers():
             providers.append({
                 "name": name,
                 "description": description,
-                "configured": bool(configured),
+                # ``configured`` is retained for API compatibility. The
+                # discovery tuple has always represented runtime availability.
+                "available": bool(available),
+                "configured": bool(available),
             })
     except Exception:
         _log.exception("discover_memory_providers failed")

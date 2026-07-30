@@ -105,6 +105,33 @@ export interface MemoryProviderOAuthStatus {
   state: 'connected' | 'error' | 'idle' | 'pending'
 }
 
+export interface MemoryProviderDiscovery {
+  /** Accurate name for the discovery tuple's readiness boolean. */
+  available?: boolean
+  /**
+   * Backward-compatible alias historically returned by GET /api/memory.
+   * Older backends expose only this field even though it represents availability.
+   */
+  configured: boolean
+  description: string
+  name: string
+}
+
+export interface MemoryStatusResponse {
+  /** Optional for compatibility with older/custom backends. */
+  active?: string
+  builtin_files: {
+    memory: number
+    user: number
+  }
+  providers: MemoryProviderDiscovery[]
+}
+
+export interface MemoryProviderSelectionResponse {
+  active: string
+  ok: boolean
+}
+
 export interface EnvVarInfo {
   advanced: boolean
   category: string

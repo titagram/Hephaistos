@@ -20,6 +20,8 @@ import type {
   LogsResponse,
   MemoryProviderConfig,
   MemoryProviderOAuthStatus,
+  MemoryProviderSelectionResponse,
+  MemoryStatusResponse,
   MessagingPlatformsResponse,
   MessagingPlatformTestResponse,
   MessagingPlatformUpdate,
@@ -79,7 +81,10 @@ export type {
   HermesConfigRecord,
   LogsResponse,
   MemoryProviderConfig,
+  MemoryProviderDiscovery,
   MemoryProviderOAuthStatus,
+  MemoryProviderSelectionResponse,
+  MemoryStatusResponse,
   MessagingEnvVarInfo,
   MessagingHomeChannel,
   MessagingPlatformInfo,
@@ -356,14 +361,32 @@ export function saveHermesConfig(config: HermesConfigRecord): Promise<{ ok: bool
   })
 }
 
+export function getMemoryStatus(): Promise<MemoryStatusResponse> {
+  return window.hermesDesktop.api<MemoryStatusResponse>({
+    ...profileScoped(),
+    path: '/api/memory'
+  })
+}
+
+export function selectMemoryProvider(provider: string): Promise<MemoryProviderSelectionResponse> {
+  return window.hermesDesktop.api<MemoryProviderSelectionResponse>({
+    ...profileScoped(),
+    path: '/api/memory/provider',
+    method: 'PUT',
+    body: { provider }
+  })
+}
+
 export function getMemoryProviderConfig(provider: string): Promise<MemoryProviderConfig> {
   return window.hermesDesktop.api<MemoryProviderConfig>({
+    ...profileScoped(),
     path: `/api/memory/providers/${encodeURIComponent(provider)}/config`
   })
 }
 
 export function saveMemoryProviderConfig(provider: string, values: Record<string, string>): Promise<{ ok: boolean }> {
   return window.hermesDesktop.api<{ ok: boolean }>({
+    ...profileScoped(),
     path: `/api/memory/providers/${encodeURIComponent(provider)}/config`,
     method: 'PUT',
     body: { values }

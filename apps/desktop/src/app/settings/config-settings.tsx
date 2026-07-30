@@ -11,12 +11,13 @@ import {
   getHermesConfigDefaults,
   getHermesConfigRecord,
   getHermesConfigSchema,
+  getMemoryStatus,
   saveHermesConfig
 } from '@/hermes'
 import { useI18n } from '@/i18n'
 import { cn } from '@/lib/utils'
 import { notify, notifyError } from '@/store/notifications'
-import type { ConfigFieldSchema, HermesConfigRecord } from '@/types/hermes'
+import type { ConfigFieldSchema, HermesConfigRecord, MemoryStatusResponse } from '@/types/hermes'
 
 import { CONTROL_TEXT, EMPTY_SELECT_VALUE, FIELD_DESCRIPTIONS, FIELD_LABELS, SECTIONS } from './constants'
 import { fieldCopyForSchemaKey } from './field-copy'
@@ -25,6 +26,60 @@ import { MemoryConnect } from './memory/connect'
 import { ModelSettings } from './model-settings'
 import { EmptyState, ListRow, LoadingState, SettingsContent } from './primitives'
 import { ProviderConfigPanel } from './provider-config-panel'
+
+interface ConfigOptionDetail {
+  description?: string
+  status?: string
+}
+
+interface MemoryProviderSelectData {
+  details: Record<string, ConfigOptionDetail>
+  labels: Record<string, string>
+  options: string[]
+}
+
+function memoryProviderSelectData(
+  status: MemoryStatusResponse | null,
+  current: string,
+  discoveryFailed: boolean
+): MemoryProviderSelectData {
+  const options = ['']
+  const labels: Record<string, string> = { '': 'Built-in' }
+
+  const details: Record<string, ConfigOptionDetail> = {
+    '': {
+      description: 'Use the built-in file memory.',
+      status: current ? undefined : discoveryFailed ? 'Current · discovery unavailable' : 'Current'
+    }
+  }
+
+  for (const provider of status?.providers ?? []) {
+    if (!options.includes(provider.name)) {
+      options.push(provider.name)
+    }
+
+    const available = provider.available ?? provider.configured
+    labels[provider.name] = prettyName(provider.name)
+    details[provider.name] = {
+      description: provider.description || undefined,
+      status: `${available ? 'Available / configured' : 'Unavailable / not configured'}${
+        provider.name === current ? ' · Current' : ''
+      }`
+    }
+  }
+
+  if (current && !options.includes(current)) {
+    options.push(current)
+    labels[current] = prettyName(current)
+    details[current] = {
+      status: discoveryFailed
+        ? 'Current provider · discovery unavailable'
+        : 'Current provider · unavailable (not discovered)'
+    }
+  }
+
+  return { details, labels, options }
+}
 
 // On the Voice page, only surface the sub-fields of the *selected* TTS/STT
 // provider — otherwise every provider's options render at once (the "totally
@@ -52,6 +107,7 @@ function ConfigField({
   value,
   enumOptions,
   optionLabels,
+  optionDetails,
   onChange,
   descriptionExtra
 }: {
@@ -60,6 +116,7 @@ function ConfigField({
   value: unknown
   enumOptions?: string[]
   optionLabels?: Record<string, string>
+  optionDetails?: Record<string, ConfigOptionDetail>
   onChange: (value: unknown) => void
   descriptionExtra?: ReactNode
 }) {
@@ -111,24 +168,48 @@ function ConfigField({
   const selectOptions = enumOptions ?? (schema.type === 'select' ? (schema.options ?? []).map(String) : undefined)
 
   if (selectOptions) {
+    const optionLabel = (option: string) =>
+      optionLabels?.[option] ??
+      (option ? prettyName(option) : schemaKey === 'display.personality' ? c.none : c.noneParen)
+
+    const selectedValue = String(value ?? '')
+
     return row(
       <Select
         onValueChange={next => onChange(next === EMPTY_SELECT_VALUE ? '' : next)}
-        value={String(value ?? '') || EMPTY_SELECT_VALUE}
+        value={selectedValue || EMPTY_SELECT_VALUE}
       >
         <SelectTrigger className={CONTROL_TEXT}>
-          <SelectValue />
+          <SelectValue>{optionDetails ? optionLabel(selectedValue) : undefined}</SelectValue>
         </SelectTrigger>
         <SelectContent>
-          {selectOptions.map(option => (
-            <SelectItem key={option || EMPTY_SELECT_VALUE} value={option || EMPTY_SELECT_VALUE}>
-              {option
-                ? (optionLabels?.[option] ?? prettyName(option))
-                : schemaKey === 'display.personality'
-                  ? c.none
-                  : c.noneParen}
-            </SelectItem>
-          ))}
+          {selectOptions.map(option => {
+            const detail = optionDetails?.[option]
+            const label = optionLabel(option)
+
+            return (
+              <SelectItem
+                className={detail ? 'items-start py-2' : undefined}
+                key={option || EMPTY_SELECT_VALUE}
+                textValue={label}
+                value={option || EMPTY_SELECT_VALUE}
+              >
+                {detail ? (
+                  <span className="flex min-w-0 flex-col gap-0.5 pr-2">
+                    <span>{label}</span>
+                    {detail.description ? (
+                      <span className="whitespace-normal text-[11px] text-muted-foreground">{detail.description}</span>
+                    ) : null}
+                    {detail.status ? (
+                      <span className="whitespace-normal text-[11px] text-muted-foreground">{detail.status}</span>
+                    ) : null}
+                  </span>
+                ) : (
+                  label
+                )}
+              </SelectItem>
+            )
+          })}
         </SelectContent>
       </Select>
     )
@@ -230,20 +311,34 @@ export function ConfigSettings({
   const [schema, setSchema] = useState<Record<string, ConfigFieldSchema> | null>(null)
   const [elevenLabsVoiceOptions, setElevenLabsVoiceOptions] = useState<string[] | null>(null)
   const [elevenLabsVoiceLabels, setElevenLabsVoiceLabels] = useState<Record<string, string>>({})
+  const [memoryStatus, setMemoryStatus] = useState<MemoryStatusResponse | null>(null)
+  const [memoryDiscoveryFailed, setMemoryDiscoveryFailed] = useState(false)
   const saveVersionRef = useRef(0)
   const [saveVersion, setSaveVersion] = useState(0)
 
   useEffect(() => {
     let cancelled = false
-    Promise.all([getHermesConfigRecord(), getHermesConfigDefaults(), getHermesConfigSchema()])
-      .then(([c, d, s]) => {
+
+    const memoryDiscovery = getMemoryStatus()
+      .then(status => ({ failed: false as const, status }))
+      .catch(() => ({ failed: true as const, status: null }))
+
+    Promise.all([getHermesConfigRecord(), getHermesConfigDefaults(), getHermesConfigSchema(), memoryDiscovery])
+      .then(([c, d, s, memory]) => {
         if (cancelled) {
           return
         }
 
-        setConfig(c)
+        const loadedConfig =
+          memory.status && typeof memory.status.active === 'string'
+            ? setNested(c, 'memory.provider', memory.status.active)
+            : c
+
+        setConfig(loadedConfig)
         setDefaults(d)
         setSchema(s.fields)
+        setMemoryStatus(memory.status)
+        setMemoryDiscoveryFailed(memory.failed)
       })
       .catch(err => notifyError(err, c.failedLoad))
 
@@ -317,6 +412,12 @@ export function ConfigSettings({
   }, [schema])
 
   const fields = sectionFields.get(activeSectionId) ?? []
+  const currentMemoryProvider = config ? String(getNested(config, 'memory.provider') ?? '') : ''
+
+  const memoryProviderSelect = useMemo(
+    () => memoryProviderSelectData(memoryStatus, currentMemoryProvider, memoryDiscoveryFailed),
+    [currentMemoryProvider, memoryDiscoveryFailed, memoryStatus]
+  )
 
   // Deep-link target from the command palette (?field=<key>): scroll the row
   // into view and flash it, then drop the param so it doesn't re-fire.
@@ -395,17 +496,33 @@ export function ConfigSettings({
             <div className="scroll-mt-6 rounded-lg" id={`setting-field-${key}`} key={key}>
               <ConfigField
                 descriptionExtra={
-                  key === 'memory.provider' && Boolean(getNested(config, key)) ? (
-                    <MemoryConnect provider={String(getNested(config, key))} />
+                  key === 'memory.provider' ? (
+                    <>
+                      {memoryDiscoveryFailed ? (
+                        <span>Provider discovery unavailable; keeping the current selection.</span>
+                      ) : null}
+                      {getNested(config, key) ? (
+                        <MemoryConnect provider={String(getNested(config, key))} />
+                      ) : null}
+                    </>
                   ) : undefined
                 }
                 enumOptions={
-                  key === 'tts.elevenlabs.voice_id'
+                  key === 'memory.provider'
+                    ? memoryProviderSelect.options
+                    : key === 'tts.elevenlabs.voice_id'
                     ? enumOptionsFor(key, getNested(config, key), config, elevenLabsVoiceOptions ?? undefined)
                     : enumOptionsFor(key, getNested(config, key), config)
                 }
                 onChange={value => updateConfig(setNested(config, key, value))}
-                optionLabels={key === 'tts.elevenlabs.voice_id' ? elevenLabsVoiceLabels : undefined}
+                optionDetails={key === 'memory.provider' ? memoryProviderSelect.details : undefined}
+                optionLabels={
+                  key === 'memory.provider'
+                    ? memoryProviderSelect.labels
+                    : key === 'tts.elevenlabs.voice_id'
+                      ? elevenLabsVoiceLabels
+                      : undefined
+                }
                 schema={field}
                 schemaKey={key}
                 value={getNested(config, key)}
