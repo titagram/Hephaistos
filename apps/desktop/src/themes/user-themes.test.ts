@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 
-import { BUILTIN_THEMES, DEFAULT_SKIN_NAME } from './presets'
+import { BUILTIN_THEME_LIST, BUILTIN_THEMES, DEFAULT_SKIN_NAME } from './presets'
 import { $userThemes, installUserTheme, isUserTheme, listAllThemes, removeUserTheme, resolveTheme } from './user-themes'
 import { convertVscodeColorTheme } from './vscode'
 
@@ -26,11 +26,11 @@ describe('user theme registry', () => {
     expect(window.localStorage.getItem('hermes-desktop-user-themes-v1')).toContain(theme.name)
   })
 
-  it('lists built-ins before user themes', () => {
+  it('keeps the Hades catalog ordered ahead of user themes', () => {
     installUserTheme(makeTheme('Custom'))
     const names = listAllThemes().map(t => t.name)
 
-    expect(names.slice(0, Object.keys(BUILTIN_THEMES).length)).toEqual(Object.keys(BUILTIN_THEMES))
+    expect(names.slice(0, BUILTIN_THEME_LIST.length)).toEqual(['hades', 'midnight', 'ember', 'mono', 'cyberpunk', 'slate'])
     expect(names.at(-1)).toBe('vsc-custom')
   })
 

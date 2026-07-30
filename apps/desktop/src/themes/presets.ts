@@ -20,81 +20,66 @@ const SYSTEM_MONO =
 
 export const DEFAULT_TYPOGRAPHY: DesktopThemeTypography = { fontSans: SYSTEM_SANS, fontMono: SYSTEM_MONO }
 
-const NOUS_BLUE = '#0053FD'
-const PSYCHE_BLUE = '#1540B1'
-const PSYCHE_WARM = '#FFE6CB'
-
-const nousTint = (pct: number) => `color-mix(in srgb, ${NOUS_BLUE} ${pct}%, #FFFFFF)`
-const nousTintTransparent = (pct: number) => `color-mix(in srgb, ${NOUS_BLUE} ${pct}%, transparent)`
-
-/**
- * Nous — canonical Hermes desktop identity. The palette keeps the current
- * glass geometry neutral, then lets the old bb/gui blue and psyche cream
- * return as accent seeds.
- */
-export const nousTheme: DesktopTheme = {
-  name: 'nous',
-  label: 'Nous',
-  description: 'Glass neutrals with Nous blue accents',
+/** Hades — the canonical desktop identity. */
+export const hadesTheme: DesktopTheme = {
+  name: 'hades',
+  label: 'Hades',
+  description: 'Obsidian, ash, and bronze — Underworld Console',
   colors: {
-    background: '#F8FAFF',
-    foreground: '#17171A',
-    card: '#FFFFFF',
-    cardForeground: '#17171A',
-    muted: nousTint(5),
-    mutedForeground: '#666678',
-    popover: '#FFFFFF',
-    popoverForeground: '#17171A',
-    primary: NOUS_BLUE,
-    primaryForeground: '#FCFCFC',
-    secondary: nousTint(7),
-    secondaryForeground: '#242432',
-    accent: nousTint(10),
-    accentForeground: '#202030',
-    border: nousTintTransparent(22),
-    input: nousTintTransparent(30),
-    ring: NOUS_BLUE,
-    midground: NOUS_BLUE,
-    composerRing: NOUS_BLUE,
-    destructive: '#C72E4D',
+    background: '#F5F0E6',
+    foreground: '#211E18',
+    card: '#FCF8EF',
+    cardForeground: '#211E18',
+    muted: '#EAE1D2',
+    mutedForeground: '#6F675C',
+    popover: '#FFF9EF',
+    popoverForeground: '#211E18',
+    primary: '#7A4B10',
+    primaryForeground: '#FFF8EA',
+    secondary: '#E9DDC9',
+    secondaryForeground: '#30291F',
+    accent: '#E4D2B5',
+    accentForeground: '#30291F',
+    border: '#CDBB9C',
+    input: '#BDA984',
+    ring: '#8F5B16',
+    midground: '#8F5B16',
+    composerRing: '#8F5B16',
+    destructive: '#A83A2A',
     destructiveForeground: '#FFFFFF',
-    sidebarBackground: '#F3F7FF',
-    sidebarBorder: nousTintTransparent(18),
-    userBubble: nousTint(6),
-    userBubbleBorder: nousTintTransparent(24)
+    sidebarBackground: '#EEE6D8',
+    sidebarBorder: '#C8B793',
+    userBubble: '#E8DCC8',
+    userBubbleBorder: '#C5AD84'
   },
   darkColors: {
-    background: '#0D2F86',
-    foreground: PSYCHE_WARM,
-    card: '#12378F',
-    cardForeground: PSYCHE_WARM,
-    muted: '#183F9A',
-    mutedForeground: '#B5C7F3',
-    popover: '#123A96',
-    popoverForeground: PSYCHE_WARM,
-    primary: PSYCHE_WARM,
-    primaryForeground: '#0D2F86',
-    secondary: '#1B45A4',
-    secondaryForeground: '#E0E8FF',
-    accent: PSYCHE_BLUE,
-    accentForeground: '#F0F4FF',
-    border: '#3158AD',
-    input: '#0B2566',
-    ring: PSYCHE_WARM,
-    midground: NOUS_BLUE,
-    composerRing: PSYCHE_WARM,
-    destructive: '#C0473A',
-    destructiveForeground: '#FEF2F2',
-    sidebarBackground: '#09286F',
-    sidebarBorder: '#234A9C',
-    userBubble: '#143B91',
-    userBubbleBorder: '#3A63BD'
+    background: '#0B0B0A',
+    foreground: '#EEE7D8',
+    card: '#151411',
+    cardForeground: '#EEE7D8',
+    muted: '#1E1B16',
+    mutedForeground: '#9C9588',
+    popover: '#191712',
+    popoverForeground: '#EEE7D8',
+    primary: '#D19336',
+    primaryForeground: '#171006',
+    secondary: '#262016',
+    secondaryForeground: '#DCCDB4',
+    accent: '#2C2418',
+    accentForeground: '#E8D9BF',
+    border: '#49351A',
+    input: '#59401D',
+    ring: '#D19336',
+    midground: '#B67519',
+    composerRing: '#D19336',
+    destructive: '#C3523C',
+    destructiveForeground: '#FFF3ED',
+    sidebarBackground: '#11100D',
+    sidebarBorder: '#392A16',
+    userBubble: '#211B12',
+    userBubbleBorder: '#5A3D18'
   },
-  typography: {
-    fontSans: SYSTEM_SANS,
-    fontMono: `"Courier Prime", ${SYSTEM_MONO}`,
-    fontUrl: 'https://fonts.googleapis.com/css2?family=Courier+Prime:wght@400;700&display=swap'
-  }
+  typography: { fontMono: `"JetBrains Mono", ${SYSTEM_MONO}` }
 }
 
 /** Deep blue-violet with cool accents. Matches the dashboard midnight theme. */
@@ -278,7 +263,7 @@ export const slateTheme: DesktopTheme = {
 }
 
 export const BUILTIN_THEMES: Record<string, DesktopTheme> = {
-  nous: nousTheme,
+  hades: hadesTheme,
   midnight: midnightTheme,
   ember: emberTheme,
   mono: monoTheme,
@@ -289,4 +274,4 @@ export const BUILTIN_THEMES: Record<string, DesktopTheme> = {
 export const BUILTIN_THEME_LIST = Object.values(BUILTIN_THEMES)
 
 /** Skin used when nothing is persisted or the persisted name is retired. */
-export const DEFAULT_SKIN_NAME = 'nous'
+export const DEFAULT_SKIN_NAME = 'hades'

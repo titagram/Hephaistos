@@ -17,7 +17,7 @@ import { persistString, persistStringRecord, storedString, storedStringRecord } 
 import { $activeGatewayProfile, normalizeProfileKey } from '@/store/profile'
 
 import { hexToRgb, mix, readableOn } from './color'
-import { BUILTIN_THEME_LIST, BUILTIN_THEMES, DEFAULT_SKIN_NAME, DEFAULT_TYPOGRAPHY, nousTheme } from './presets'
+import { BUILTIN_THEME_LIST, BUILTIN_THEMES, DEFAULT_SKIN_NAME, DEFAULT_TYPOGRAPHY, hadesTheme } from './presets'
 import type { DesktopTheme, DesktopThemeColors } from './types'
 import { $userThemes, resolveTheme } from './user-themes'
 
@@ -34,19 +34,23 @@ const PROFILE_MODES_KEY = 'hermes-desktop-profile-modes-v1'
 // theme before the gateway reports which profile actually launched.
 const LAST_PROFILE_KEY = 'hermes-desktop-active-profile-v1'
 const RETIRED_SKINS = new Set(['nous-light', 'default', 'gold'])
+const LEGACY_SKIN_ALIASES: Readonly<Record<string, string>> = { nous: 'hades' }
 
 export type ThemeMode = 'light' | 'dark' | 'system'
+export const DEFAULT_THEME_MODE = 'dark'
 
 const INJECTED_FONT_URLS = new Set<string>()
 
 const resolveMode = (mode: ThemeMode, systemDark = matchesQuery('(prefers-color-scheme: dark)')): 'light' | 'dark' =>
   mode === 'system' ? (systemDark ? 'dark' : 'light') : mode
 
-const normalizeSkin = (name: string | null): string =>
-  name && resolveTheme(name) && !RETIRED_SKINS.has(name) ? name : DEFAULT_SKIN_NAME
+const normalizeSkin = (name: string | null): string => {
+  const candidate = name ? LEGACY_SKIN_ALIASES[name] ?? name : null
+  return candidate && resolveTheme(candidate) && !RETIRED_SKINS.has(candidate) ? candidate : DEFAULT_SKIN_NAME
+}
 
 const normalizeMode = (value: string | null): ThemeMode =>
-  value === 'light' || value === 'dark' || value === 'system' ? value : 'light'
+  value === 'light' || value === 'dark' || value === 'system' ? value : DEFAULT_THEME_MODE
 
 // ─── Per-profile appearance persistence ─────────────────────────────────────
 // Skin and mode are each stored per profile. "default" isn't a real profile —
@@ -114,7 +118,7 @@ function synthLightColors(seed: DesktopTheme): DesktopThemeColors {
 
 /** Returns the seed palette for a given skin + mode (no overrides applied). */
 export function getBaseColors(skinName: string, mode: 'light' | 'dark'): DesktopThemeColors {
-  const seed = resolveTheme(skinName) ?? nousTheme
+  const seed = resolveTheme(skinName) ?? hadesTheme
 
   if (mode === 'dark') {
     return seed.darkColors ?? seed.colors
@@ -124,7 +128,7 @@ export function getBaseColors(skinName: string, mode: 'light' | 'dark'): Desktop
 }
 
 function deriveTheme(skinName: string, mode: 'light' | 'dark'): DesktopTheme {
-  const seed = resolveTheme(skinName) ?? nousTheme
+  const seed = resolveTheme(skinName) ?? hadesTheme
 
   return {
     ...seed,
@@ -178,7 +182,7 @@ function applyTheme(theme: DesktopTheme, mode: 'light' | 'dark') {
 
   const root = document.documentElement
   const c = theme.colors
-  const typo = { ...DEFAULT_TYPOGRAPHY, ...nousTheme.typography, ...theme.typography }
+  const typo = { ...DEFAULT_TYPOGRAPHY, ...hadesTheme.typography, ...theme.typography }
   const rendered = renderedModeFor(c, mode)
   const isDark = rendered === 'dark'
   const midground = c.midground ?? c.ring
@@ -298,11 +302,11 @@ interface ThemeContextValue {
 const SKIN_LIST = BUILTIN_THEME_LIST.map(({ name, label, description }) => ({ name, label, description }))
 
 const ThemeContext = createContext<ThemeContextValue>({
-  theme: nousTheme,
+  theme: hadesTheme,
   themeName: DEFAULT_SKIN_NAME,
-  mode: 'light',
-  resolvedMode: 'light',
-  renderedMode: 'light',
+  mode: DEFAULT_THEME_MODE,
+  resolvedMode: DEFAULT_THEME_MODE,
+  renderedMode: DEFAULT_THEME_MODE,
   availableThemes: SKIN_LIST,
   setTheme: () => {},
   setMode: () => {}
@@ -333,7 +337,7 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   )
 
   const [mode, setModeState] = useState<ThemeMode>(() =>
-    typeof window === 'undefined' ? 'light' : modePref.resolve(readBootProfileKey())
+    typeof window === 'undefined' ? DEFAULT_THEME_MODE : modePref.resolve(readBootProfileKey())
   )
 
   // Follow profile switches: paint the profile's assigned skin + mode and

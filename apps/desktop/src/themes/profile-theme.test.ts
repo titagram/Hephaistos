@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 
-import { modePref, skinPref } from './context'
+import { DEFAULT_THEME_MODE, modePref, skinPref } from './context'
 import { DEFAULT_SKIN_NAME } from './presets'
 
 // Skin and mode share one per-profile contract, so assert it once over both.
@@ -18,8 +18,28 @@ const cases = [
     b: 'midnight',
     junk: 'nope'
   },
-  { name: 'mode', pref: modePref as unknown as Pref, fallback: 'light', a: 'dark', b: 'system', junk: 'dusk' }
+  { name: 'mode', pref: modePref as unknown as Pref, fallback: 'dark', a: 'light', b: 'system', junk: 'dusk' }
 ]
+
+describe('default Hades appearance', () => {
+  beforeEach(() => window.localStorage.clear())
+
+  // Catches a fresh installation falling back to the former light-mode default
+  // instead of opening with the intended dark Hades appearance.
+  it('starts a fresh Hades profile in dark mode', () => {
+    expect(DEFAULT_THEME_MODE).toBe('dark')
+    expect(modePref.resolve('default')).toBe('dark')
+  })
+
+  // Catches migration code that mutates an existing preference during lookup;
+  // boot-time resolution must be safe before a user explicitly saves a theme.
+  it('migrates a persisted Nous skin to Hades without rewriting storage', () => {
+    window.localStorage.setItem('hermes-desktop-theme-v2', 'nous')
+
+    expect(skinPref.resolve('default')).toBe('hades')
+    expect(window.localStorage.getItem('hermes-desktop-theme-v2')).toBe('nous')
+  })
+})
 
 describe.each(cases)('per-profile $name', ({ pref, fallback, a, b, junk }) => {
   beforeEach(() => window.localStorage.clear())

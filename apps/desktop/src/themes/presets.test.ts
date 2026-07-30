@@ -1,6 +1,24 @@
 import { describe, expect, it } from 'vitest'
 
-import { BUILTIN_THEME_LIST, DEFAULT_TYPOGRAPHY, EMOJI_FALLBACK } from './presets'
+import {
+  BUILTIN_THEME_LIST,
+  BUILTIN_THEMES,
+  DEFAULT_SKIN_NAME,
+  DEFAULT_TYPOGRAPHY,
+  EMOJI_FALLBACK,
+  hadesTheme
+} from './presets'
+
+describe('Hades built-in theme', () => {
+  // Catches an accidental reintroduction of Nous into the selectable catalog,
+  // which would make a fresh profile present the retired identity to users.
+  it('uses Hades as the only visible default identity', () => {
+    expect(DEFAULT_SKIN_NAME).toBe('hades')
+    expect(BUILTIN_THEMES.hades).toBe(hadesTheme)
+    expect(BUILTIN_THEMES.nous).toBeUndefined()
+    expect(BUILTIN_THEME_LIST.map(theme => theme.name)).toEqual(['hades', 'midnight', 'ember', 'mono', 'cyberpunk', 'slate'])
+  })
+})
 
 // #40364: none of the UI text/mono fonts carry emoji glyphs, so every font
 // stack must end with a color-emoji fallback or emoji render as tofu on
