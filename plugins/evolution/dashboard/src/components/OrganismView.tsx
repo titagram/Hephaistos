@@ -170,7 +170,7 @@ export function OrganismView({ snapshot, onRefresh, onTrackJob }: OrganismViewPr
     return <section className="evo-organism" aria-busy="true"><p>Loading local organism status…</p></section>;
   }
 
-  if (snapshot.state === "missing" || snapshot.gnothi.state === "missing") {
+  if (snapshot.state === "missing" && snapshot.organism === null) {
     return (
       <section className="evo-organism evo-organism--missing">
         <h2>Organism graph is not initialized</h2>
@@ -180,6 +180,35 @@ export function OrganismView({ snapshot, onRefresh, onTrackJob }: OrganismViewPr
           {initializing ? "Initializing…" : "Initialize local organism"}
         </button>
         <p>After initialization, rebuild the organism to publish its first immutable graph revision.</p>
+      </section>
+    );
+  }
+
+  if (snapshot.gnothi.state === "missing") {
+    return (
+      <section className="evo-organism evo-organism--missing">
+        <h2>Organism graph is not initialized</h2>
+        <p>The local organism exists, but it has no immutable graph revision yet.</p>
+        {actionError !== null ? <p role="alert">{actionError}</p> : null}
+        <button
+          type="button"
+          onClick={event => {
+            dialogTriggerRef.current = event.currentTarget;
+            void openRebuild();
+          }}
+        >
+          Rebuild organism
+        </button>
+        <p>Queue a local rebuild to publish the first immutable graph revision.</p>
+        {dialog === "rebuild" ? (
+          <RevisionDialog
+            mode="rebuild"
+            context={mutationContext}
+            onClose={() => setDialog(null)}
+            onJobStarted={onJobStarted}
+            returnFocusRef={dialogTriggerRef}
+          />
+        ) : null}
       </section>
     );
   }

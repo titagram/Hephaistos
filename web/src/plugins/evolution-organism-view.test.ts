@@ -44,6 +44,56 @@ function find(element: unknown, predicate: (candidate: Element) => boolean): Ele
 }
 
 describe("OrganismView bounded neighborhood expansion", () => {
+  it("offers rebuild when the organism exists but its first graph revision is missing", async () => {
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: {
+        __HERMES_PLUGIN_SDK__: {
+          React: { createElement: (type: unknown, props: Record<string, unknown> | null, ...children: unknown[]) => ({ type, props: { ...props, children } }) },
+          hooks: {
+            useCallback: <T,>(callback: T) => callback,
+            useEffect: (effect: () => void | (() => void)) => { effect(); },
+            useMemo: <T,>(factory: () => T) => factory(),
+            useRef: <T,>(initial: T) => ({ current: initial }),
+            useState: <T,>(initial: T) => [initial, vi.fn()] as const,
+          },
+          fetchJSON: vi.fn(),
+          components: { Badge: () => null, Button: () => null, Checkbox: () => null, Input: () => null, Label: () => null, Select: () => null, SelectOption: () => null, Separator: () => null },
+          utils: { cn: () => "", timeAgo: () => "", isoTimeAgo: () => "" },
+        },
+      },
+    });
+    const { OrganismView } = await import("../../../plugins/evolution/dashboard/src/components/OrganismView");
+    const current = snapshot();
+    current.state = "partial";
+    current.gnothi = {
+      state: "missing",
+      revision_id: null,
+      revision_digest: null,
+      node_count: 0,
+      edge_count: 0,
+      coverage: {
+        current_domains: 0,
+        total_domains: 0,
+        unknown_domains: [],
+        truncated: false,
+        drifted_domains: [],
+        drift_truncated: false,
+        collector_status: [],
+        collector_status_truncated: false,
+      },
+    };
+
+    const tree = OrganismView({
+      snapshot: current,
+      onRefresh: vi.fn(async () => {}),
+      onTrackJob: vi.fn(),
+    }) as unknown as Element;
+
+    expect(find(tree, item => item.type === "button" && String(item.props.children).includes("Rebuild organism"))).not.toBeNull();
+    expect(find(tree, item => item.type === "button" && String(item.props.children).includes("Initialize local organism"))).toBeNull();
+  });
+
   it("refetches the selected bounded neighborhood with the active graph query", async () => {
     const paths: string[] = [];
     const state: unknown[] = [];

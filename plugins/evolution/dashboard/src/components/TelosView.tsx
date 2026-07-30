@@ -47,6 +47,7 @@ export function TelosView({ snapshot, onRefresh }: TelosViewProps): React.ReactE
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [warning, setWarning] = useState<string | null>(null);
+  const errorRef = useRef<HTMLParagraphElement | null>(null);
   const transitionTriggerRef = useRef<HTMLElement | null>(null);
 
   const load = useCallback(async () => {
@@ -65,6 +66,9 @@ export function TelosView({ snapshot, onRefresh }: TelosViewProps): React.ReactE
   }, []);
 
   useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    if (error !== null) errorRef.current?.focus();
+  }, [error]);
 
   const unsafe = snapshot?.state === "corrupt" || snapshot?.state === "blocked" || snapshot?.telos.state === "corrupt";
   const selected = useMemo(() => transitionTarget(telos, savedRevision, selectedDigest), [savedRevision, selectedDigest, telos]);
@@ -118,7 +122,7 @@ export function TelosView({ snapshot, onRefresh }: TelosViewProps): React.ReactE
         <p>Active digest: {telos.active_digest ?? "No active Telos revision"}</p>
       </header>
       {warning !== null ? <p role="status">{warning}</p> : null}
-      {error !== null ? <p role="alert">{error}</p> : null}
+      {error !== null ? <p ref={errorRef} role="alert" tabIndex={-1}>{error}</p> : null}
       <TelosEditor draft={draft} parentDigest={telos.active_digest} disabled={saving} onChange={setDraft} />
       <button type="button" onClick={() => void saveDraft()} disabled={saving}>{saving ? "Saving inert draft…" : "Save inert Telos draft"}</button>
       <section aria-labelledby="evo-telos-history-heading">

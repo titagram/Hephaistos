@@ -4,7 +4,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { EvolutionSnapshot, GraphResponse, GraphNode, MutationContext } from "../../../plugins/evolution/dashboard/src/types";
+import type { EvolutionSnapshot, GraphResponse, GraphNode, MutationContext, TelosResponse } from "../../../plugins/evolution/dashboard/src/types";
 
 const cytoscapeMock = vi.hoisted(() => {
   const core = {
@@ -131,6 +131,33 @@ afterEach(async () => {
 });
 
 describe("Evolution dashboard accessibility", () => {
+  it("focuses the validation summary when an inert Telos draft cannot be saved", async () => {
+    const telos: TelosResponse = {
+      schema_version: 1,
+      state: "missing",
+      active_digest: null,
+      active_revision: null,
+      history: [],
+      total_revisions: 0,
+      truncated: false,
+    };
+    installSdk(vi.fn(<T,>(path: string) => {
+      if (path.includes("/telos?")) return Promise.resolve(telos as T);
+      return new Promise<T>(() => {});
+    }));
+    const { TelosView } = await import("../../../plugins/evolution/dashboard/src/components/TelosView");
+    const container = await render(<TelosView snapshot={snapshot()} onRefresh={vi.fn().mockResolvedValue(undefined)} />);
+
+    await act(async () => {
+      button(container, "Save inert Telos draft").click();
+      await Promise.resolve();
+    });
+
+    const alert = container.querySelector('[role="alert"]');
+    expect(alert?.textContent).toContain("Purpose must be 1–1000 characters.");
+    expect(document.activeElement).toBe(alert);
+  });
+
   it("sends every selected server-supported kind together, including a capability and provider filter", async () => {
     const paths: string[] = [];
     const fetchJSON = vi.fn(<T,>(path: string) => {

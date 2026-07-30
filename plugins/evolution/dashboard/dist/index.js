@@ -31372,8 +31372,30 @@
     if (snapshot === null) {
       return /* @__PURE__ */ React.createElement("section", { className: "evo-organism", "aria-busy": "true" }, /* @__PURE__ */ React.createElement("p", null, "Loading local organism status\u2026"));
     }
-    if (snapshot.state === "missing" || snapshot.gnothi.state === "missing") {
+    if (snapshot.state === "missing" && snapshot.organism === null) {
       return /* @__PURE__ */ React.createElement("section", { className: "evo-organism evo-organism--missing" }, /* @__PURE__ */ React.createElement("h2", null, "Organism graph is not initialized"), /* @__PURE__ */ React.createElement("p", null, "No local organism revision exists yet. No sample graph is shown."), actionError !== null ? /* @__PURE__ */ React.createElement("p", { role: "alert" }, actionError) : null, /* @__PURE__ */ React.createElement("button", { type: "button", onClick: () => void initialize(), disabled: initializing }, initializing ? "Initializing\u2026" : "Initialize local organism"), /* @__PURE__ */ React.createElement("p", null, "After initialization, rebuild the organism to publish its first immutable graph revision."));
+    }
+    if (snapshot.gnothi.state === "missing") {
+      return /* @__PURE__ */ React.createElement("section", { className: "evo-organism evo-organism--missing" }, /* @__PURE__ */ React.createElement("h2", null, "Organism graph is not initialized"), /* @__PURE__ */ React.createElement("p", null, "The local organism exists, but it has no immutable graph revision yet."), actionError !== null ? /* @__PURE__ */ React.createElement("p", { role: "alert" }, actionError) : null, /* @__PURE__ */ React.createElement(
+        "button",
+        {
+          type: "button",
+          onClick: (event3) => {
+            dialogTriggerRef.current = event3.currentTarget;
+            void openRebuild();
+          }
+        },
+        "Rebuild organism"
+      ), /* @__PURE__ */ React.createElement("p", null, "Queue a local rebuild to publish the first immutable graph revision."), dialog === "rebuild" ? /* @__PURE__ */ React.createElement(
+        RevisionDialog,
+        {
+          mode: "rebuild",
+          context: mutationContext,
+          onClose: () => setDialog(null),
+          onJobStarted,
+          returnFocusRef: dialogTriggerRef
+        }
+      ) : null);
     }
     if (snapshot.state === "blocked" || snapshot.state === "corrupt" || gnothiIsUnsafe) {
       return /* @__PURE__ */ React.createElement("section", { className: "evo-organism evo-organism--unavailable", "aria-live": "polite" }, /* @__PURE__ */ React.createElement("h2", null, "Organism details are unavailable"), /* @__PURE__ */ React.createElement("p", null, snapshot.state === "corrupt" || snapshot.gnothi.state === "corrupt" ? "Unsafe organism details and mutations are hidden because local validation failed." : "The local organism is blocked. Details and mutations remain disabled until the blocker is resolved."), snapshot.diagnostics.length > 0 ? /* @__PURE__ */ React.createElement("ul", null, snapshot.diagnostics.slice(0, 12).map((diagnostic) => /* @__PURE__ */ React.createElement("li", { key: diagnostic }, diagnostic))) : null);
@@ -31984,6 +32006,7 @@
     const [saving, setSaving] = useState(false);
     const [error3, setError] = useState(null);
     const [warning, setWarning] = useState(null);
+    const errorRef = useRef(null);
     const transitionTriggerRef = useRef(null);
     const load = useCallback(async () => {
       setLoading(true);
@@ -32002,6 +32025,9 @@
     useEffect(() => {
       void load();
     }, [load]);
+    useEffect(() => {
+      if (error3 !== null) errorRef.current?.focus();
+    }, [error3]);
     const unsafe = snapshot?.state === "corrupt" || snapshot?.state === "blocked" || snapshot?.telos.state === "corrupt";
     const selected = useMemo(() => transitionTarget(telos, savedRevision, selectedDigest), [savedRevision, selectedDigest, telos]);
     const current = telos?.active_revision ?? null;
@@ -32042,7 +32068,7 @@
     if (unsafe) return /* @__PURE__ */ React.createElement("section", { className: "evo-telos", "aria-live": "polite" }, /* @__PURE__ */ React.createElement("h2", null, "Telos is unavailable"), /* @__PURE__ */ React.createElement("p", null, "Telos details and changes are hidden until the local organism is safe to inspect."));
     if (telos === null || draft === null) return /* @__PURE__ */ React.createElement("section", { className: "evo-telos" }, /* @__PURE__ */ React.createElement("p", { role: "alert" }, error3 ?? "Telos data is unavailable."));
     const revisions = [telos.active_revision, ...telos.history, savedRevision].filter((item) => item !== null).filter((item, index, items) => items.findIndex((candidate) => candidate.digest === item.digest) === index);
-    return /* @__PURE__ */ React.createElement("section", { className: "evo-telos", "aria-labelledby": "evo-telos-heading" }, /* @__PURE__ */ React.createElement("header", null, /* @__PURE__ */ React.createElement("h2", { id: "evo-telos-heading" }, "Telos"), /* @__PURE__ */ React.createElement("p", null, "Active digest: ", telos.active_digest ?? "No active Telos revision")), warning !== null ? /* @__PURE__ */ React.createElement("p", { role: "status" }, warning) : null, error3 !== null ? /* @__PURE__ */ React.createElement("p", { role: "alert" }, error3) : null, /* @__PURE__ */ React.createElement(TelosEditor, { draft, parentDigest: telos.active_digest, disabled: saving, onChange: setDraft }), /* @__PURE__ */ React.createElement("button", { type: "button", onClick: () => void saveDraft(), disabled: saving }, saving ? "Saving inert draft\u2026" : "Save inert Telos draft"), /* @__PURE__ */ React.createElement("section", { "aria-labelledby": "evo-telos-history-heading" }, /* @__PURE__ */ React.createElement("h3", { id: "evo-telos-history-heading" }, "Bounded revision history"), /* @__PURE__ */ React.createElement("p", null, "The latest ", HISTORY_LIMIT, " inactive revisions are available for comparison and transition."), telos.truncated ? /* @__PURE__ */ React.createElement("p", null, "Additional immutable Telos history exists but is not displayed in this bounded view.") : null, /* @__PURE__ */ React.createElement("label", null, "Compare or transition target", /* @__PURE__ */ React.createElement("select", { value: selectedDigest ?? "", onChange: (event3) => setSelectedDigest(event3.target.value || null) }, /* @__PURE__ */ React.createElement("option", { value: "" }, "Select an immutable Telos revision"), revisions.map((revision) => /* @__PURE__ */ React.createElement("option", { key: revision.digest, value: revision.digest }, revision.digest, revision.digest === telos.active_digest ? " (active)" : ""))))), /* @__PURE__ */ React.createElement(TelosDiff, { current, target: selected }), /* @__PURE__ */ React.createElement("div", { className: "evo-telos__actions" }, /* @__PURE__ */ React.createElement("button", { type: "button", onClick: (event3) => {
+    return /* @__PURE__ */ React.createElement("section", { className: "evo-telos", "aria-labelledby": "evo-telos-heading" }, /* @__PURE__ */ React.createElement("header", null, /* @__PURE__ */ React.createElement("h2", { id: "evo-telos-heading" }, "Telos"), /* @__PURE__ */ React.createElement("p", null, "Active digest: ", telos.active_digest ?? "No active Telos revision")), warning !== null ? /* @__PURE__ */ React.createElement("p", { role: "status" }, warning) : null, error3 !== null ? /* @__PURE__ */ React.createElement("p", { ref: errorRef, role: "alert", tabIndex: -1 }, error3) : null, /* @__PURE__ */ React.createElement(TelosEditor, { draft, parentDigest: telos.active_digest, disabled: saving, onChange: setDraft }), /* @__PURE__ */ React.createElement("button", { type: "button", onClick: () => void saveDraft(), disabled: saving }, saving ? "Saving inert draft\u2026" : "Save inert Telos draft"), /* @__PURE__ */ React.createElement("section", { "aria-labelledby": "evo-telos-history-heading" }, /* @__PURE__ */ React.createElement("h3", { id: "evo-telos-history-heading" }, "Bounded revision history"), /* @__PURE__ */ React.createElement("p", null, "The latest ", HISTORY_LIMIT, " inactive revisions are available for comparison and transition."), telos.truncated ? /* @__PURE__ */ React.createElement("p", null, "Additional immutable Telos history exists but is not displayed in this bounded view.") : null, /* @__PURE__ */ React.createElement("label", null, "Compare or transition target", /* @__PURE__ */ React.createElement("select", { value: selectedDigest ?? "", onChange: (event3) => setSelectedDigest(event3.target.value || null) }, /* @__PURE__ */ React.createElement("option", { value: "" }, "Select an immutable Telos revision"), revisions.map((revision) => /* @__PURE__ */ React.createElement("option", { key: revision.digest, value: revision.digest }, revision.digest, revision.digest === telos.active_digest ? " (active)" : ""))))), /* @__PURE__ */ React.createElement(TelosDiff, { current, target: selected }), /* @__PURE__ */ React.createElement("div", { className: "evo-telos__actions" }, /* @__PURE__ */ React.createElement("button", { type: "button", onClick: (event3) => {
       transitionTriggerRef.current = event3.currentTarget;
       setDialogAction("activate");
     }, disabled: !canTransition }, "Activate selected revision"), /* @__PURE__ */ React.createElement("button", { type: "button", onClick: (event3) => {

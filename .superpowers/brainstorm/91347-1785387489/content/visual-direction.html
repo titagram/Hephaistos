@@ -1,0 +1,631 @@
+<style>
+  .hades-choice {
+    --ink: #171613;
+    --bone: #ece6d7;
+    --ash: #9c978d;
+    --bronze: #a76812;
+    --ember: #d36b22;
+    color: var(--bone);
+  }
+
+  .hades-choice * {
+    box-sizing: border-box;
+  }
+
+  .hades-choice .lede {
+    max-width: 780px;
+  }
+
+  .hades-choice .direction-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 18px;
+    margin-top: 24px;
+  }
+
+  .hades-choice .direction {
+    overflow: hidden;
+    border: 1px solid rgba(160, 104, 22, 0.28);
+    border-radius: 14px;
+    background: #141311;
+    cursor: pointer;
+    transition:
+      transform 160ms ease,
+      border-color 160ms ease,
+      box-shadow 160ms ease;
+  }
+
+  .hades-choice .direction:hover {
+    transform: translateY(-3px);
+    border-color: rgba(196, 129, 31, 0.72);
+    box-shadow: 0 18px 48px rgba(0, 0, 0, 0.28);
+  }
+
+  .hades-choice .direction.selected {
+    border-color: #d18a22;
+    box-shadow:
+      0 0 0 2px rgba(209, 138, 34, 0.22),
+      0 18px 48px rgba(0, 0, 0, 0.34);
+  }
+
+  .hades-choice .preview {
+    position: relative;
+    aspect-ratio: 16 / 10;
+    overflow: hidden;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  }
+
+  .hades-choice .window {
+    position: absolute;
+    inset: 14px;
+    display: grid;
+    grid-template-rows: 24px 1fr;
+    overflow: hidden;
+    border-radius: 8px;
+    box-shadow: 0 18px 45px rgba(0, 0, 0, 0.38);
+  }
+
+  .hades-choice .chrome {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 0 9px;
+    border-bottom: 1px solid currentColor;
+    font: 600 6px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    opacity: 0.92;
+  }
+
+  .hades-choice .dot {
+    width: 5px;
+    height: 5px;
+    border-radius: 99px;
+    background: currentColor;
+    opacity: 0.42;
+  }
+
+  .hades-choice .chrome-title {
+    margin-left: auto;
+  }
+
+  .hades-choice .app {
+    display: grid;
+    grid-template-columns: 27% 1fr;
+    min-height: 0;
+  }
+
+  .hades-choice .side {
+    padding: 10px 8px;
+    border-right: 1px solid currentColor;
+  }
+
+  .hades-choice .brand {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 14px;
+    font: 700 7px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+    letter-spacing: 0.14em;
+  }
+
+  .hades-choice .brand-symbol {
+    display: grid;
+    width: 18px;
+    height: 18px;
+    place-items: center;
+    border: 1px solid currentColor;
+    border-radius: 5px;
+    font: 700 12px/1 Georgia, serif;
+  }
+
+  .hades-choice .nav-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    height: 17px;
+    margin: 2px 0;
+    padding: 0 6px;
+    border-radius: 4px;
+    font: 500 6px/1 system-ui, sans-serif;
+  }
+
+  .hades-choice .nav-glyph {
+    width: 5px;
+    height: 5px;
+    border: 1px solid currentColor;
+    opacity: 0.72;
+  }
+
+  .hades-choice .main {
+    position: relative;
+    display: grid;
+    min-width: 0;
+    place-items: center;
+    padding: 12px;
+  }
+
+  .hades-choice .hero {
+    width: 90%;
+    text-align: center;
+  }
+
+  .hades-choice .eyebrow {
+    margin-bottom: 8px;
+    font: 600 5px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+    letter-spacing: 0.26em;
+    text-transform: uppercase;
+    opacity: 0.68;
+  }
+
+  .hades-choice .hero-title {
+    margin: 0;
+    font-size: clamp(15px, 2.1vw, 25px);
+    line-height: 0.88;
+    letter-spacing: 0.08em;
+  }
+
+  .hades-choice .hero-copy {
+    width: 82%;
+    margin: 9px auto 0;
+    font: 500 5.5px/1.5 system-ui, sans-serif;
+    opacity: 0.67;
+  }
+
+  .hades-choice .composer {
+    display: flex;
+    align-items: center;
+    height: 26px;
+    margin-top: 13px;
+    padding: 0 8px;
+    border: 1px solid currentColor;
+    border-radius: 6px;
+    font: 500 5.5px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+    text-align: left;
+    opacity: 0.82;
+  }
+
+  .hades-choice .send {
+    display: grid;
+    width: 15px;
+    height: 15px;
+    margin-left: auto;
+    place-items: center;
+    border-radius: 4px;
+    font-size: 7px;
+  }
+
+  .hades-choice .card-copy {
+    padding: 16px 16px 17px;
+  }
+
+  .hades-choice .card-topline {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 7px;
+  }
+
+  .hades-choice .choice-letter {
+    display: grid;
+    width: 24px;
+    height: 24px;
+    flex: 0 0 auto;
+    place-items: center;
+    border: 1px solid rgba(207, 133, 27, 0.52);
+    border-radius: 7px;
+    color: #d18a22;
+    font: 700 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+
+  .hades-choice .card-copy h3 {
+    margin: 0;
+    color: #f0eadc;
+    font-size: 15px;
+  }
+
+  .hades-choice .tag {
+    margin-left: auto;
+    border: 1px solid rgba(209, 138, 34, 0.35);
+    border-radius: 99px;
+    padding: 4px 7px;
+    color: #d89a3d;
+    font: 700 8px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .hades-choice .card-copy p {
+    margin: 0;
+    color: #a9a397;
+    font-size: 11px;
+    line-height: 1.48;
+  }
+
+  .hades-choice .coverage {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 11px;
+  }
+
+  .hades-choice .coverage span {
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 4px;
+    padding: 4px 6px;
+    color: #8f8a80;
+    font: 500 8px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+
+  /* A — Underworld Console */
+  .hades-choice .a .preview {
+    background:
+      radial-gradient(circle at 68% 30%, rgba(171, 104, 18, 0.17), transparent 35%),
+      #0b0b0a;
+  }
+
+  .hades-choice .a .window {
+    color: rgba(194, 151, 84, 0.38);
+    background: #151411;
+  }
+
+  .hades-choice .a .chrome {
+    color: #a66a12;
+    background: #11110f;
+    border-color: rgba(166, 106, 18, 0.3);
+  }
+
+  .hades-choice .a .app {
+    color: #999386;
+  }
+
+  .hades-choice .a .side {
+    border-color: rgba(166, 106, 18, 0.18);
+    background: rgba(11, 11, 10, 0.55);
+  }
+
+  .hades-choice .a .brand,
+  .hades-choice .a .hero-title {
+    color: #eee7d8;
+  }
+
+  .hades-choice .a .brand-symbol,
+  .hades-choice .a .send {
+    color: #d19336;
+    border-color: #9a6110;
+    background: rgba(154, 97, 16, 0.12);
+  }
+
+  .hades-choice .a .nav-row.active {
+    color: #e5d8bd;
+    background: rgba(166, 106, 18, 0.14);
+  }
+
+  .hades-choice .a .hero-title {
+    font-family: Georgia, 'Times New Roman', serif;
+    font-weight: 500;
+  }
+
+  .hades-choice .a .composer {
+    color: #b8a98d;
+    border-color: rgba(166, 106, 18, 0.38);
+    background: rgba(0, 0, 0, 0.18);
+  }
+
+  .hades-choice .a .ascii-mark {
+    margin-bottom: 7px;
+    color: #b67519;
+    font: 700 15px/1 Georgia, serif;
+  }
+
+  /* B — House of Hades */
+  .hades-choice .b .preview {
+    background:
+      radial-gradient(circle at 50% 35%, rgba(207, 66, 24, 0.22), transparent 38%),
+      linear-gradient(145deg, #1f0808, #090606 65%);
+  }
+
+  .hades-choice .b .window {
+    color: rgba(233, 213, 174, 0.3);
+    background: #160909;
+  }
+
+  .hades-choice .b .chrome {
+    color: #d77845;
+    background: #210b0a;
+    border-color: rgba(215, 120, 69, 0.25);
+  }
+
+  .hades-choice .b .side {
+    color: #b28e78;
+    border-color: rgba(226, 109, 55, 0.2);
+    background: linear-gradient(180deg, rgba(73, 18, 13, 0.55), rgba(20, 7, 7, 0.8));
+  }
+
+  .hades-choice .b .brand {
+    color: #f0d6ae;
+  }
+
+  .hades-choice .b .brand-symbol {
+    color: #ff9751;
+    border-color: #9e3d20;
+    border-radius: 99px;
+  }
+
+  .hades-choice .b .nav-row.active {
+    color: #ffe2b7;
+    background: rgba(205, 72, 32, 0.22);
+  }
+
+  .hades-choice .b .main::before,
+  .hades-choice .b .main::after {
+    position: absolute;
+    top: 16px;
+    bottom: 14px;
+    width: 10px;
+    border: 1px solid rgba(214, 103, 47, 0.13);
+    content: '';
+  }
+
+  .hades-choice .b .main::before {
+    left: 15px;
+    border-right: 0;
+  }
+
+  .hades-choice .b .main::after {
+    right: 15px;
+    border-left: 0;
+  }
+
+  .hades-choice .b .eyebrow {
+    color: #dc7a43;
+  }
+
+  .hades-choice .b .hero-title {
+    color: #f6dfb7;
+    font-family: Georgia, 'Times New Roman', serif;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+  }
+
+  .hades-choice .b .composer {
+    color: #d0a58a;
+    border-color: rgba(222, 91, 37, 0.4);
+    background: rgba(39, 7, 7, 0.78);
+  }
+
+  .hades-choice .b .send {
+    color: #1b0807;
+    background: #dc6b35;
+  }
+
+  .hades-choice .b .ascii-mark {
+    margin-bottom: 6px;
+    color: #dd6a35;
+    font-size: 19px;
+    filter: drop-shadow(0 0 8px rgba(220, 70, 25, 0.45));
+  }
+
+  /* C — Terminal Relic */
+  .hades-choice .c .preview {
+    background:
+      linear-gradient(rgba(201, 139, 31, 0.035) 1px, transparent 1px),
+      #060706;
+    background-size: 100% 4px;
+  }
+
+  .hades-choice .c .window {
+    color: #8b681f;
+    border: 1px solid #705015;
+    border-radius: 0;
+    background: #080907;
+    box-shadow: 0 0 35px rgba(186, 123, 15, 0.15);
+  }
+
+  .hades-choice .c .chrome {
+    color: #d49b2f;
+    border-color: #5c4315;
+    background: #0b0c09;
+  }
+
+  .hades-choice .c .side {
+    color: #8f762f;
+    border-color: #4d3912;
+  }
+
+  .hades-choice .c .brand {
+    color: #e7b64d;
+  }
+
+  .hades-choice .c .brand-symbol {
+    color: #e7b64d;
+    border-color: #927024;
+    border-radius: 0;
+  }
+
+  .hades-choice .c .nav-row {
+    border-radius: 0;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+
+  .hades-choice .c .nav-row.active {
+    color: #171205;
+    background: #bd8725;
+  }
+
+  .hades-choice .c .hero-title {
+    color: #dfaa3e;
+    font: 800 clamp(13px, 1.75vw, 21px)/0.9 ui-monospace, SFMono-Regular, Menlo, monospace;
+    text-shadow: 0 0 10px rgba(207, 145, 29, 0.3);
+  }
+
+  .hades-choice .c .eyebrow,
+  .hades-choice .c .hero-copy {
+    color: #a98437;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+
+  .hades-choice .c .composer {
+    color: #b98b2e;
+    border-color: #785817;
+    border-radius: 0;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+
+  .hades-choice .c .send {
+    color: #151006;
+    border-radius: 0;
+    background: #bd8725;
+  }
+
+  .hades-choice .c .ascii-mark {
+    margin: 0 auto 6px;
+    color: #c18b28;
+    font: 700 5px/0.95 ui-monospace, SFMono-Regular, Menlo, monospace;
+    white-space: pre;
+  }
+
+  @media (max-width: 980px) {
+    .hades-choice .direction-grid {
+      grid-template-columns: 1fr;
+    }
+
+    .hades-choice .preview {
+      aspect-ratio: 16 / 8;
+    }
+  }
+</style>
+
+<div class="hades-choice">
+  <h2>Quale identità deve avere Hades GUI?</h2>
+  <p class="subtitle lede">
+    Tutte e tre le direzioni coprono icona, splash, onboarding, chat, impostazioni, About e installer.
+    Cambia il grado di presenza del mito e dell’estetica terminale.
+  </p>
+
+  <div class="direction-grid">
+    <article class="direction a" data-choice="underworld-console" onclick="toggleSelect(this)">
+      <div class="preview">
+        <div class="window">
+          <div class="chrome">
+            <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+            <span class="chrome-title">Hades · workspace</span>
+          </div>
+          <div class="app">
+            <aside class="side">
+              <div class="brand"><span class="brand-symbol">♇</span> HADES</div>
+              <div class="nav-row active"><i class="nav-glyph"></i> New descent</div>
+              <div class="nav-row"><i class="nav-glyph"></i> Sessions</div>
+              <div class="nav-row"><i class="nav-glyph"></i> Projects</div>
+              <div class="nav-row"><i class="nav-glyph"></i> Skills</div>
+            </aside>
+            <main class="main">
+              <div class="hero">
+                <div class="ascii-mark">♇</div>
+                <div class="eyebrow">Agent of the Underworld</div>
+                <h4 class="hero-title">HADES AGENT</h4>
+                <p class="hero-copy">Bring the task, failing path, or half-formed plan. We descend from here.</p>
+                <div class="composer">Ask Hades to inspect, plan, or build… <span class="send">↗</span></div>
+              </div>
+            </main>
+          </div>
+        </div>
+      </div>
+      <div class="card-copy">
+        <div class="card-topline">
+          <span class="choice-letter">A</span>
+          <h3>Underworld Console</h3>
+          <span class="tag">Consigliata</span>
+        </div>
+        <p>
+          Obsidian, cenere e bronzo; simbolo di Plutone e ASCII art nei momenti hero. Mantiene intatta
+          l’ergonomia desktop e porta nella GUI la stessa identità di CLI/TUI.
+        </p>
+        <div class="coverage"><span>professionale</span><span>coerente</span><span>scalabile</span></div>
+      </div>
+    </article>
+
+    <article class="direction b" data-choice="house-of-hades" onclick="toggleSelect(this)">
+      <div class="preview">
+        <div class="window">
+          <div class="chrome">
+            <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+            <span class="chrome-title">House of Hades</span>
+          </div>
+          <div class="app">
+            <aside class="side">
+              <div class="brand"><span class="brand-symbol">♇</span> HADES</div>
+              <div class="nav-row active"><i class="nav-glyph"></i> New descent</div>
+              <div class="nav-row"><i class="nav-glyph"></i> Archives</div>
+              <div class="nav-row"><i class="nav-glyph"></i> Domains</div>
+              <div class="nav-row"><i class="nav-glyph"></i> Arsenal</div>
+            </aside>
+            <main class="main">
+              <div class="hero">
+                <div class="ascii-mark">♇</div>
+                <div class="eyebrow">Enter the Underworld</div>
+                <h4 class="hero-title">THE HOUSE AWAITS</h4>
+                <p class="hero-copy">Command the agent from the threshold. Every task becomes a descent.</p>
+                <div class="composer">Name your task… <span class="send">↗</span></div>
+              </div>
+            </main>
+          </div>
+        </div>
+      </div>
+      <div class="card-copy">
+        <div class="card-topline">
+          <span class="choice-letter">B</span>
+          <h3>House of Hades</h3>
+        </div>
+        <p>
+          Più cinematografica e mitologica: rosso profondo, brace, portali e una voce più narrativa.
+          Molto riconoscibile, ma più invasiva durante il lavoro quotidiano.
+        </p>
+        <div class="coverage"><span>immersiva</span><span>mitologica</span><span>audace</span></div>
+      </div>
+    </article>
+
+    <article class="direction c" data-choice="terminal-relic" onclick="toggleSelect(this)">
+      <div class="preview">
+        <div class="window">
+          <div class="chrome">
+            <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+            <span class="chrome-title">hades://underworld</span>
+          </div>
+          <div class="app">
+            <aside class="side">
+              <div class="brand"><span class="brand-symbol">♇</span> HADES</div>
+              <div class="nav-row active"><i class="nav-glyph"></i> /new</div>
+              <div class="nav-row"><i class="nav-glyph"></i> /sessions</div>
+              <div class="nav-row"><i class="nav-glyph"></i> /projects</div>
+              <div class="nav-row"><i class="nav-glyph"></i> /skills</div>
+            </aside>
+            <main class="main">
+              <div class="hero">
+                <pre class="ascii-mark">  .--.
+ / ♇  \
+ \_||_/
+   ||</pre>
+                <div class="eyebrow">SYSTEM READY · DEPTH 00</div>
+                <h4 class="hero-title">HADES_AGENT</h4>
+                <p class="hero-copy">TASK INPUT REQUIRED // tools armed // memory online</p>
+                <div class="composer">&gt; enter task_ <span class="send">↵</span></div>
+              </div>
+            </main>
+          </div>
+        </div>
+      </div>
+      <div class="card-copy">
+        <div class="card-topline">
+          <span class="choice-letter">C</span>
+          <h3>Terminal Relic</h3>
+        </div>
+        <p>
+          Porta il TUI quasi letteralmente nel desktop: monospace, griglia, bordi netti e ASCII sempre presente.
+          È la più fedele al terminale, ma sacrifica parte del carattere nativo della GUI.
+        </p>
+        <div class="coverage"><span>ASCII-first</span><span>tecnica</span><span>radicale</span></div>
+      </div>
+    </article>
+  </div>
+</div>
