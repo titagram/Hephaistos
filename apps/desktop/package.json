@@ -11,6 +11,7 @@
     "node": "^20.19.0 || >=22.12.0"
   },
   "scripts": {
+    "brand:assets": "node scripts/generate-brand-assets.cjs",
     "dev": "concurrently -k \"npm:dev:renderer\" \"npm:dev:electron\"",
     "dev:fake-boot": "cross-env HERMES_DESKTOP_BOOT_FAKE=1 HERMES_DESKTOP_BOOT_FAKE_STEP_MS=650 npm run dev",
     "dev:renderer": "node scripts/assert-root-install.cjs && vite --host 127.0.0.1 --port 5174",
@@ -18,6 +19,7 @@
     "profile:main": "wait-on http://127.0.0.1:5174 && cross-env XCURSOR_SIZE=24 HERMES_DESKTOP_DEV_SERVER=http://127.0.0.1:5174 electron --inspect=9229 .",
     "profile:main:cpu": "wait-on http://127.0.0.1:5174 && cross-env XCURSOR_SIZE=24 NODE_OPTIONS=--cpu-prof HERMES_DESKTOP_DEV_SERVER=http://127.0.0.1:5174 electron .",
     "start": "npm run build && electron .",
+    "prebuild": "node scripts/assert-brand-assets.cjs",
     "build": "node scripts/assert-root-install.cjs && node scripts/write-build-stamp.cjs && node scripts/stage-native-deps.cjs && tsc -b && vite build && npm run postbuild",
     "postbuild": "node scripts/assert-dist-built.cjs",
     "prebuilder": "node scripts/patch-electron-builder-mac-binary.cjs",
@@ -31,6 +33,7 @@
     "dist:win:msi": "npm run build && npm run builder -- --win msi",
     "dist:win:nsis": "npm run build && npm run builder -- --win nsis",
     "dist:linux": "npm run build && npm run builder -- --linux AppImage deb rpm",
+    "test:brand-assets": "node --test scripts/generate-brand-assets.test.cjs scripts/assert-brand-assets.test.cjs",
     "test:desktop": "node scripts/test-desktop.mjs",
     "test:desktop:all": "node scripts/test-desktop.mjs all",
     "test:desktop:dmg": "node scripts/test-desktop.mjs dmg",
@@ -136,6 +139,7 @@
     "eslint-plugin-unused-imports": "^4.4.1",
     "globals": "^16.5.0",
     "jsdom": "^29.1.1",
+    "pngjs": "^7.0.0",
     "prettier": "^3.8.3",
     "rcedit": "^5.0.2",
     "typescript": "^6.0.3",
