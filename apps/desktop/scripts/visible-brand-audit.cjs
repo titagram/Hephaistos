@@ -9,7 +9,13 @@ const SOURCE_EXTENSIONS = new Set(['.cjs', '.js', '.jsx', '.mjs', '.ts', '.tsx']
 const DATA_EXTENSIONS = new Set(['.json', '.jsonl'])
 const EXCLUDED_DIRECTORIES = new Set(['build', 'dist', 'node_modules', 'release'])
 const TEST_FILE_PATTERN = /\.test\./
-const BANNED_LEGACY = [/\bHermes\b/g, /hermes-(?:chan|san)/g]
+const BANNED_LEGACY = [
+  /\bHermes\b/g,
+  /hermes-(?:chan|san)/g,
+  /\bNous (?:Desktop|Agent)\b/g,
+  /\b(?:Ask Nous|Open in Nous)\b/g,
+  /\bnous-(?:chan|san)\b/g
+]
 
 const ALLOWED_LEGACY = [
   /\bHERMES_[A-Z0-9_]+\b/,

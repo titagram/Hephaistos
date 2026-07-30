@@ -3,16 +3,17 @@
 function parseDeepLinkPayload(url, onMalformed) {
   if (!url || typeof url !== 'string') return null
 
+  let name
   let parsed
   try {
     parsed = new URL(url)
+    name = decodeURIComponent((parsed.pathname || '').replace(/^\//, ''))
   } catch {
     onMalformed?.(url)
     return null
   }
 
   const kind = parsed.hostname || ''
-  const name = decodeURIComponent((parsed.pathname || '').replace(/^\//, ''))
   const params = {}
   parsed.searchParams.forEach((value, key) => {
     params[key] = value

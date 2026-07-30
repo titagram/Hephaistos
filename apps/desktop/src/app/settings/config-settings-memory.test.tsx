@@ -16,8 +16,21 @@ vi.mock('@/hermes', () => ({
   getHermesConfigRecord: () => getHermesConfigRecord(),
   getHermesConfigSchema: () => getHermesConfigSchema(),
   getMemoryStatus: () => getMemoryStatus(),
-  saveHermesConfig: (config: unknown) => saveHermesConfig(config)
+  saveHermesConfig: (config: unknown) => {
+    savedProfiles.push($activeGatewayProfile.get())
+
+    return saveHermesConfig(config)
+  }
 }))
+
+vi.mock('@/store/profile', async () => {
+  const { atom } = await import('nanostores')
+
+  return {
+    $activeGatewayProfile: atom('profile-a'),
+    normalizeProfileKey: (name: string | null | undefined) => name?.trim() || 'default'
+  }
+})
 
 vi.mock('@/store/notifications', () => ({
   notify: vi.fn(),
@@ -32,6 +45,9 @@ vi.mock('./provider-config-panel', () => ({
   ProviderConfigPanel: () => null
 }))
 
+const { $activeGatewayProfile } = await import('@/store/profile')
+const savedProfiles: string[] = []
+
 beforeAll(() => {
   Element.prototype.scrollIntoView = vi.fn()
   Element.prototype.hasPointerCapture = vi.fn(() => false)
@@ -39,6 +55,8 @@ beforeAll(() => {
 })
 
 beforeEach(() => {
+  $activeGatewayProfile.set('profile-a')
+  savedProfiles.length = 0
   getElevenLabsVoices.mockResolvedValue({ available: false, voices: [] })
   getHermesConfigDefaults.mockResolvedValue({})
   getHermesConfigRecord.mockResolvedValue({ memory: { provider: 'honcho' } })
@@ -203,5 +221,54 @@ describe('ConfigSettings memory provider discovery', () => {
         }),
       { timeout: 1500 }
     )
+  })
+
+  it('drops a pending profile A save, reloads profile B, and saves only a fresh B edit', async () => {
+    getHermesConfigRecord
+      .mockResolvedValueOnce({ memory: { provider: 'a_current' } })
+      .mockResolvedValueOnce({ memory: { provider: 'b_current' } })
+    getMemoryStatus
+      .mockResolvedValueOnce({
+        active: 'a_current',
+        providers: [
+          { name: 'a_current', configured: true, available: true },
+          { name: 'a_edit', configured: true, available: true }
+        ],
+        builtin_files: { memory: 0, user: 0 }
+      })
+      .mockResolvedValueOnce({
+        active: 'b_current',
+        providers: [
+          { name: 'b_current', configured: true, available: true },
+          { name: 'b_edit', configured: true, available: true }
+        ],
+        builtin_files: { memory: 0, user: 0 }
+      })
+
+    await renderMemorySettings()
+    await openProviderSelector()
+    fireEvent.click(await screen.findByRole('option', { name: /A Edit/ }))
+
+    $activeGatewayProfile.set('profile-b')
+    await new Promise(resolve => window.setTimeout(resolve, 650))
+
+    expect(saveHermesConfig).not.toHaveBeenCalled()
+    expect(getHermesConfigRecord).toHaveBeenCalledTimes(2)
+    expect(getHermesConfigDefaults).toHaveBeenCalledTimes(2)
+    expect(getHermesConfigSchema).toHaveBeenCalledTimes(2)
+    expect(getMemoryStatus).toHaveBeenCalledTimes(2)
+    expect((await screen.findByRole('combobox')).textContent).toContain('B Current')
+
+    await openProviderSelector()
+    fireEvent.click(await screen.findByRole('option', { name: /B Edit/ }))
+
+    await waitFor(
+      () =>
+        expect(saveHermesConfig).toHaveBeenCalledWith({
+          memory: { provider: 'b_edit' }
+        }),
+      { timeout: 1500 }
+    )
+    expect(savedProfiles).toEqual(['profile-b'])
   })
 })

@@ -46,12 +46,52 @@ test('allows compatibility contracts and provider identities', t => {
         'HermesGateway',
         'Hermes.exe',
         'Nous Portal',
+        'NousResearch',
+        'Hosted Hermes & Nous-trained models',
         'hermes-3-llama-3.1-70b'
       ]
     `
   )
 
   assert.equal(auditVisibleBrand({ desktopRoot: fixture.root, extraFiles: [file] }).ok, true)
+})
+
+test('rejects residual Nous product copy and mascot identities', t => {
+  const fixture = fixtureTree(t)
+  fixture.write(
+    'src/copy.ts',
+    `
+      export const values = [
+        'Nous Desktop',
+        'Nous Agent',
+        'Ask Nous',
+        'Open in Nous',
+        'nous-chan',
+        'nous-san'
+      ]
+    `
+  )
+
+  const result = auditVisibleBrand({ desktopRoot: fixture.root })
+
+  assert.equal(result.ok, false)
+  assert.deepEqual(
+    result.violations.map(violation => violation.value).sort(),
+    ['Ask Nous', 'Nous Agent', 'Nous Desktop', 'Open in Nous', 'nous-chan', 'nous-san'].sort()
+  )
+})
+
+test('rejects a forbidden Nous product phrase beside an allowed provider identity', t => {
+  const fixture = fixtureTree(t)
+  fixture.write('src/mixed.ts', `export const copy = 'Open Nous Portal, then Ask Nous'`)
+
+  const result = auditVisibleBrand({ desktopRoot: fixture.root })
+
+  assert.equal(result.ok, false)
+  assert.deepEqual(
+    result.violations.map(violation => violation.value),
+    ['Open Nous Portal, then Ask Nous']
+  )
 })
 
 test('extracts source strings, template chunks, JSX text, and JSX attribute values', t => {

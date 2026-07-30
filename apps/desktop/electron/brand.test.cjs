@@ -28,3 +28,11 @@ test('package metadata registers the preferred and legacy desktop protocols in o
     ...DESKTOP_BRAND.legacyProtocols
   ])
 })
+
+test('the recurring native platform gate includes brand and deep-link contracts', () => {
+  const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'))
+  const gate = pkg.scripts['test:desktop:platforms']
+
+  assert.match(gate, /(?:^|\s)electron\/brand\.test\.cjs(?:\s|$)/)
+  assert.match(gate, /(?:^|\s)electron\/deep-link\.test\.cjs(?:\s|$)/)
+})

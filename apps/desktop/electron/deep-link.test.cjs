@@ -46,3 +46,23 @@ for (const fixture of [
     assert.deepEqual(delivered, [fixture.expected])
   })
 }
+
+for (const protocol of ['hades', 'hermes']) {
+  test(`malformed percent-encoding in a ${protocol} deep link is reported and never delivered`, () => {
+    const malformed = []
+    const delivered = []
+    const delivery = createDeepLinkDelivery({
+      preferredProtocol: DESKTOP_BRAND.preferredProtocol,
+      canDeliver: () => true,
+      deliver: payload => delivered.push(payload),
+      onMalformed: url => malformed.push(url)
+    })
+    const url = `${protocol}://blueprint/%`
+
+    assert.doesNotThrow(() => delivery.handle(url))
+    delivery.markReady()
+
+    assert.deepEqual(malformed, [url])
+    assert.deepEqual(delivered, [])
+  })
+}

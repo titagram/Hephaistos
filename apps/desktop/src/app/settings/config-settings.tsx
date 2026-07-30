@@ -1,3 +1,4 @@
+import { useStore } from '@nanostores/react'
 import type { ChangeEvent, ReactNode } from 'react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
@@ -17,6 +18,7 @@ import {
 import { useI18n } from '@/i18n'
 import { cn } from '@/lib/utils'
 import { notify, notifyError } from '@/store/notifications'
+import { $activeGatewayProfile, normalizeProfileKey } from '@/store/profile'
 import type { ConfigFieldSchema, HermesConfigRecord, MemoryStatusResponse } from '@/types/hermes'
 
 import { CONTROL_TEXT, EMPTY_SELECT_VALUE, FIELD_DESCRIPTIONS, FIELD_LABELS, SECTIONS } from './constants'
@@ -306,7 +308,9 @@ export function ConfigSettings({
 }) {
   const { t } = useI18n()
   const c = t.settings.config
+  const activeProfile = normalizeProfileKey(useStore($activeGatewayProfile))
   const [config, setConfig] = useState<HermesConfigRecord | null>(null)
+  const [configProfile, setConfigProfile] = useState<string | null>(null)
   const [_defaults, setDefaults] = useState<HermesConfigRecord | null>(null)
   const [schema, setSchema] = useState<Record<string, ConfigFieldSchema> | null>(null)
   const [elevenLabsVoiceOptions, setElevenLabsVoiceOptions] = useState<string[] | null>(null)
@@ -318,6 +322,16 @@ export function ConfigSettings({
 
   useEffect(() => {
     let cancelled = false
+    const profile = activeProfile
+
+    saveVersionRef.current += 1
+    setSaveVersion(0)
+    setConfig(null)
+    setConfigProfile(null)
+    setDefaults(null)
+    setSchema(null)
+    setMemoryStatus(null)
+    setMemoryDiscoveryFailed(false)
 
     const memoryDiscovery = getMemoryStatus()
       .then(status => ({ failed: false as const, status }))
@@ -335,16 +349,21 @@ export function ConfigSettings({
             : c
 
         setConfig(loadedConfig)
+        setConfigProfile(profile)
         setDefaults(d)
         setSchema(s.fields)
         setMemoryStatus(memory.status)
         setMemoryDiscoveryFailed(memory.failed)
       })
-      .catch(err => notifyError(err, c.failedLoad))
+      .catch(err => {
+        if (!cancelled) {
+          notifyError(err, c.failedLoad)
+        }
+      })
 
     return () => void (cancelled = true)
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- load once on mount; copy is stable
-  }, [])
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- reload only on profile changes; copy is stable
+  }, [activeProfile])
 
   useEffect(() => {
     let cancelled = false
@@ -369,22 +388,27 @@ export function ConfigSettings({
   }, [])
 
   useEffect(() => {
-    if (!config || saveVersion === 0) {
+    if (!config || saveVersion === 0 || configProfile !== activeProfile) {
       return
     }
 
     const v = saveVersion
+    const profile = configProfile
 
     const t = window.setTimeout(() => {
       void (async () => {
+        if (saveVersionRef.current !== v || normalizeProfileKey($activeGatewayProfile.get()) !== profile) {
+          return
+        }
+
         try {
           await saveHermesConfig(config)
 
-          if (saveVersionRef.current === v) {
+          if (saveVersionRef.current === v && normalizeProfileKey($activeGatewayProfile.get()) === profile) {
             onConfigSaved?.()
           }
         } catch (err) {
-          if (saveVersionRef.current === v) {
+          if (saveVersionRef.current === v && normalizeProfileKey($activeGatewayProfile.get()) === profile) {
             notifyError(err, c.autosaveFailed)
           }
         }
@@ -393,9 +417,13 @@ export function ConfigSettings({
 
     return () => window.clearTimeout(t)
     // eslint-disable-next-line react-hooks/exhaustive-deps -- copy is stable; avoid re-scheduling autosave on locale change
-  }, [config, onConfigSaved, saveVersion])
+  }, [activeProfile, config, configProfile, onConfigSaved, saveVersion])
 
   const updateConfig = (next: HermesConfigRecord) => {
+    if (configProfile !== activeProfile) {
+      return
+    }
+
     saveVersionRef.current += 1
     setConfig(next)
     setSaveVersion(saveVersionRef.current)
