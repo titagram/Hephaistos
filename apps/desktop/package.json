@@ -33,6 +33,7 @@
     "dist:win:msi": "npm run build && npm run builder -- --win msi",
     "dist:win:nsis": "npm run build && npm run builder -- --win nsis",
     "dist:linux": "npm run build && npm run builder -- --linux AppImage deb rpm",
+    "test:brand": "node --test scripts/visible-brand-audit.test.cjs && node scripts/visible-brand-audit.cjs",
     "test:brand-assets": "node --test scripts/generate-brand-assets.test.cjs scripts/assert-brand-assets.test.cjs",
     "test:desktop": "node scripts/test-desktop.mjs",
     "test:desktop:all": "node scripts/test-desktop.mjs all",
