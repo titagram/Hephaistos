@@ -1,16 +1,23 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { BrandMark } from './brand-mark'
 
-afterEach(cleanup)
+beforeEach(() => {
+  vi.stubEnv('BASE_URL', './')
+})
+
+afterEach(() => {
+  cleanup()
+  vi.unstubAllEnvs()
+})
 
 describe('BrandMark', () => {
   it('renders the bundled Hades mark with an inline vector fallback', () => {
     const { container } = render(<BrandMark />)
 
     expect(screen.getByRole('img', { name: 'Hades' })).toBeTruthy()
-    expect(container.querySelector('img')?.getAttribute('src')).toBe('/hades-mark.svg')
+    expect(container.querySelector('img')?.getAttribute('src')).toBe('./hades-mark.svg')
     expect(container.querySelector('svg')).toBeTruthy()
   })
 

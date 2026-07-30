@@ -3,6 +3,8 @@ import { useState } from 'react'
 import { HADES_BRAND } from '@/branding/identity'
 import { cn } from '@/lib/utils'
 
+const assetPath = (path: string) => `${import.meta.env.BASE_URL}${path.replace(/^\/+/, '')}`
+
 export function BrandMark({ className, ...props }: React.ComponentProps<'span'>) {
   const [assetFailed, setAssetFailed] = useState(false)
 
@@ -26,7 +28,7 @@ export function BrandMark({ className, ...props }: React.ComponentProps<'span'>)
           aria-hidden="true"
           className="absolute inset-0 size-full"
           onError={() => setAssetFailed(true)}
-          src={HADES_BRAND.markPath}
+          src={assetPath(HADES_BRAND.markPath)}
         />
       )}
     </span>
