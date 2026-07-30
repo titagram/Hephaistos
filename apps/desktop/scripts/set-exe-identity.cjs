@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// set-exe-identity.cjs — stamp the Hermes icon + version metadata onto the
-// built Hermes.exe using rcedit, completely decoupled from electron-builder's
+// set-exe-identity.cjs — stamp the Hades icon + version metadata onto the
+// built Hades.exe using rcedit, completely decoupled from electron-builder's
 // signing path.
 //
 // WHY THIS EXISTS
@@ -13,7 +13,7 @@
 // try to extract winCodeSign.
 //
 // The cost of disabling signAndEditExecutable is that electron-builder also
-// skips rcedit, so the unpacked Hermes.exe keeps the stock Electron icon and
+// skips rcedit, so the unpacked Hades.exe keeps the stock Electron icon and
 // "Electron" taskbar name. This script restores the icon + identity by calling
 // rcedit DIRECTLY. rcedit is a pure PE resource editor: no signing, no certs,
 // no winCodeSign, no symlinks.
@@ -28,7 +28,7 @@
 // shipped a stock "Electron" exe. Keeping it in afterPack closes that gap.
 //
 // Also runnable standalone for ad-hoc re-stamping:
-//   node scripts/set-exe-identity.cjs <path-to-Hermes.exe>
+//   node scripts/set-exe-identity.cjs <path-to-Hades.exe>
 //
 // Exits 0 on success, non-zero on failure when run as a CLI. As a hook,
 // stampExeIdentity() resolves on success and rejects on failure; the caller
@@ -37,11 +37,12 @@
 
 const path = require('node:path')
 const fs = require('node:fs')
+const { DESKTOP_BRAND } = require('../electron/brand.cjs')
 
-// Stamp the Hermes icon + identity onto `exe`. Resolves on success, throws on
+// Stamp the Hades icon + identity onto `exe`. Resolves on success, throws on
 // failure. `desktopRoot` defaults to this script's package root so the icon and
 // the rcedit dependency resolve regardless of cwd.
-async function stampExeIdentity(exe, desktopRoot = path.resolve(__dirname, '..')) {
+async function stampExeIdentity(exe, desktopRoot = path.resolve(__dirname, '..'), editExecutable) {
   if (!exe || !fs.existsSync(exe)) {
     throw new Error(`target exe not found: ${exe}`)
   }
@@ -56,8 +57,8 @@ async function stampExeIdentity(exe, desktopRoot = path.resolve(__dirname, '..')
   // we're run from the desktop dir or the repo root (workspace hoist).
   // rcedit@5 exports a NAMED `rcedit` function (CommonJS: { rcedit }), not a
   // default export.
-  const mod = require('rcedit')
-  const rcedit = typeof mod === 'function' ? mod : mod.rcedit
+  const mod = editExecutable ? null : require('rcedit')
+  const rcedit = editExecutable || (typeof mod === 'function' ? mod : mod.rcedit)
   if (typeof rcedit !== 'function') {
     throw new Error(`unexpected rcedit export shape: ${typeof mod} keys=${Object.keys(mod)}`)
   }
@@ -68,14 +69,14 @@ async function stampExeIdentity(exe, desktopRoot = path.resolve(__dirname, '..')
   await rcedit(exe, {
     icon,
     'version-string': {
-      ProductName: 'Hermes',
-      FileDescription: 'Hermes',
-      CompanyName: 'Hades Agent',
-      LegalCopyright: 'Copyright (c) 2026 Hades Agent'
+      ProductName: DESKTOP_BRAND.productName,
+      FileDescription: DESKTOP_BRAND.productName,
+      CompanyName: DESKTOP_BRAND.agentName,
+      LegalCopyright: DESKTOP_BRAND.copyright
     }
   })
 
-  console.log('[set-exe-identity] done — Hermes icon + identity stamped')
+  console.log(`[set-exe-identity] done — ${DESKTOP_BRAND.productName} icon + identity stamped`)
 }
 
 module.exports = { stampExeIdentity }

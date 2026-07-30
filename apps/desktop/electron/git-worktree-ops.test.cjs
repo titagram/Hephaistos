@@ -65,6 +65,7 @@ test('ensureGitRepo: inits a plain dir with a root commit so worktrees branch', 
   try {
     await ensureGitRepo('git', dir)
     assert.match(git('rev-parse', '--verify', 'HEAD'), /^[0-9a-f]{7,}$/)
+    assert.equal(git('log', '-1', '--format=%an'), 'Hades')
 
     // The whole point: a worktree can now branch off the seeded root commit.
     execFileSync('git', ['worktree', 'add', '-b', 'wt', path.join(dir, '.worktrees', 'wt')], { cwd: dir })

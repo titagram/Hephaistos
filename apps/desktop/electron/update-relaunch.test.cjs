@@ -189,8 +189,8 @@ test('shellQuote neutralizes single quotes and metacharacters', () => {
 test('buildRelaunchScript embeds pid/exec/args/env/cwd and is valid bash', () => {
   const script = buildRelaunchScript({
     pid: 4242,
-    execPath: '/home/u/.hermes/hermes-agent/apps/desktop/release/linux-unpacked/Hermes',
-    args: ['hermes://open/agent/42', "--note=it's fine"],
+    execPath: '/home/u/.hades/hermes-agent/apps/desktop/release/linux-unpacked/Hades',
+    args: ['hades://open/agent/42', "--note=it's fine"],
     env: {
       HADES_HOME: '/home/u/.hades',
       HERMES_HOME: '/home/u/.hermes',
@@ -209,7 +209,7 @@ test('buildRelaunchScript embeds pid/exec/args/env/cwd and is valid bash', () =>
   assert.match(script, /export HERMES_HOME='\/home\/u\/\.hermes'/)
   assert.match(script, /export HERMES_DESKTOP_REMOTE_URL='http:\/\/box:9119'/)
   assert.match(script, /cd '\/home\/u\/work dir'/)
-  assert.match(script, /exec '.*\/linux-unpacked\/Hermes' 'hermes:\/\/open\/agent\/42' '--note=it'\\''s fine'/)
+  assert.match(script, /exec '.*\/linux-unpacked\/Hades' 'hades:\/\/open\/agent\/42' '--note=it'\\''s fine'/)
 
   // It must be syntactically valid bash (`bash -n`). Write to a temp file and lint.
   const tmp = path.join(os.tmpdir(), `hermes-relaunch-test-${Date.now()}.sh`)
@@ -221,7 +221,7 @@ test('buildRelaunchScript embeds pid/exec/args/env/cwd and is valid bash', () =>
   }
 })
 
-test('buildRelaunchScript with no args/env still lints clean', () => {
+test('buildRelaunchScript keeps a legacy Hermes package executable launchable', () => {
   const script = buildRelaunchScript({
     pid: 1,
     execPath: '/opt/Hermes/Hermes',

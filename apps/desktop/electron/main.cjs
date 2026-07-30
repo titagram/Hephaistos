@@ -24,6 +24,7 @@ const https = require('node:https')
 const path = require('node:path')
 const { pathToFileURL } = require('node:url')
 const { execFileSync, spawn } = require('node:child_process')
+const { DESKTOP_BRAND } = require('./brand.cjs')
 const { installEmbedReferer } = require('./embed-referer.cjs')
 const { detectRemoteDisplay, isWindowsBinaryPathInWsl, isWslEnvironment } = require('./bootstrap-platform.cjs')
 const { runBootstrap } = require('./bootstrap-runner.cjs')
@@ -402,7 +403,7 @@ const BOOT_FAKE_STEP_MS = (() => {
   if (!Number.isFinite(raw) || raw <= 0) return 650
   return Math.max(120, raw)
 })()
-const APP_NAME = 'Hades'
+const APP_NAME = DESKTOP_BRAND.productName
 const TITLEBAR_HEIGHT = 34
 const MACOS_TRAFFIC_LIGHTS_HEIGHT = 14
 const WINDOW_BUTTON_POSITION = {
@@ -694,7 +695,7 @@ if (IS_WINDOWS) {
 app.setAboutPanelOptions({
   applicationName: APP_NAME,
   applicationVersion: resolveHermesVersion(),
-  copyright: 'Copyright © 2026 Hades Agent'
+  copyright: DESKTOP_BRAND.copyright
 })
 
 // Custom scheme for streaming local media (video/audio) into the renderer.
@@ -1256,7 +1257,7 @@ async function waitForUpdateToFinish() {
   while (marker && Date.now() < deadline) {
     await advanceBootProgress(
       'backend.update-wait',
-      'An update is finishing — Hermes will start automatically when it completes…',
+      `An update is finishing — ${DESKTOP_BRAND.productName} will start automatically when it completes…`,
       12
     )
     await new Promise(r => setTimeout(r, UPDATE_WAIT_POLL_MS))
@@ -2504,7 +2505,7 @@ async function applyUpdatesPosixInApp() {
     const outcome = decideRelaunchOutcome({ underUnpacked, sandboxOk })
 
     if (outcome === 'relaunch') {
-      emitUpdateProgress({ stage: 'restart', message: 'Restarting Hermes…', percent: 100 })
+      emitUpdateProgress({ stage: 'restart', message: `Restarting ${DESKTOP_BRAND.productName}…`, percent: 100 })
       // Preserve launch context across the re-exec: replay the original args
       // (filtered of Electron internals) and the env/cwd that define which
       // backend/profile/root this instance talks to. Without this the
@@ -2537,7 +2538,7 @@ async function applyUpdatesPosixInApp() {
           backendUpdated: true,
           guiUpdated: false,
           manualRestart: true,
-          message: 'Backend updated. Quit and reopen Hermes to load the new version.'
+          message: `Backend updated. Quit and reopen ${DESKTOP_BRAND.productName} to load the new version.`
         }
       }
     }
@@ -2547,7 +2548,7 @@ async function applyUpdatesPosixInApp() {
         stage: 'guiSkew',
         message:
           'Backend updated, but the desktop app package was not changed. ' +
-          'Update or reinstall the Hermes desktop app to match.',
+          `Update or reinstall the ${DESKTOP_BRAND.productName} desktop app to match.`,
         percent: 100
       })
       rememberLog(
@@ -2571,11 +2572,13 @@ async function applyUpdatesPosixInApp() {
       sandboxBlocked: true,
       message:
         'Backend updated. The rebuilt app can’t relaunch automatically ' +
-        '(sandbox helper needs root). Quit and reopen Hermes to finish.'
+        `(sandbox helper needs root). Quit and reopen ${DESKTOP_BRAND.productName} to finish.`
     }
   }
 
   const rebuiltApp = [
+    path.join(updateRoot, 'apps', 'desktop', 'release', 'mac-arm64', `${DESKTOP_BRAND.productName}.app`),
+    path.join(updateRoot, 'apps', 'desktop', 'release', 'mac', `${DESKTOP_BRAND.productName}.app`),
     path.join(updateRoot, 'apps', 'desktop', 'release', 'mac-arm64', 'Hermes.app'),
     path.join(updateRoot, 'apps', 'desktop', 'release', 'mac', 'Hermes.app')
   ].find(directoryExists)
@@ -3132,7 +3135,7 @@ async function ensureRuntime(backend) {
 
     if (!bootstrapResult.ok) {
       const bootstrapError = new Error(
-        `Hermes bootstrap failed${bootstrapResult.failedStage ? ` at stage '${bootstrapResult.failedStage}'` : ''}: ` +
+        `${DESKTOP_BRAND.productName} bootstrap failed${bootstrapResult.failedStage ? ` at stage '${bootstrapResult.failedStage}'` : ''}: ` +
           `${bootstrapResult.error || 'unknown error'}. ` +
           `Check ${path.join(HERMES_HOME, 'logs', 'desktop.log')} for the full transcript.`
       )
@@ -3172,10 +3175,10 @@ async function ensureRuntime(backend) {
   // here via an external `hermes` on PATH, this check still helps.
   if (IS_WINDOWS && !findGitBash()) {
     throw new Error(
-      'Git for Windows is required for Hermes on Windows (provides Git Bash, ' +
+      `Git for Windows is required for ${DESKTOP_BRAND.productName} on Windows (provides Git Bash, ` +
         "which the agent's terminal tool uses). Install it from " +
         'https://git-scm.com/download/win or run `winget install -e --id Git.Git`, ' +
-        'then relaunch Hermes.'
+        `then relaunch ${DESKTOP_BRAND.productName}.`
     )
   }
 
@@ -3213,7 +3216,7 @@ function fetchJson(url, token, options = {}) {
     const timeoutMs = resolveTimeoutMs(options.timeoutMs, DEFAULT_FETCH_TIMEOUT_MS)
 
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-      reject(new Error(`Unsupported Hermes backend URL protocol: ${parsed.protocol}`))
+      reject(new Error(`Unsupported ${DESKTOP_BRAND.productName} backend URL protocol: ${parsed.protocol}`))
       return
     }
 
@@ -3251,7 +3254,7 @@ function fetchJson(url, token, options = {}) {
             reject(
               new Error(
                 `Expected JSON from ${url} but got HTML (status ${res.statusCode}). ` +
-                  'The endpoint is likely missing on the Hermes backend.'
+                  `The endpoint is likely missing on the ${DESKTOP_BRAND.productName} backend.`
               )
             )
             return
@@ -3267,7 +3270,7 @@ function fetchJson(url, token, options = {}) {
 
     req.on('error', reject)
     req.setTimeout(timeoutMs, () => {
-      req.destroy(new Error(`Timed out connecting to Hermes backend after ${timeoutMs}ms`))
+      req.destroy(new Error(`Timed out connecting to ${DESKTOP_BRAND.productName} backend after ${timeoutMs}ms`))
     })
     if (body) req.write(body)
     req.end()
@@ -3293,7 +3296,7 @@ function fetchPublicJson(url, options = {}) {
     const timeoutMs = resolveTimeoutMs(options.timeoutMs, DEFAULT_FETCH_TIMEOUT_MS)
 
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-      reject(new Error(`Unsupported Hermes backend URL protocol: ${parsed.protocol}`))
+      reject(new Error(`Unsupported ${DESKTOP_BRAND.productName} backend URL protocol: ${parsed.protocol}`))
       return
     }
 
@@ -3325,7 +3328,7 @@ function fetchPublicJson(url, options = {}) {
             reject(
               new Error(
                 `Expected JSON from ${url} but got HTML (status ${res.statusCode}). ` +
-                  'The endpoint is likely missing on the Hermes backend.'
+                  `The endpoint is likely missing on the ${DESKTOP_BRAND.productName} backend.`
               )
             )
             return
@@ -3341,7 +3344,7 @@ function fetchPublicJson(url, options = {}) {
 
     req.on('error', reject)
     req.setTimeout(timeoutMs, () => {
-      req.destroy(new Error(`Timed out connecting to Hermes backend after ${timeoutMs}ms`))
+      req.destroy(new Error(`Timed out connecting to ${DESKTOP_BRAND.productName} backend after ${timeoutMs}ms`))
     })
     if (body) req.write(body)
     req.end()
@@ -4492,7 +4495,7 @@ function fetchJsonViaOauthSession(url, options = {}) {
       return
     }
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-      reject(new Error(`Unsupported Hermes backend URL protocol: ${parsed.protocol}`))
+      reject(new Error(`Unsupported ${DESKTOP_BRAND.productName} backend URL protocol: ${parsed.protocol}`))
       return
     }
     const body = serializeJsonBody(options.body)
@@ -4515,7 +4518,7 @@ function fetchJsonViaOauthSession(url, options = {}) {
       } catch {
         // already finished
       }
-      reject(new Error(`Timed out connecting to Hermes backend after ${timeoutMs}ms`))
+      reject(new Error(`Timed out connecting to ${DESKTOP_BRAND.productName} backend after ${timeoutMs}ms`))
     }, timeoutMs)
 
     request.on('response', res => {
@@ -6501,7 +6504,7 @@ ipcMain.handle('hermes:notify', (_event, payload) => {
   // and the body click still works.
   const actions = Array.isArray(payload?.actions) ? payload.actions : []
   const notification = new Notification({
-    title: payload?.title || 'Hermes',
+    title: payload?.title || DESKTOP_BRAND.productName,
     body: payload?.body || '',
     silent: Boolean(payload?.silent),
     actions: actions.map(action => ({ type: 'button', text: String(action?.text || '') }))
@@ -6887,7 +6890,7 @@ function terminalShellEnv() {
   env.COLORTERM = 'truecolor'
   env.LC_CTYPE = env.LC_CTYPE || 'UTF-8'
   env.TERM = 'xterm-256color'
-  env.TERM_PROGRAM = 'Hermes'
+  env.TERM_PROGRAM = DESKTOP_BRAND.termProgram
   env.TERM_PROGRAM_VERSION = app.getVersion()
 
   // Let a hermes/--tui launched in this pane know it's embedded in the desktop
@@ -7081,7 +7084,9 @@ ipcMain.handle('hermes:git:scanRepos', async (_event, roots, options) => {
 
 ipcMain.handle('hermes:terminal:start', async (event, payload = {}) => {
   if (!nodePty) {
-    throw new Error('PTY support is unavailable. Reinstall desktop dependencies and restart Hermes.')
+    throw new Error(
+      `PTY support is unavailable. Reinstall desktop dependencies and restart ${DESKTOP_BRAND.productName}.`
+    )
   }
 
   ensureSpawnHelperExecutable()
@@ -7203,7 +7208,7 @@ function showAboutPanelFresh() {
   app.setAboutPanelOptions({
     applicationName: APP_NAME,
     applicationVersion: resolveHermesVersion(),
-    copyright: 'Copyright © 2026 Hades Agent'
+    copyright: DESKTOP_BRAND.copyright
   })
   app.showAboutPanel()
 }
@@ -7427,9 +7432,7 @@ ipcMain.handle('hermes:vscode-theme:search', async (_event, query) => searchMark
 // running app's chat composer. Three delivery paths: macOS 'open-url',
 // Win/Linux running-app 'second-instance' (argv), Win/Linux cold-start argv.
 // ---------------------------------------------------------------------------
-const HADES_PROTOCOL = 'hades'
-const LEGACY_HERMES_PROTOCOL = 'hermes'
-const DEEP_LINK_PROTOCOLS = [HADES_PROTOCOL, LEGACY_HERMES_PROTOCOL]
+const DEEP_LINK_PROTOCOLS = [DESKTOP_BRAND.preferredProtocol, ...DESKTOP_BRAND.legacyProtocols]
 let _pendingDeepLink = null
 let _rendererReadyForDeepLink = false
 

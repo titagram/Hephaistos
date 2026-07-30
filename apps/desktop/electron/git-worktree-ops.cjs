@@ -8,6 +8,7 @@ const path = require('node:path')
 const fs = require('node:fs')
 const { execFile } = require('node:child_process')
 
+const { DESKTOP_BRAND } = require('./brand.cjs')
 const { resolveRequestedPathForIpc } = require('./hardening.cjs')
 
 function runGit(gitBin, args, cwd) {
@@ -183,7 +184,7 @@ async function ensureGitRepo(gitBin, dir) {
         '-c',
         'user.email=hermes@localhost',
         '-c',
-        'user.name=Hermes',
+        `user.name=${DESKTOP_BRAND.productName}`,
         'commit',
         '--allow-empty',
         '-m',

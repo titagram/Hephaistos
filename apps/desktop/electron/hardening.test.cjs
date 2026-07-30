@@ -37,7 +37,7 @@ test('encryptDesktopSecret requires available secure storage', () => {
 
   assert.throws(
     () => encryptDesktopSecret('token', { isEncryptionAvailable: () => false, encryptString: () => Buffer.alloc(0) }),
-    /Secure token storage is unavailable/
+    /Secure token storage is unavailable, so Hades Desktop cannot save/
   )
 })
 
