@@ -164,6 +164,10 @@ Settings descriptions, provider flow copy, notifications, updater copy, and
 native About text undergo a visible-string audit. Internal function names such
 as `getHermesConfigRecord` are not part of this audit.
 
+Every shipped locale catalog must use the invariant Hades product name and
+remove translated or transliterated Hermes product references. Existing
+non-brand terminology and locale fallback behavior remain unchanged.
+
 ### Legacy public artwork
 
 The current `hermes.png`, `hermes-sprite.png`, and
