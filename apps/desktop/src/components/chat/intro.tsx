@@ -1,4 +1,7 @@
-import { type CSSProperties, useState } from 'react'
+import { useState } from 'react'
+
+import { HADES_BRAND } from '@/branding/identity'
+import { HadesAsciiMark } from '@/components/hades-ascii-mark'
 
 import introCopyJsonl from './intro-copy.jsonl?raw'
 
@@ -142,8 +145,6 @@ function pickCopy(copies: IntroCopy[], seed = 0): IntroCopy {
   return copies[Math.abs(seed) % copies.length] || FALLBACK_COPY[0]
 }
 
-const WORDMARK = 'HADES AGENT'
-
 function resolveCopy(personality?: string, seed?: number): IntroCopy {
   const personalityKey = normalizeKey(personality)
 
@@ -163,19 +164,13 @@ export function Intro({ personality, seed }: IntroProps) {
       className="pointer-events-none flex w-full min-w-0 flex-col items-center justify-center px-0.5 py-6 text-center text-muted-foreground sm:px-6 lg:px-8"
       data-slot="aui_intro"
     >
-      <div className="w-full min-w-0">
-        <p
-          aria-label={WORDMARK}
-          className="fit-text mx-auto mb-1 w-[calc(100%-1rem)] font-['Collapse'] font-bold uppercase leading-[0.9] tracking-[0.08em] text-midground mix-blend-plus-lighter dark:text-foreground/90"
-          style={{ '--fit-min': '2.75rem' } as CSSProperties}
-        >
-          <span>
-            <span>{WORDMARK}</span>
-          </span>
-          <span aria-hidden="true">{WORDMARK}</span>
+      <div aria-label={HADES_BRAND.agentName} className="w-full min-w-0">
+        <HadesAsciiMark className="mx-auto mb-3 max-h-40 max-w-full overflow-hidden text-[0.42rem] leading-none text-midground" />
+        <p className="font-['Collapse'] font-bold uppercase tracking-[0.08em]">{HADES_BRAND.agentName}</p>
+        <p className="mt-1 font-mono text-[0.65rem] uppercase tracking-[0.2em] text-muted-foreground">
+          {HADES_BRAND.tagline}
         </p>
-
-        <p className="m-0 text-center leading-normal tracking-tight">{copy.body}</p>
+        <p className="mt-3">{copy.body}</p>
       </div>
     </div>
   )
