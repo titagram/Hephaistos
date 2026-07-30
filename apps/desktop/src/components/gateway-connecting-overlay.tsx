@@ -1,6 +1,8 @@
 import { useStore } from '@nanostores/react'
 import { useEffect, useRef, useState } from 'react'
 
+import { HADES_BRAND } from '@/branding/identity'
+import { HadesAsciiMark } from '@/components/hades-ascii-mark'
 import { cn } from '@/lib/utils'
 import { $desktopBoot } from '@/store/boot'
 import { $gatewayState } from '@/store/session'
@@ -170,20 +172,26 @@ export function GatewayConnectingOverlay() {
       )}
     >
       <style>{'@keyframes gco-cursor { 0%, 49% { opacity: 1 } 50%, 100% { opacity: 0 } }'}</style>
-      <span
-        className={cn(
-          'inline-flex items-center pl-[0.4em] font-mono text-[0.64rem] font-semibold uppercase tracking-[0.4em] tabular-nums text-(--theme-primary) transition duration-300 ease-out',
-          leaving ? 'translate-y-2 opacity-0 saturate-0' : 'translate-y-0 opacity-100 saturate-100'
-        )}
-      >
-        {PREFIX}
-        {tail}
+      <div className="grid justify-items-center gap-4 text-center">
+        <HadesAsciiMark className="max-h-48 text-(--theme-primary)" />
+        <h1 className="text-sm font-semibold tracking-[0.18em] text-foreground uppercase">
+          {HADES_BRAND.agentName}
+        </h1>
         <span
-          aria-hidden="true"
-          className="dither ml-0.5 inline-block size-2 shrink-0 -translate-y-px rounded-[1px]"
-          style={{ animation: 'gco-cursor 1s step-end infinite' }}
-        />
-      </span>
+          className={cn(
+            'inline-flex items-center pl-[0.4em] font-mono text-[0.64rem] font-semibold uppercase tracking-[0.4em] tabular-nums text-(--theme-primary) transition duration-300 ease-out',
+            leaving ? 'translate-y-2 opacity-0 saturate-0' : 'translate-y-0 opacity-100 saturate-100'
+          )}
+        >
+          {PREFIX}
+          {tail}
+          <span
+            aria-hidden="true"
+            className="dither ml-0.5 inline-block size-2 shrink-0 -translate-y-px rounded-[1px]"
+            style={{ animation: 'gco-cursor 1s step-end infinite' }}
+          />
+        </span>
+      </div>
     </div>
   )
 }

@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 
+import { HADES_BRAND } from '@/branding/identity'
+import { HadesAsciiMark } from '@/components/hades-ascii-mark'
 import { Button } from '@/components/ui/button'
 import { Loader } from '@/components/ui/loader'
 import { LogView } from '@/components/ui/log-view'
@@ -353,6 +355,10 @@ export function DesktopInstallOverlay({ enabled = true }: DesktopInstallOverlayP
     return (
       <div className="fixed inset-0 z-[1400] flex items-center justify-center bg-background/90 backdrop-blur-md">
         <div className="w-full max-w-xl rounded-xl border border-(--stroke-nous) bg-card p-8 shadow-nous">
+          <div className="mb-6 grid justify-items-center gap-3 text-center">
+            <HadesAsciiMark className="max-h-40 text-primary" />
+            <h1 className="text-sm font-semibold tracking-[0.18em] uppercase">{HADES_BRAND.agentName}</h1>
+          </div>
           <h2 className="text-2xl font-semibold tracking-tight">{copy.oneTimeTitle}</h2>
           <p className="mt-2 text-sm text-muted-foreground">{copy.unsupportedDesc(platformLabel)}</p>
 
@@ -418,6 +424,10 @@ export function DesktopInstallOverlay({ enabled = true }: DesktopInstallOverlayP
       <div className="flex w-full max-w-2xl max-h-[90vh] flex-col rounded-xl border border-(--stroke-nous) bg-card shadow-nous">
         {/* Header -- always visible, never scrolls */}
         <div className="flex-shrink-0 p-8 pb-4">
+          <div className="mb-6 grid justify-items-center gap-3 text-center">
+            <HadesAsciiMark className="max-h-40 text-primary" />
+            <h1 className="text-sm font-semibold tracking-[0.18em] uppercase">{HADES_BRAND.agentName}</h1>
+          </div>
           <h2 className="text-2xl font-semibold tracking-tight">
             {failed ? copy.failedTitle : state.active ? copy.settingUpTitle : copy.finishingTitle}
           </h2>

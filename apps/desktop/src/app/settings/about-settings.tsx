@@ -1,6 +1,7 @@
 import { useStore } from '@nanostores/react'
 import { useEffect, useState } from 'react'
 
+import { HADES_BRAND } from '@/branding/identity'
 import { BrandMark } from '@/components/brand-mark'
 import { Button } from '@/components/ui/button'
 import { Codicon } from '@/components/ui/codicon'
@@ -98,7 +99,7 @@ export function AboutSettings() {
       <div className="flex flex-col items-center gap-3 pt-6 pb-2 text-center">
         <BrandMark className="size-16" />
         <div>
-          <h2 className="text-lg font-semibold tracking-tight">{a.heading}</h2>
+          <h2 className="text-lg font-semibold tracking-tight">{HADES_BRAND.productName} Desktop</h2>
           <p className="mt-1 text-xs text-muted-foreground">
             {version?.appVersion ? a.version(version.appVersion) : a.versionUnavailable}
           </p>

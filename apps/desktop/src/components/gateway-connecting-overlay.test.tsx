@@ -59,6 +59,22 @@ const isRecoveryShown = () =>
   Boolean(screen.queryByText(/use local gateway/i) || screen.queryByText(/retry/i) || screen.queryByText(/sign in/i))
 
 describe('connecting overlay vs recovery surface', () => {
+  it('renders an accessible Hades Agent hero during initial boot', () => {
+    $desktopBoot.set({
+      ...$desktopBoot.get(),
+      message: 'Starting desktop backend',
+      progress: 20,
+      running: true,
+      visible: true
+    })
+    setGatewayState('connecting')
+
+    render(<GatewayConnectingOverlay />)
+
+    expect(screen.getByRole('heading', { name: 'Hades Agent' })).toBeTruthy()
+    expect(isConnectingShown()).toBe(true)
+  })
+
   it('hard initial-boot failure surfaces the recovery overlay (the working path)', () => {
     // failDesktopBoot() ran: error set, gateway never opened.
     $desktopBoot.set({
@@ -77,6 +93,7 @@ describe('connecting overlay vs recovery surface', () => {
     )
 
     expect(isRecoveryShown()).toBe(true)
+    expect(screen.getByRole('heading', { name: 'Hades Agent' })).toBeTruthy()
     // Connecting overlay bows out when boot.error is set.
     expect(isConnectingShown()).toBe(false)
   })

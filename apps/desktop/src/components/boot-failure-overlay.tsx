@@ -1,6 +1,8 @@
 import { useStore } from '@nanostores/react'
 import { useEffect, useState } from 'react'
 
+import { HADES_BRAND } from '@/branding/identity'
+import { HadesAsciiMark } from '@/components/hades-ascii-mark'
 import { Button } from '@/components/ui/button'
 import { ErrorIcon } from '@/components/ui/error-state'
 import { LogView } from '@/components/ui/log-view'
@@ -175,6 +177,10 @@ export function BootFailureOverlay() {
   return (
     <div className="fixed inset-0 z-[1400] flex items-center justify-center bg-(--ui-chat-surface-background) p-6">
       <div className="w-full max-w-[40rem] overflow-hidden rounded-xl border border-(--stroke-nous) bg-(--ui-chat-bubble-background) shadow-nous">
+        <div className="grid justify-items-center gap-3 px-5 pt-5 text-center">
+          <HadesAsciiMark className="max-h-36 text-primary" />
+          <h1 className="text-sm font-semibold tracking-[0.18em] uppercase">{HADES_BRAND.agentName}</h1>
+        </div>
         <div className="flex items-start gap-3 px-5 py-4">
           <ErrorIcon className="mt-0.5" size="1.25rem" />
           <div>

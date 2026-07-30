@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { $desktopOnboarding, type DesktopOnboardingState, type OnboardingContext } from '@/store/onboarding'
 import type { OAuthProvider } from '@/types/hermes'
 
-import { Picker } from './desktop-onboarding-overlay'
+import { DesktopOnboardingOverlay, Picker } from './desktop-onboarding-overlay'
 
 function provider(id: string, name = id): OAuthProvider {
   return {
@@ -56,6 +56,15 @@ afterEach(() => {
 })
 
 describe('onboarding Picker', () => {
+  it('uses the Hades mark without changing the Nous provider identity', () => {
+    setProviders([provider('nous', 'Nous Portal')])
+    const { container } = render(<Picker ctx={ctx} />)
+
+    expect(screen.getByText('Nous Portal')).toBeTruthy()
+    expect(container.querySelector('[aria-label="Hades"]')).toBeTruthy()
+    expect(container.querySelector('img[src*="apple-touch-icon"]')).toBeNull()
+  })
+
   it('features Nous Portal and hides other providers behind a disclosure', () => {
     setProviders([provider('anthropic', 'Anthropic Claude'), provider('nous', 'Nous Portal')])
     render(<Picker ctx={ctx} />)
@@ -98,5 +107,23 @@ describe('onboarding Picker', () => {
     render(<Picker ctx={ctx} />)
 
     expect(screen.queryByRole('button', { name: "I'll choose a provider later" })).toBeNull()
+  })
+
+  it('keeps the decoded success label under the Hades onboarding header', () => {
+    const nous = provider('nous', 'Nous Portal')
+
+    $desktopOnboarding.set({
+      ...$desktopOnboarding.get(),
+      configured: true,
+      flow: { status: 'success', provider: nous },
+      manual: true,
+      providers: [nous]
+    })
+
+    render(<DesktopOnboardingOverlay enabled={false} requestGateway={ctx.requestGateway} />)
+
+    expect(screen.getByRole('img', { name: 'Hades' })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: /Hades Agent/ })).toBeTruthy()
+    expect(screen.getByText(/Nous Portal connected\. Picking a default model/i)).toBeTruthy()
   })
 })

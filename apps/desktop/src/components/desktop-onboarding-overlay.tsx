@@ -2,6 +2,7 @@ import { useStore } from '@nanostores/react'
 import { useQuery } from '@tanstack/react-query'
 import { useEffect, useMemo, useRef, useState } from 'react'
 
+import { BrandMark } from '@/components/brand-mark'
 import { ModelPickerDialog } from '@/components/model-picker'
 import { Button } from '@/components/ui/button'
 import { Codicon } from '@/components/ui/codicon'
@@ -169,8 +170,6 @@ const PROVIDER_DISPLAY: Record<string, { order: number; title: string }> = {
   'claude-code': { order: 6, title: 'Anthropic OAuth: Required Extra Usage Credits to Use Subscription' }
 }
 
-const assetPath = (path: string) => `${import.meta.env.BASE_URL}${path.replace(/^\/+/, '')}`
-
 export const providerTitle = (p: OAuthProvider) => PROVIDER_DISPLAY[p.id]?.title ?? p.name
 const orderOf = (p: OAuthProvider) => PROVIDER_DISPLAY[p.id]?.order ?? 99
 
@@ -289,7 +288,8 @@ export function DesktopOnboardingOverlay({ enabled, onCompleted, requestGateway 
   // immediately — no runtime gate needed. Otherwise wait for the readiness
   // check (configured === false) before showing the picker.
   const ready = onboarding.manual || (enabled && onboarding.configured === false)
-  const showPicker = flow.status === 'idle' || flow.status === 'success'
+  const showPicker = flow.status === 'idle'
+  const showHeader = showPicker || flow.status === 'success' || !ready
   // The final "you're in" screen drops the card chrome and floats centered on
   // the surface — same bare, cinematic treatment as the connecting overlay.
   const bare = ready && !showPicker && flow.status === 'confirming_model'
@@ -317,7 +317,7 @@ export function DesktopOnboardingOverlay({ enabled, onCompleted, requestGateway 
             : 'translate-y-0 scale-100 opacity-100 blur-0'
         )}
       >
-        {showPicker || !ready ? <Header /> : null}
+        {showHeader ? <Header /> : null}
         {onboarding.manual ? (
           <Button
             aria-label={t.common.close}
@@ -390,9 +390,14 @@ function Header() {
   const { t } = useI18n()
 
   return (
-    <div className="bg-(--ui-chat-bubble-background) px-5 pt-5 pb-1">
-      <h2 className="text-[0.9375rem] font-semibold tracking-tight">{t.onboarding.headerTitle}</h2>
-      <p className="mt-1 max-w-xl text-[0.8125rem] leading-5 text-(--ui-text-tertiary)">{t.onboarding.headerDesc}</p>
+    <div className="flex items-start gap-3 bg-(--ui-chat-bubble-background) px-5 pt-5 pb-1">
+      <BrandMark className="size-8" />
+      <div>
+        <h2 className="text-[0.9375rem] font-semibold tracking-tight">{t.onboarding.headerTitle}</h2>
+        <p className="mt-1 max-w-xl text-[0.8125rem] leading-5 text-(--ui-text-tertiary)">
+          {t.onboarding.headerDesc}
+        </p>
+      </div>
     </div>
   )
 }
@@ -537,7 +542,7 @@ export function FeaturedProviderRow({
       <span aria-hidden className="arc-border arc-reverse arc-nous" />
       <div className="min-w-0">
         <div className="flex items-center gap-2">
-          <img alt="" className="size-5 shrink-0 rounded" src={assetPath('apple-touch-icon.png')} />
+          <BrandMark className="size-5 rounded" />
           <span className="text-[length:var(--conversation-text-font-size)] font-semibold">
             {providerTitle(provider)}
           </span>
