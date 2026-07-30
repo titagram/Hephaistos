@@ -25,6 +25,7 @@ const path = require('node:path')
 const { pathToFileURL } = require('node:url')
 const { execFileSync, spawn } = require('node:child_process')
 const { DESKTOP_BRAND } = require('./brand.cjs')
+const { createDeepLinkDelivery } = require('./deep-link.cjs')
 const { installEmbedReferer } = require('./embed-referer.cjs')
 const { detectRemoteDisplay, isWindowsBinaryPathInWsl, isWslEnvironment } = require('./bootstrap-platform.cjs')
 const { runBootstrap } = require('./bootstrap-runner.cjs')
@@ -7433,8 +7434,6 @@ ipcMain.handle('hermes:vscode-theme:search', async (_event, query) => searchMark
 // Win/Linux running-app 'second-instance' (argv), Win/Linux cold-start argv.
 // ---------------------------------------------------------------------------
 const DEEP_LINK_PROTOCOLS = [DESKTOP_BRAND.preferredProtocol, ...DESKTOP_BRAND.legacyProtocols]
-let _pendingDeepLink = null
-let _rendererReadyForDeepLink = false
 
 function _extractDeepLink(argv) {
   if (!Array.isArray(argv)) return null
@@ -7443,50 +7442,30 @@ function _extractDeepLink(argv) {
   ) || null
 }
 
-function handleDeepLink(url) {
-  if (!url || typeof url !== 'string') return
-  let parsed
-  try {
-    parsed = new URL(url)
-  } catch {
-    rememberLog(`[deeplink] ignoring malformed url: ${url}`)
-    return
-  }
-  // hades://blueprint/<key>?slot=val  -> host="blueprint", path="/<key>"
-  const kind = parsed.hostname || ''
-  const name = decodeURIComponent((parsed.pathname || '').replace(/^\//, ''))
-  const params = {}
-  parsed.searchParams.forEach((v, k) => {
-    params[k] = v
-  })
-  const payload = { kind, name, params }
+const deepLinkDelivery = createDeepLinkDelivery({
+  preferredProtocol: DESKTOP_BRAND.preferredProtocol,
+  canDeliver: () => Boolean(mainWindow && !mainWindow.isDestroyed()),
+  deliver: payload => {
+    try {
+      if (mainWindow.isMinimized()) mainWindow.restore()
+      mainWindow.focus()
+      mainWindow.webContents.send('hermes:deep-link', payload)
+      rememberLog(`[deeplink] delivered ${payload.kind}/${payload.name}`)
+    } catch (err) {
+      rememberLog(`[deeplink] delivery failed: ${err.message}`)
+    }
+  },
+  onMalformed: url => rememberLog(`[deeplink] ignoring malformed url: ${url}`)
+})
 
-  if (!_rendererReadyForDeepLink || !mainWindow || mainWindow.isDestroyed()) {
-    _pendingDeepLink = payload
-    return
-  }
-  try {
-    if (mainWindow.isMinimized()) mainWindow.restore()
-    mainWindow.focus()
-    mainWindow.webContents.send('hermes:deep-link', payload)
-    rememberLog(`[deeplink] delivered ${kind}/${name}`)
-  } catch (err) {
-    rememberLog(`[deeplink] delivery failed: ${err.message}`)
-  }
+function handleDeepLink(url) {
+  deepLinkDelivery.handle(url)
 }
 
 // Renderer calls this (via IPC) once it has mounted its deep-link listener, so
 // a link that arrived during boot/install is flushed exactly once.
 ipcMain.handle('hermes:deep-link-ready', () => {
-  _rendererReadyForDeepLink = true
-  if (_pendingDeepLink) {
-    const queued = _pendingDeepLink
-    _pendingDeepLink = null
-    handleDeepLink(
-      `${HADES_PROTOCOL}://${queued.kind}/${encodeURIComponent(queued.name)}` +
-        (Object.keys(queued.params).length ? '?' + new URLSearchParams(queued.params).toString() : '')
-    )
-  }
+  deepLinkDelivery.markReady()
   return { ok: true }
 })
 
