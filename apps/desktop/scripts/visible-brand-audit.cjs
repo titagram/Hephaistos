@@ -8,7 +8,7 @@ const ts = require('typescript')
 const SOURCE_EXTENSIONS = new Set(['.cjs', '.js', '.jsx', '.mjs', '.ts', '.tsx'])
 const DATA_EXTENSIONS = new Set(['.json', '.jsonl'])
 const EXCLUDED_DIRECTORIES = new Set(['build', 'dist', 'node_modules', 'release'])
-const TEST_FILE_PATTERN = /\.test\.[^.]+$/
+const TEST_FILE_PATTERN = /\.test\./
 const BANNED_LEGACY = [/\bHermes\b/g, /hermes-(?:chan|san)/g]
 
 const ALLOWED_LEGACY = [
@@ -143,23 +143,120 @@ function decodeHtmlText(value) {
     .replaceAll('&amp;', '&')
 }
 
-function extractHtmlValues(source) {
-  const withoutCommentsOrCode = source
-    .replace(/<!--[\s\S]*?-->/g, '')
-    .replace(/<(?:script|style)\b[^>]*>[\s\S]*?<\/(?:script|style)\s*>/gi, '')
-  const values = []
-
-  const titleAttribute = /(?:^|\s)title\s*=\s*(?:"([^"]*)"|'([^']*)')/gi
-  let attributeMatch
-  while ((attributeMatch = titleAttribute.exec(withoutCommentsOrCode)) !== null) {
-    values.push(decodeHtmlText(attributeMatch[1] ?? attributeMatch[2]))
+function parseHtmlTag(source, start) {
+  let cursor = start + 1
+  let closing = false
+  if (source[cursor] === '/') {
+    closing = true
+    cursor += 1
   }
 
-  const textNode = />([^<]+)</g
-  let textMatch
-  while ((textMatch = textNode.exec(withoutCommentsOrCode)) !== null) {
-    const value = decodeHtmlText(textMatch[1]).trim()
+  while (/\s/.test(source[cursor] ?? '')) cursor += 1
+  const nameStart = cursor
+  while (cursor < source.length && !/[\s/>]/.test(source[cursor])) cursor += 1
+  const name = source.slice(nameStart, cursor).toLowerCase()
+  const attributes = []
+  let selfClosing = false
+
+  while (cursor < source.length) {
+    while (/\s/.test(source[cursor] ?? '')) cursor += 1
+    if (source[cursor] === '>') {
+      cursor += 1
+      break
+    }
+    if (source[cursor] === '/' && source[cursor + 1] === '>') {
+      selfClosing = true
+      cursor += 2
+      break
+    }
+
+    const attributeStart = cursor
+    while (cursor < source.length && !/[\s=/>]/.test(source[cursor])) cursor += 1
+    const attributeName = source.slice(attributeStart, cursor).toLowerCase()
+    if (!attributeName) {
+      cursor += 1
+      continue
+    }
+
+    while (/\s/.test(source[cursor] ?? '')) cursor += 1
+    let value = null
+    if (source[cursor] === '=') {
+      cursor += 1
+      while (/\s/.test(source[cursor] ?? '')) cursor += 1
+      const quote = source[cursor]
+      if (quote === '"' || quote === "'") {
+        cursor += 1
+        const valueStart = cursor
+        while (cursor < source.length && source[cursor] !== quote) cursor += 1
+        value = source.slice(valueStart, cursor)
+        if (source[cursor] === quote) cursor += 1
+      } else {
+        const valueStart = cursor
+        while (cursor < source.length && !/[\s>]/.test(source[cursor])) cursor += 1
+        value = source.slice(valueStart, cursor)
+      }
+    }
+    attributes.push({ name: attributeName, value })
+  }
+
+  return { attributes, closing, end: cursor, name, selfClosing }
+}
+
+function skipRawTextElement(source, lowerSource, start, name) {
+  let candidate = lowerSource.indexOf(`</${name}`, start)
+  while (candidate !== -1) {
+    const closingTag = parseHtmlTag(source, candidate)
+    if (closingTag.closing && closingTag.name === name) return closingTag.end
+    candidate = lowerSource.indexOf(`</${name}`, candidate + 2)
+  }
+  return source.length
+}
+
+function extractHtmlValues(source) {
+  const values = []
+  const lowerSource = source.toLowerCase()
+  let cursor = 0
+
+  while (cursor < source.length) {
+    if (source.startsWith('<!--', cursor)) {
+      const commentEnd = source.indexOf('-->', cursor + 4)
+      cursor = commentEnd === -1 ? source.length : commentEnd + 3
+      continue
+    }
+
+    if (source[cursor] === '<') {
+      if (source[cursor + 1] === '!' || source[cursor + 1] === '?') {
+        const declarationEnd = source.indexOf('>', cursor + 2)
+        cursor = declarationEnd === -1 ? source.length : declarationEnd + 1
+        continue
+      }
+
+      const tag = parseHtmlTag(source, cursor)
+      if (!tag.name) {
+        cursor += 1
+        continue
+      }
+
+      if (!tag.closing) {
+        for (const attribute of tag.attributes) {
+          if (attribute.name === 'title' && attribute.value !== null) {
+            values.push(decodeHtmlText(attribute.value))
+          }
+        }
+      }
+
+      cursor = tag.end
+      if (!tag.closing && !tag.selfClosing && (tag.name === 'script' || tag.name === 'style')) {
+        cursor = skipRawTextElement(source, lowerSource, cursor, tag.name)
+      }
+      continue
+    }
+
+    const textEnd = source.indexOf('<', cursor)
+    const end = textEnd === -1 ? source.length : textEnd
+    const value = decodeHtmlText(source.slice(cursor, end)).trim()
     if (value) values.push(value)
+    cursor = end
   }
 
   return values
@@ -205,7 +302,9 @@ function auditVisibleBrand({ desktopRoot, extraFiles = [] }) {
   const files = new Set(collectDesktopFiles(root).map(file => path.resolve(file)))
   for (const file of extraFiles) {
     const resolved = path.resolve(file)
-    if (isAuditedFile(resolved)) files.add(resolved)
+    if (!TEST_FILE_PATTERN.test(path.basename(resolved)) && isAuditedFile(resolved)) {
+      files.add(resolved)
+    }
   }
 
   const violations = []

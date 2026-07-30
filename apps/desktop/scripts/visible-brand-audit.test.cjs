@@ -127,7 +127,10 @@ test('inspects index.html visible text and title attributes without reading comm
       <!doctype html>
       <!-- Hermes comment -->
       <html>
-        <head><title>Hermes Desktop</title></head>
+        <head>
+          <title>Hermes Desktop</title>
+          <style>.Hermes-brand-marker { color: red; }</style>
+        </head>
         <body>
           <main title="Open Hermes">Welcome to Hermes</main>
           <script>const ignored = 'Hermes script body'</script>
@@ -158,16 +161,46 @@ test('does not treat data-title metadata as an HTML title attribute', t => {
   })
 })
 
+test('inspects unquoted HTML title attribute values', t => {
+  const fixture = fixtureTree(t)
+  fixture.write(
+    'index.html',
+    '<!doctype html><html><body><main title=Hermes>Hades</main></body></html>'
+  )
+
+  assert.deepEqual(auditVisibleBrand({ desktopRoot: fixture.root }), {
+    ok: false,
+    violations: [{ file: 'index.html', value: 'Hermes' }]
+  })
+})
+
+test('does not treat title-like text inside another HTML attribute value as an attribute', t => {
+  const fixture = fixtureTree(t)
+  fixture.write(
+    'index.html',
+    `<!doctype html><html><body><main data-example=' title="Hermes internal"'>Hades</main></body></html>`
+  )
+
+  assert.deepEqual(auditVisibleBrand({ desktopRoot: fixture.root }), {
+    ok: true,
+    violations: []
+  })
+})
+
 test('excludes tests, generated output, release output, and dependencies', t => {
   const fixture = fixtureTree(t)
   fixture.write('src/brand.test.ts', `export const testCopy = 'Hermes test fixture'`)
+  const compoundTestFile = fixture.write(
+    'src/copy.test.generated.ts',
+    `export const generatedTestCopy = 'Hermes generated test fixture'`
+  )
   fixture.write('dist/bundle.js', `export const builtCopy = 'Hermes bundle'`)
   fixture.write('build/stamp.json', JSON.stringify({ brand: 'Hermes build' }))
   fixture.write('release/app/resources.json', JSON.stringify({ brand: 'Hermes release' }))
   fixture.write('node_modules/example/index.js', `module.exports = 'Hermes dependency'`)
   fixture.write('src/brand.ts', `export const copy = 'Hades Desktop'`)
 
-  assert.deepEqual(auditVisibleBrand({ desktopRoot: fixture.root }), {
+  assert.deepEqual(auditVisibleBrand({ desktopRoot: fixture.root, extraFiles: [compoundTestFile] }), {
     ok: true,
     violations: []
   })
