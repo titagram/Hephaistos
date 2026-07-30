@@ -113,10 +113,34 @@ describe('ConfigSettings memory provider discovery', () => {
 
     expect(selector.textContent).toContain('Hades Backend')
     expect(await screen.findByText('Stores memory in the active Hades backend.')).toBeTruthy()
-    expect(screen.getByText('Available / configured · Current')).toBeTruthy()
+    expect(screen.getByText('Available · Current / configured')).toBeTruthy()
     expect(screen.getByText('Future Memory')).toBeTruthy()
     expect(screen.getByText('Needs additional credentials.')).toBeTruthy()
-    expect(screen.getByText('Unavailable / not configured')).toBeTruthy()
+    expect(screen.getByText('Unavailable')).toBeTruthy()
+  })
+
+  it('shows an active unavailable provider as selected and configured without claiming it is not configured', async () => {
+    getMemoryStatus.mockResolvedValueOnce({
+      active: 'hades_backend',
+      providers: [
+        {
+          name: 'hades_backend',
+          description: 'Stores memory in the active Hades backend.',
+          configured: false,
+          available: false
+        }
+      ],
+      builtin_files: { memory: 0, user: 0 }
+    })
+
+    await renderMemorySettings()
+    const selector = await openProviderSelector()
+    const option = await screen.findByRole('option', { name: /Hades Backend/ })
+
+    expect(selector.textContent).toContain('Hades Backend')
+    expect(option.getAttribute('aria-selected')).toBe('true')
+    expect(option.textContent).toContain('Unavailable · Current / configured')
+    expect(option.textContent).not.toContain('not configured')
   })
 
   it('keeps the active provider identifiable when discovery does not return it', async () => {
@@ -137,7 +161,7 @@ describe('ConfigSettings memory provider discovery', () => {
     const selector = await openProviderSelector()
 
     expect(selector.textContent).toContain('Legacy Memory')
-    expect(screen.getByText('Current provider · unavailable (not discovered)')).toBeTruthy()
+    expect(screen.getByText('Unavailable (not discovered) · Current / configured')).toBeTruthy()
   })
 
   it('keeps Settings usable with only the current provider when discovery fails', async () => {
@@ -149,7 +173,7 @@ describe('ConfigSettings memory provider discovery', () => {
     expect(await screen.findByText('Provider discovery unavailable; keeping the current selection.')).toBeTruthy()
     const selector = await openProviderSelector()
     expect(selector.textContent).toContain('Custom Memory')
-    expect(screen.getByText('Current provider · discovery unavailable')).toBeTruthy()
+    expect(screen.getByText('Availability unknown · Current / configured')).toBeTruthy()
     expect(screen.queryByText('Hades Backend')).toBeNull()
   })
 

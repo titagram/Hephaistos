@@ -59,12 +59,12 @@ function memoryProviderSelectData(
     }
 
     const available = provider.available ?? provider.configured
+    const selected = provider.name === current
+
     labels[provider.name] = prettyName(provider.name)
     details[provider.name] = {
       description: provider.description || undefined,
-      status: `${available ? 'Available / configured' : 'Unavailable / not configured'}${
-        provider.name === current ? ' · Current' : ''
-      }`
+      status: `${available ? 'Available' : 'Unavailable'}${selected ? ' · Current / configured' : ''}`
     }
   }
 
@@ -73,8 +73,8 @@ function memoryProviderSelectData(
     labels[current] = prettyName(current)
     details[current] = {
       status: discoveryFailed
-        ? 'Current provider · discovery unavailable'
-        : 'Current provider · unavailable (not discovered)'
+        ? 'Availability unknown · Current / configured'
+        : 'Unavailable (not discovered) · Current / configured'
     }
   }
 
