@@ -46,6 +46,7 @@ const resolveMode = (mode: ThemeMode, systemDark = matchesQuery('(prefers-color-
 
 const normalizeSkin = (name: string | null): string => {
   const candidate = name ? LEGACY_SKIN_ALIASES[name] ?? name : null
+
   return candidate && resolveTheme(candidate) && !RETIRED_SKINS.has(candidate) ? candidate : DEFAULT_SKIN_NAME
 }
 
