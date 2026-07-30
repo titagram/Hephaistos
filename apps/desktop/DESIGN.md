@@ -47,8 +47,9 @@ one-offs; if elevation needs to change, change the token.
 | `--chrome-action-hover` | hover fill for quiet controls |
 | `--theme-primary`, `--ui-accent` | brand/accent |
 
-Never hardcode `border-gray-*`, `bg-white`, `text-black`, etc. The white tile in
-`BrandMark` is the one sanctioned literal (the mark needs a fixed backdrop).
+Never hardcode `border-gray-*`, `bg-white`, `text-black`, etc. `BrandMark`'s
+fixed obsidian tile and bronze sigil are the sanctioned literals: the brand
+identity must not theme-shift between light and dark surfaces.
 
 ## Buttons — one component
 
@@ -112,10 +113,12 @@ Notes:
 ## Iconography & brand
 
 - **`Codicon`** is the icon set. No mixing icon libraries inline.
-- **`BrandMark`** (`src/components/brand-mark.tsx`) is the brand glyph — the
-  `nous-girl` mark on a white tile, softly rounded, identical in light/dark.
-  It replaced scattered Sparkles glyphs in updates / onboarding / about. Use it
-  for hero/brand moments; don't reintroduce decorative star/sparkle icons.
+- **`BrandMark`** (`src/components/brand-mark.tsx`) is the brand glyph: a
+  bronze Pluto/Hades circle, stem, crossbar, and arc on a softly rounded
+  obsidian tile, fixed across light/dark surfaces. It renders the bundled
+  `hades-mark.svg` over a matching inline vector fallback; if the bundled asset
+  fails, only that image is removed and the accessible fallback remains. Use
+  it for hero/brand moments; don't reintroduce decorative star/sparkle icons.
 
 ## Motion
 

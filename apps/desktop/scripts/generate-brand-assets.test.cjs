@@ -15,6 +15,38 @@ function temporaryDesktopRoot(t) {
   return root
 }
 
+function desktopTextFiles(root) {
+  const ignoredDirectories = new Set(['.git', 'build', 'coverage', 'dist', 'node_modules', 'release'])
+  const textExtensions = new Set([
+    '.cjs',
+    '.css',
+    '.html',
+    '.js',
+    '.json',
+    '.md',
+    '.mjs',
+    '.svg',
+    '.ts',
+    '.tsx',
+    '.txt',
+    '.yaml',
+    '.yml'
+  ])
+  const files = []
+
+  const visit = directory => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      if (entry.isDirectory() && ignoredDirectories.has(entry.name)) continue
+      const target = path.join(directory, entry.name)
+      if (entry.isDirectory()) visit(target)
+      else if (entry.isFile() && textExtensions.has(path.extname(entry.name))) files.push(target)
+    }
+  }
+
+  visit(root)
+  return files
+}
+
 test('generateBrandAssets writes the required platform asset formats', t => {
   const root = temporaryDesktopRoot(t)
 
@@ -53,4 +85,29 @@ test('generateBrandAssets is byte-for-byte deterministic', t => {
       relativePath
     )
   }
+})
+
+test('desktop contributor and runtime files do not reference deleted legacy artwork', () => {
+  const desktopRoot = path.resolve(__dirname, '..')
+  const forbiddenNames = [
+    ['nous', 'girl'].join('-'),
+    ['hermes', 'frame'].join('-'),
+    ['hermes', 'sprite'].join('-'),
+    `${'hermes'}${'.png'}`
+  ]
+  const matches = []
+
+  for (const file of desktopTextFiles(desktopRoot)) {
+    const relativePath = path.relative(desktopRoot, file)
+    const lines = fs.readFileSync(file, 'utf8').split(/\r?\n/)
+    for (const [index, line] of lines.entries()) {
+      for (const forbiddenName of forbiddenNames) {
+        if (line.toLowerCase().includes(forbiddenName)) {
+          matches.push(`${relativePath}:${index + 1}:${forbiddenName}`)
+        }
+      }
+    }
+  }
+
+  assert.deepEqual(matches, [])
 })
