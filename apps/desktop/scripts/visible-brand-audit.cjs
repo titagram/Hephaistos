@@ -13,7 +13,7 @@ const BANNED_LEGACY = [
   /\bHermes\b/g,
   /hermes-(?:chan|san)/g,
   /\bNous (?:Desktop|Agent)\b/g,
-  /\b(?:Ask Nous|Open in Nous)\b/g,
+  /\b(?:Ask Nous|Open in Nous)(?! Portal\b)\b/g,
   /\bnous-(?:chan|san)\b/g
 ]
 

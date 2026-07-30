@@ -46,6 +46,8 @@ test('allows compatibility contracts and provider identities', t => {
         'HermesGateway',
         'Hermes.exe',
         'Nous Portal',
+        'Ask Nous Portal',
+        'Open in Nous Portal',
         'NousResearch',
         'Hosted Hermes & Nous-trained models',
         'hermes-3-llama-3.1-70b'
