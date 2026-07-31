@@ -4707,6 +4707,25 @@ def _apply_model_assignment_sync(
     if not provider:
         raise HTTPException(status_code=400, detail="provider required for auxiliary")
 
+    # OAuth providers with a provider-owned model family cannot serve arbitrary
+    # third-party model IDs.  Reuse the same plausibility gate as ``/model`` so
+    # hidden/entitlement-gated GPT or Grok slugs remain soft-accepted while an
+    # impossible pair such as openai-codex + deepseek-v4-flash is rejected
+    # before it can poison every background auxiliary call.
+    if model and provider.strip().lower() in {
+        "openai-codex",
+        "codex",
+        "xai-oauth",
+    }:
+        from hermes_cli.models import validate_requested_model
+
+        validation = validate_requested_model(model, provider)
+        if not validation.get("accepted") or not validation.get("persist"):
+            raise HTTPException(
+                status_code=400,
+                detail=validation.get("message") or "model is incompatible with provider",
+            )
+
     targets = [task] if task else list(_AUX_TASK_SLOTS)
     for slot in targets:
         if slot not in _AUX_TASK_SLOTS:

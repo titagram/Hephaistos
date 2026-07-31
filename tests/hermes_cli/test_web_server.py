@@ -2555,6 +2555,31 @@ class TestWebServerEndpoints:
         assert data["ok"] is True
         assert data.get("gateway_tools", []) == []
 
+    def test_set_auxiliary_model_rejects_incompatible_codex_model(self):
+        """An auxiliary assignment must not persist a model that its provider
+        cannot serve.
+
+        Regression: ``openai-codex`` + ``deepseek-v4-flash`` was accepted by
+        this endpoint, then every title-generation call failed with HTTP 400
+        against the ChatGPT Codex backend.
+        """
+        from hermes_cli.config import load_config
+
+        before = load_config()["auxiliary"]["title_generation"].copy()
+
+        resp = self.client.post(
+            "/api/model/set",
+            json={
+                "scope": "auxiliary",
+                "task": "title_generation",
+                "provider": "openai-codex",
+                "model": "deepseek-v4-flash",
+            },
+        )
+
+        assert resp.status_code == 400
+        assert load_config()["auxiliary"]["title_generation"] == before
+
     def test_apply_main_model_assignment_base_url_and_context_reconcile(self):
         """The shared main-slot assignment helper must persist a supplied
         base_url, clear a stale base_url only when switching providers, preserve
