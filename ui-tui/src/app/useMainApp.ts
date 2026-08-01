@@ -7,6 +7,7 @@ import { MAX_HISTORY, WHEEL_SCROLL_STEP } from '../config/limits.js'
 import { hasLeadGap, prevRenderedMsg } from '../domain/blockLayout.js'
 import { SECTION_NAMES, sectionMode } from '../domain/details.js'
 import { attachedImageNotice, imageTokenMeta } from '../domain/messages.js'
+import { modelValueForConfigSet } from '../domain/slash.js'
 import { composeTabTitle, fmtCwdBranch, shortCwd } from '../domain/paths.js'
 import { type GatewayClient } from '../gatewayClient.js'
 import type {
@@ -118,7 +119,11 @@ export async function startPromptLiveSession({
   const requestedModel = modelArg?.trim()
 
   if (requestedModel) {
-    const result = await rpc<ConfigSetResponse>('config.set', { key: 'model', session_id: sid, value: requestedModel })
+    const result = await rpc<ConfigSetResponse>('config.set', {
+      key: 'model',
+      session_id: sid,
+      value: modelValueForConfigSet(requestedModel)
+    })
 
     if (!result?.value) {
       sys('error: invalid response: model switch')

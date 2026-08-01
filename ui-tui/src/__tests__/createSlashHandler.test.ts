@@ -179,7 +179,7 @@ describe('createSlashHandler', () => {
       confirm_expensive_model: false,
       key: 'model',
       session_id: 'sid-abc',
-      value: 'x-model'
+      value: 'x-model --session'
     })
   })
 
@@ -200,7 +200,7 @@ describe('createSlashHandler', () => {
       confirm_expensive_model: false,
       key: 'model',
       session_id: 'sid-abc',
-      value: 'anthropic/claude-sonnet-4.6 --provider openrouter'
+      value: 'anthropic/claude-sonnet-4.6 --provider openrouter --session'
     })
   })
 
@@ -214,6 +214,19 @@ describe('createSlashHandler', () => {
       key: 'model',
       session_id: 'sid-abc',
       value: 'x-model --global'
+    })
+  })
+
+  it('does not duplicate explicit --session model scope', () => {
+    patchUiState({ sid: 'sid-abc' })
+    const ctx = buildCtx()
+
+    createSlashHandler(ctx)('/model x-model --session')
+    expect(ctx.gateway.rpc).toHaveBeenCalledWith('config.set', {
+      confirm_expensive_model: false,
+      key: 'model',
+      session_id: 'sid-abc',
+      value: 'x-model --session'
     })
   })
 

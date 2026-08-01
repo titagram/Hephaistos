@@ -1,5 +1,30 @@
-/** Appended to `/model` args from the TUI picker for session scope; stripped in `session` slash before `config.set`. */
+/** Appended to `/model` args from the TUI picker for session scope. */
 export const TUI_SESSION_MODEL_FLAG = '--tui-session'
+
+const TUI_SESSION_MODEL_RE = new RegExp('(?:^|\\s)' + TUI_SESSION_MODEL_FLAG + '(?:\\s|$)')
+const TUI_SESSION_STRIP_RE = new RegExp('\\s*' + TUI_SESSION_MODEL_FLAG + '\\b\\s*', 'g')
+
+export const stripTuiSessionFlag = (value: string) =>
+  value.replace(TUI_SESSION_STRIP_RE, ' ').replace(/\s+/g, ' ').trim()
+
+/** Convert picker-only scope intent into the public model-config arguments. */
+export const modelValueForConfigSet = (arg: string) => {
+  const normalized = stripTuiSessionFlag(arg.trim())
+
+  if (!normalized) {
+    return normalized
+  }
+
+  if (TUI_SESSION_MODEL_RE.test(arg)) {
+    return normalized + ' --session'
+  }
+
+  if (/(?:^|\s)--(?:global|session)(?:\s|$)/.test(normalized)) {
+    return normalized
+  }
+
+  return normalized + ' --session'
+}
 
 export const looksLikeSlashCommand = (text: string) => /^\/[^\s/]*(?:\s|$)/.test(text)
 
