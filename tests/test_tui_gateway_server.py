@@ -3366,9 +3366,68 @@ def test_config_set_model_global_persists(monkeypatch):
 
     assert resp["result"]["value"] == "anthropic/claude-sonnet-4.6"
     assert seen["is_global"] is True
-    assert saved_values["model.default"] == "anthropic/claude-sonnet-4.6"
-    assert saved_values["model.provider"] == "anthropic"
-    assert saved_values["model.base_url"] == "https://api.anthropic.com"
+    assert saved_values == {
+        "model.default": "anthropic/claude-sonnet-4.6",
+        "model.provider": "anthropic",
+        "model.base_url": "https://api.anthropic.com",
+    }
+
+
+def test_config_set_model_without_scope_updates_only_live_session(monkeypatch):
+    """An unscoped desktop/TUI switch must never write shared config."""
+    class _Agent:
+        provider = "openrouter"
+        model = "old/model"
+        base_url = ""
+        api_key = "sk-old"
+
+        def switch_model(self, **_kwargs):
+            return None
+
+    result = types.SimpleNamespace(
+        success=True,
+        new_model="anthropic/claude-sonnet-4.6",
+        target_provider="anthropic",
+        api_key="sk-new",
+        base_url="https://api.anthropic.com",
+        api_mode="anthropic_messages",
+        warning_message="",
+    )
+    writes = []
+    server._sessions["sid"] = _session(agent=_Agent())
+    monkeypatch.setattr(
+        "hermes_cli.model_switch.switch_model", lambda **_kwargs: result
+    )
+    monkeypatch.setattr(server, "_restart_slash_worker", lambda *_args: None)
+    monkeypatch.setattr(server, "_emit", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        "cli.save_config_value", lambda key, value: writes.append((key, value))
+    )
+
+    try:
+        response = server.handle_request(
+            {
+                "id": "1",
+                "method": "config.set",
+                "params": {
+                    "session_id": "sid",
+                    "key": "model",
+                    "value": "anthropic/claude-sonnet-4.6",
+                },
+            }
+        )
+
+        assert response["result"]["value"] == "anthropic/claude-sonnet-4.6"
+        assert server._sessions["sid"]["model_override"] == {
+            "model": "anthropic/claude-sonnet-4.6",
+            "provider": "anthropic",
+            "base_url": "https://api.anthropic.com",
+            "api_key": "sk-new",
+            "api_mode": "anthropic_messages",
+        }
+        assert writes == []
+    finally:
+        server._sessions.pop("sid", None)
 
 
 def test_config_set_model_explicit_provider_skips_broken_default_init(monkeypatch):

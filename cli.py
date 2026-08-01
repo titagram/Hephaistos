@@ -7738,14 +7738,14 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
 
         Supports:
           /model                              — show current model + usage hints
-          /model <name>                       — switch model (persists by default)
-          /model <name> --session             — switch for this session only
+          /model <name>                       — switch model for this session only
+          /model <name> --session             — switch for this session only (compatibility)
           /model <name> --global              — switch and persist (explicit)
           /model <name> --provider <provider> — switch provider + model
           /model --provider <provider>        — switch to provider, auto-detect model
 
-        Persistence defaults to on (``model.persist_switch_by_default`` in
-        config.yaml, default True). Use ``--session`` for a one-off switch.
+        A model switch is session-only unless ``--global`` is explicitly set.
+        ``--session`` remains accepted for compatibility.
         """
         from hermes_cli.model_switch import (
             switch_model,
@@ -7766,10 +7766,8 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             force_refresh,
             is_session,
         ) = parse_model_flags(raw_args)
-        # Resolve the effective persistence once: --session overrides the
-        # config-gated default, --global forces persist, otherwise defer to
-        # model.persist_switch_by_default (defaults to True so /model survives
-        # across sessions).
+        # Resolve the effective persistence once: only an unambiguous
+        # ``--global`` request persists shared configuration.
         persist_global = resolve_persist_behavior(is_global_flag, is_session)
 
         # --refresh: wipe the on-disk picker cache before building the
@@ -12995,8 +12993,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             # --- /model picker modal ---
             if self._model_picker_state:
                 try:
-                    # Picker selections persist by default (same default as
-                    # /model <name>); honour model.persist_switch_by_default.
+                    # Picker selections are session-only, like /model <name>.
                     from hermes_cli.model_switch import resolve_persist_behavior
 
                     self._handle_model_picker_selection(

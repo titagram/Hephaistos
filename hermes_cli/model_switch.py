@@ -311,8 +311,8 @@ def parse_model_flags(raw_args: str) -> tuple[str, str, bool, bool, bool]:
 
     ``is_global`` and ``is_session`` are independent flag presences; the
     *effective* persistence decision is resolved by
-    :func:`resolve_persist_behavior` so the config-gated default
-    (``model.persist_switch_by_default``) is applied in one place.
+    :func:`resolve_persist_behavior` so only an explicit global request
+    writes shared configuration.
 
     Examples::
 
@@ -366,33 +366,10 @@ def parse_model_flags(raw_args: str) -> tuple[str, str, bool, bool, bool]:
 
 
 def resolve_persist_behavior(is_global: bool, is_session: bool) -> bool:
-    """Decide whether a ``/model`` switch should persist to ``config.yaml``.
-
-    Resolution order:
-
-    1. ``--session`` explicitly opts out → ``False`` (this session only).
-    2. ``--global`` explicitly opts in → ``True``.
-    3. Otherwise defer to ``model.persist_switch_by_default`` in
-       ``config.yaml`` (defaults to ``True``, so a plain ``/model <name>``
-       survives across sessions — the behavior users expect).
-
-    The config read is defensive: on a fresh install ``model`` may be a
-    flat string rather than a dict, in which case the built-in default
-    (``True``) applies.
-    """
+    """Return True only for an unambiguous explicit global request."""
     if is_session:
         return False
-    if is_global:
-        return True
-    try:
-        from hermes_cli.config import load_config
-
-        model_cfg = load_config().get("model")
-        if isinstance(model_cfg, dict):
-            return bool(model_cfg.get("persist_switch_by_default", True))
-    except Exception:
-        pass
-    return True
+    return bool(is_global)
 
 
 # ---------------------------------------------------------------------------
