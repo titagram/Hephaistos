@@ -20,6 +20,12 @@ from tools.skills_sync import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _isolate_hermes_home(tmp_path, monkeypatch):
+    """Keep a real profile's bundled-skills opt-out out of unit tests."""
+    monkeypatch.setattr("tools.skills_sync.HERMES_HOME", tmp_path / "hermes_home")
+
+
 class TestReadWriteManifest:
     def test_read_missing_manifest(self, tmp_path):
         with patch(
@@ -1042,6 +1048,111 @@ class TestResetBundledSkill:
         assert not (dest / "my_custom_file.py").exists()
         # SKILL.md should be the bundled content
         assert "GW v2 (upstream)" in (dest / "SKILL.md").read_text()
+
+    def test_reset_restore_reinstalls_one_skill_while_bundled_sync_is_opted_out(
+        self, tmp_path
+    ):
+        """An explicit restore must not report success while leaving the skill absent.
+
+        The profile-wide opt-out still prevents normal bundled seeding, but the
+        named ``--restore`` request is explicit and should restore only that skill.
+        """
+        bundled = self._setup_bundled(tmp_path)
+        unrelated = bundled / "productivity" / "unrelated-skill"
+        unrelated.mkdir(parents=True)
+        (unrelated / "SKILL.md").write_text(
+            "---\nname: unrelated-skill\n---\n# Must remain unseeded\n"
+        )
+        hermes_home = tmp_path / "home"
+        skills_dir = hermes_home / "skills"
+        manifest_file = skills_dir / ".bundled_manifest"
+        hermes_home.mkdir()
+        (hermes_home / ".no-bundled-skills").write_text("opted out\n")
+
+        dest = skills_dir / "software-development" / "google-workspace"
+        dest.mkdir(parents=True)
+        (dest / "SKILL.md").write_text("# heavily edited by user\n")
+        manifest_file.write_text(
+            "google-workspace:STALEHASH000000000000000000000000\n"
+        )
+
+        with self._patches(bundled, skills_dir, manifest_file), patch(
+            "tools.skills_sync.HERMES_HOME", hermes_home
+        ):
+            result = reset_bundled_skill("google-workspace", restore=True)
+
+        assert result["ok"] is True
+        assert result["action"] == "restored"
+        assert result["synced"]["skipped_opt_out"] is True
+        assert result["synced"]["copied"] == ["google-workspace"]
+        assert "GW v2 (upstream)" in (dest / "SKILL.md").read_text()
+        assert not (skills_dir / "productivity" / "unrelated-skill").exists()
+        assert (hermes_home / ".no-bundled-skills").exists()
+        expected_hash = _dir_hash(
+            bundled / "software-development" / "google-workspace"
+        )
+        assert manifest_file.read_text() == f"google-workspace:{expected_hash}\n"
+
+    def test_reset_restore_opted_out_reports_manifest_write_failure(self, tmp_path):
+        """Restore is not successful unless the new origin hash is persisted."""
+        bundled = self._setup_bundled(tmp_path)
+        hermes_home = tmp_path / "home"
+        skills_dir = hermes_home / "skills"
+        manifest_file = skills_dir / ".bundled_manifest"
+        hermes_home.mkdir()
+        (hermes_home / ".no-bundled-skills").write_text("opted out\n")
+
+        dest = skills_dir / "software-development" / "google-workspace"
+        dest.mkdir(parents=True)
+        (dest / "SKILL.md").write_text("# heavily edited by user\n")
+        manifest_file.write_text(
+            "google-workspace:STALEHASH000000000000000000000000\n"
+        )
+
+        with self._patches(bundled, skills_dir, manifest_file), patch(
+            "tools.skills_sync.HERMES_HOME", hermes_home
+        ), patch("tools.skills_sync._write_manifest"):
+            result = reset_bundled_skill("google-workspace", restore=True)
+
+        assert result["ok"] is False
+        assert result["action"] == "not_reset"
+        assert "could not persist its manifest baseline" in result["message"]
+        assert "GW v2 (upstream)" in (dest / "SKILL.md").read_text()
+        assert "STALEHASH" in manifest_file.read_text()
+
+    def test_reset_restore_opted_out_cleans_partial_copy_failure(self, tmp_path):
+        """A failed explicit copy remains retryable and reports non-success."""
+        bundled = self._setup_bundled(tmp_path)
+        hermes_home = tmp_path / "home"
+        skills_dir = hermes_home / "skills"
+        manifest_file = skills_dir / ".bundled_manifest"
+        hermes_home.mkdir()
+        (hermes_home / ".no-bundled-skills").write_text("opted out\n")
+
+        dest = skills_dir / "software-development" / "google-workspace"
+        dest.mkdir(parents=True)
+        (dest / "SKILL.md").write_text("# heavily edited by user\n")
+        manifest_file.write_text(
+            "google-workspace:STALEHASH000000000000000000000000\n"
+        )
+
+        def partially_failing_copytree(_src, target):
+            target.mkdir(parents=True)
+            (target / "partial.txt").write_text("incomplete\n")
+            raise OSError("simulated copy failure")
+
+        with self._patches(bundled, skills_dir, manifest_file), patch(
+            "tools.skills_sync.HERMES_HOME", hermes_home
+        ), patch(
+            "tools.skills_sync.shutil.copytree", side_effect=partially_failing_copytree
+        ):
+            result = reset_bundled_skill("google-workspace", restore=True)
+
+        assert result["ok"] is False
+        assert result["action"] == "not_reset"
+        assert "simulated copy failure" in result["message"]
+        assert not dest.exists()
+        assert (hermes_home / ".no-bundled-skills").exists()
 
     def test_reset_nonexistent_skill_errors_gracefully(self, tmp_path):
         """Resetting a skill that's neither bundled nor in the manifest returns a clear error."""

@@ -47,6 +47,7 @@ def _patches(bundled, skills_dir, manifest_file):
     )
     stack.enter_context(patch("tools.skills_sync.SKILLS_DIR", skills_dir))
     stack.enter_context(patch("tools.skills_sync.MANIFEST_FILE", manifest_file))
+    stack.enter_context(patch("tools.skills_sync.HERMES_HOME", skills_dir.parent))
     return stack
 
 

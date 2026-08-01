@@ -863,6 +863,53 @@ def reset_bundled_skill(name: str, restore: bool = False) -> dict:
     # Step 3: run sync to re-baseline (or re-copy if we deleted)
     synced = sync_skills(quiet=True)
 
+    # A profile-wide bundled-skills opt-out intentionally makes sync_skills()
+    # a no-op.  ``reset --restore`` is narrower and explicit, though: the user
+    # asked to restore this one named skill.  Honor that request without
+    # removing the opt-out marker or seeding the rest of the bundled catalog.
+    if restore and synced.get("skipped_opt_out"):
+        dest = _compute_relative_dest(bundled_by_name[name], bundled_dir)
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(bundled_by_name[name], dest)
+            manifest = _read_manifest()
+            expected_hash = _dir_hash(bundled_by_name[name])
+            manifest[name] = expected_hash
+            _write_manifest(manifest)
+            if _read_manifest().get(name) != expected_hash:
+                return {
+                    "ok": False,
+                    "action": "not_reset",
+                    "message": (
+                        f"Restored bundled skill '{name}' into opted-out profile "
+                        f"at {dest}, but could not persist its manifest baseline."
+                    ),
+                    "synced": synced,
+                }
+            synced = dict(synced)
+            synced["copied"] = [*synced.get("copied", []), name]
+        except (OSError, IOError) as e:
+            cleanup_error = None
+            if dest.exists():
+                try:
+                    _rmtree_writable(dest)
+                except (OSError, IOError) as cleanup_exc:
+                    cleanup_error = cleanup_exc
+            cleanup_suffix = (
+                f" Partial destination cleanup also failed: {cleanup_error}."
+                if cleanup_error
+                else ""
+            )
+            return {
+                "ok": False,
+                "action": "not_reset",
+                "message": (
+                    f"Could not restore bundled skill '{name}' into opted-out "
+                    f"profile at {dest}: {e}.{cleanup_suffix}"
+                ),
+                "synced": synced,
+            }
+
     if restore and deleted_user_copy:
         action = "restored"
         message = f"Restored '{name}' from bundled source."
