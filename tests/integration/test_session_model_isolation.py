@@ -16,15 +16,13 @@ import subprocess
 import sys
 import threading
 import time
+from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass
 from hashlib import sha256
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Iterator
-
-import pytest
-
 
 @dataclass(frozen=True)
 class RouteCapture:
@@ -145,10 +143,6 @@ custom_providers:
     return path.read_bytes()
 
 
-def _override(name: str) -> dict[str, str]:
-    return {"model": f"route-{name}-model", "provider": f"custom:route-{name}"}
-
-
 def _route_tuples(captures: list[RouteCapture]) -> list[tuple[str, str, str]]:
     return [(capture.session_id, capture.endpoint, capture.model) for capture in captures]
 
@@ -156,66 +150,6 @@ def _route_tuples(captures: list[RouteCapture]) -> list[tuple[str, str, str]]:
 def _marked_captures(routes: _RouteServer) -> list[RouteCapture]:
     with routes.capture_lock:
         return [capture for capture in routes.captures if capture.session_id]
-
-
-def test_interleaved_live_agents_keep_session_routes_and_canary_config(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Four real client turns must retain their session-specific endpoint/model.
-
-    Removing ``model_override`` from ``_make_agent`` or resurrecting a process
-    environment write in the switch path makes this assertion fail by routing
-    at least one interleaved turn to the wrong endpoint.
-    """
-    with _loopback_routes() as routes:
-        home = tmp_path / "hermes-home"
-        home.mkdir()
-        canary = _write_canary_config(home, routes.server_port)
-        monkeypatch.setenv("HERMES_HOME", str(home))
-        monkeypatch.setenv("HERMES_TUI_PASS_SESSION_ID", "1")
-
-        from hermes_constants import reset_hermes_home_override, set_hermes_home_override
-        from tui_gateway import server
-
-        # ``server`` is normally imported before this test's temporary home is
-        # installed.  Scope its long-lived launch-home and config cache to the
-        # canary profile without mutating the process environment at runtime.
-        old_home = server._hermes_home
-        old_cache, old_mtime, old_path = server._cfg_cache, server._cfg_mtime, server._cfg_path
-        server._hermes_home = home
-        server._cfg_cache = server._cfg_mtime = server._cfg_path = None
-        token = set_hermes_home_override(home)
-        agents = []
-        try:
-            agent_a = server._make_agent(
-                "live-a", "session-a", session_id="session-a", model_override=_override("a")
-            )
-            agent_b = server._make_agent(
-                "live-b", "session-b", session_id="session-b", model_override=_override("b")
-            )
-            agents.extend((agent_a, agent_b))
-            for agent, session_id in (
-                (agent_a, "session-a"),
-                (agent_b, "session-b"),
-                (agent_a, "session-a"),
-                (agent_b, "session-b"),
-            ):
-                result = agent.run_conversation(f"session={session_id}\nroute probe")
-                assert result["final_response"] == "ok"
-        finally:
-            for agent in agents:
-                agent.close()
-            reset_hermes_home_override(token)
-            server._hermes_home = old_home
-            server._cfg_cache, server._cfg_mtime, server._cfg_path = old_cache, old_mtime, old_path
-
-        assert _route_tuples(_marked_captures(routes)) == [
-            ("session-a", "/route-a/v1", "route-a-model"),
-            ("session-b", "/route-b/v1", "route-b-model"),
-            ("session-a", "/route-a/v1", "route-a-model"),
-            ("session-b", "/route-b/v1", "route-b-model"),
-        ]
-        assert (home / "config.yaml").read_bytes() == canary
 
 
 class _GatewayProcess:
@@ -241,21 +175,35 @@ class _GatewayProcess:
         self._events: queue.Queue[dict] = queue.Queue()
         self._event_log: list[dict] = []
         self._event_condition = threading.Condition()
+        self._stderr_lines: deque[str] = deque(maxlen=100)
         self._reader = threading.Thread(target=self._read_stdout, daemon=True)
+        self._stderr_reader = threading.Thread(target=self._read_stderr, daemon=True)
         self._reader.start()
+        self._stderr_reader.start()
 
     def _read_stdout(self) -> None:
         assert self.process.stdout is not None
-        for line in self.process.stdout:
-            try:
-                message = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if message.get("method") == "event":
-                with self._event_condition:
-                    self._event_log.append(message)
-                    self._event_condition.notify_all()
-            self._events.put(message)
+        try:
+            for line in self.process.stdout:
+                try:
+                    message = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if message.get("method") == "event":
+                    with self._event_condition:
+                        self._event_log.append(message)
+                        self._event_condition.notify_all()
+                self._events.put(message)
+        except (OSError, ValueError):
+            return
+
+    def _read_stderr(self) -> None:
+        assert self.process.stderr is not None
+        try:
+            for line in self.process.stderr:
+                self._stderr_lines.append(line.rstrip())
+        except (OSError, ValueError):
+            return
 
     def event_cursor(self) -> int:
         with self._event_condition:
@@ -287,16 +235,48 @@ class _GatewayProcess:
                 if "error" in message:
                     raise AssertionError(f"{method} failed: {message['error']}")
                 return message["result"]
-        stderr = ""
-        if self.process.stderr is not None:
-            stderr = self.process.stderr.read(4_000)
-        raise AssertionError(f"timed out waiting for {method}; stderr={stderr}")
+        raise AssertionError(
+            f"timed out waiting for {method}; stderr={' | '.join(self._stderr_lines)}"
+        )
 
     def close(self) -> None:
-        if self.process.poll() is None:
-            assert self.process.stdin is not None
-            self.process.stdin.close()
-            self.process.wait(timeout=10)
+        """Best-effort shutdown that cannot strand a local gateway worker."""
+        try:
+            if self.process.stdin is not None and not self.process.stdin.closed:
+                self.process.stdin.close()
+            if self.process.poll() is None:
+                try:
+                    self.process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    self.process.terminate()
+                    try:
+                        self.process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        self.process.kill()
+                        self.process.wait(timeout=5)
+        except (OSError, ValueError):
+            pass
+        finally:
+            for stream in (self.process.stdout, self.process.stderr):
+                try:
+                    if stream is not None and not stream.closed:
+                        stream.close()
+                except (OSError, ValueError):
+                    pass
+            self._reader.join(timeout=2)
+            self._stderr_reader.join(timeout=2)
+
+
+def _close_workers(*workers: _GatewayProcess) -> None:
+    """Clean every worker even when a sibling's teardown has failed."""
+    for worker in workers:
+        try:
+            worker.close()
+        except Exception:
+            # A remaining sibling still has to be shut down.  The postcondition
+            # below reports any process that resisted close/terminate/kill.
+            continue
+    assert all(worker.process.poll() is not None for worker in workers)
 
 
 def _create_and_switch(worker: _GatewayProcess, model: str, provider: str) -> str:
@@ -324,6 +304,33 @@ def _submit_and_wait(worker: _GatewayProcess, sid: str, marker: str) -> None:
     result = worker.call("prompt.submit", {"session_id": sid, "text": f"session={marker}\nroute probe"})
     assert result["status"] in {"started", "streaming"}
     worker.wait_for_event("message.complete", sid, cursor)
+
+
+def test_one_tui_process_keeps_two_live_session_routes_isolated(tmp_path: Path) -> None:
+    """Actual TUI RPCs must not leak a --session switch through shared process state."""
+    with _loopback_routes() as routes:
+        home = tmp_path / "hermes-home"
+        home.mkdir()
+        canary = _write_canary_config(home, routes.server_port)
+        worker = _GatewayProcess(home)
+        try:
+            session_a = _create_and_switch(worker, "route-a-model", "custom:route-a")
+            session_b = _create_and_switch(worker, "route-b-model", "custom:route-b")
+            assert (home / "config.yaml").read_bytes() == canary
+
+            _submit_and_wait(worker, session_a, "same-process-a-first")
+            _submit_and_wait(worker, session_b, "same-process-b-first")
+            _submit_and_wait(worker, session_a, "same-process-a-second")
+            _submit_and_wait(worker, session_b, "same-process-b-second")
+        finally:
+            _close_workers(worker)
+
+        assert _route_tuples(_marked_captures(routes)) == [
+            ("same-process-a-first", "/route-a/v1", "route-a-model"),
+            ("same-process-b-first", "/route-b/v1", "route-b-model"),
+            ("same-process-a-second", "/route-a/v1", "route-a-model"),
+            ("same-process-b-second", "/route-b/v1", "route-b-model"),
+        ]
 
 
 def test_two_tui_processes_isolate_session_switches_and_only_global_changes_default(
@@ -366,8 +373,7 @@ def test_two_tui_processes_isolate_session_switches_and_only_global_changes_defa
             while len(_marked_captures(routes)) < 5 and time.monotonic() < deadline:
                 time.sleep(0.05)
         finally:
-            worker_a.close()
-            worker_b.close()
+            _close_workers(worker_a, worker_b)
 
         assert _route_tuples(_marked_captures(routes)) == [
             ("process-a-first", "/route-a/v1", "route-a-model"),
