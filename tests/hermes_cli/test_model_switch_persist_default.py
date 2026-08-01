@@ -1,5 +1,8 @@
 """Tests for explicit-global model switch persistence."""
 
+import types
+from unittest.mock import patch
+
 import pytest
 
 from hermes_cli.model_switch import parse_model_flags, resolve_persist_behavior
@@ -82,3 +85,19 @@ class TestResolvePersistBehavior:
 
         assert resolve_persist_behavior(False, False) is False
         assert config_path.read_text(encoding="utf-8") == original
+
+
+def test_model_fallback_help_describes_session_default():
+    """Unavailable picker help must not promise persistence for plain /model."""
+    import cli
+
+    printed = []
+    shell = types.SimpleNamespace(model="", provider="", base_url="")
+    with (
+        patch("hermes_cli.inventory.load_picker_context", side_effect=RuntimeError),
+        patch.object(cli, "_cprint", printed.append),
+    ):
+        cli.HermesCLI._handle_model_switch(shell, "/model")
+
+    assert "  /model <name>                        switch model for this session only" in printed
+    assert "  /model <name> --global               switch and persist" in printed

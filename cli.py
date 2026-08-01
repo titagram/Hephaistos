@@ -7816,8 +7816,9 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             if not providers:
                 _cprint("  No authenticated providers found.")
                 _cprint("")
-                _cprint("  /model <name>                        switch model (persists)")
-                _cprint("  /model <name> --session              switch for this session only")
+                _cprint("  /model <name>                        switch model for this session only")
+                _cprint("  /model <name> --global               switch and persist")
+                _cprint("  /model <name> --session              session-only (compatibility)")
                 _cprint("  /model --provider <slug>             switch provider")
                 _cprint("  /model --refresh                     re-fetch live model lists")
                 return
