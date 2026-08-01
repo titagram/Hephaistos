@@ -16,6 +16,7 @@ from hermes_cli.config import (
     _explicit_config_paths,
     _normalize_max_turns_config,
     load_config,
+    load_config_readonly,
     load_env,
     migrate_config,
     read_raw_config,
@@ -91,6 +92,37 @@ class TestEnsureHermesHome:
 
 
 class TestLoadConfigDefaults:
+    def test_readonly_defaults_do_not_create_missing_active_profile(self, tmp_path):
+        profile_home = tmp_path / "profiles" / "isolated"
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(profile_home)}):
+            config = load_config_readonly()
+
+        assert config["memory"]["provider"] == ""
+        assert not profile_home.exists()
+
+    def test_readonly_reads_active_profile_without_creating_scaffolding(self, tmp_path):
+        profile_home = tmp_path / "profiles" / "isolated"
+        profile_home.mkdir(parents=True)
+        config_path = profile_home / "config.yaml"
+        config_path.write_text("memory:\n  provider: hades_backend\n", encoding="utf-8")
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(profile_home)}):
+            config = load_config_readonly()
+
+        assert config["memory"]["provider"] == "hades_backend"
+        assert set(profile_home.iterdir()) == {config_path}
+
+    def test_mutable_load_still_initializes_missing_active_profile(self, tmp_path):
+        profile_home = tmp_path / "profiles" / "isolated"
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(profile_home)}):
+            config = load_config()
+
+        assert config["memory"]["provider"] == ""
+        assert (profile_home / "SOUL.md").is_file()
+        assert (profile_home / "sessions").is_dir()
+
     def test_returns_defaults_when_no_file(self, tmp_path):
         with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
             config = load_config()

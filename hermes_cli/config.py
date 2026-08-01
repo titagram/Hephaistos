@@ -6232,7 +6232,7 @@ def load_config() -> Dict[str, Any]:
     defensive deepcopy — that path matters in agent-loop hot spots like
     ``get_provider_request_timeout`` which is called once per API turn.
     """
-    return _load_config_impl(want_deepcopy=True)
+    return _load_config_impl(want_deepcopy=True, initialize_home=True)
 
 
 def load_config_readonly() -> Dict[str, Any]:
@@ -6251,11 +6251,17 @@ def load_config_readonly() -> Dict[str, Any]:
     conversation; skipping deepcopy here removes a measurable allocation
     source and the GC pressure that comes with it.
 
+    This path does not initialize ``HERMES_HOME`` or create its standard
+    scaffolding. It still resolves the active profile and applies the same
+    defaults, normalization, environment expansion, managed overlay, and cache
+    behavior as ``load_config()``. Call ``load_config()`` when initialization
+    is part of the caller's contract.
+
     Note: this returns a plain ``dict`` (not ``MappingProxyType``) so
     existing ``isinstance(x, dict)`` guards downstream keep working. The
     safety guarantee is purely documented, not enforced — be careful.
     """
-    return _load_config_impl(want_deepcopy=False)
+    return _load_config_impl(want_deepcopy=False, initialize_home=False)
 
 
 def write_platform_config_field(
@@ -6374,9 +6380,10 @@ def apply_terminal_config_to_env(
     return target
 
 
-def _load_config_impl(*, want_deepcopy: bool) -> Dict[str, Any]:
+def _load_config_impl(*, want_deepcopy: bool, initialize_home: bool) -> Dict[str, Any]:
     with _CONFIG_LOCK:
-        ensure_hermes_home()
+        if initialize_home:
+            ensure_hermes_home()
         config_path = get_config_path()
         path_key = str(config_path)
 
