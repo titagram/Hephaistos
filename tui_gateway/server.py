@@ -9678,7 +9678,10 @@ def _respond(rid, params, key):
         entry = _pending.get(r)
         if not entry:
             return _err(rid, 4009, f"no pending {key} request")
-        _, ev = entry
+        owner_sid, ev = entry
+        responder_sid = params.get("session_id")
+        if responder_sid and responder_sid != owner_sid:
+            return _err(rid, 4009, f"no pending {key} request")
         _answers[r] = params.get(key, "")
         ev.set()
     return _ok(rid, {"status": "ok"})
@@ -11474,12 +11477,29 @@ def _(rid, params: dict) -> dict:
     try:
         from hermes_cli.plugins import (
             get_plugin_command_handler,
-            resolve_plugin_command_result,
+            invoke_plugin_command,
         )
 
         handler = get_plugin_command_handler(name)
         if handler:
-            result = resolve_plugin_command_result(handler(arg))
+            from hermes_cli.plugin_command_context import create_plugin_command_context
+
+            result = invoke_plugin_command(
+                name,
+                arg,
+                create_plugin_command_context(
+                    cwd=_session_cwd(session),
+                    session_id=params.get("session_id", ""),
+                    surface=str((session or {}).get("source") or "tui"),
+                    interactive=True,
+                    request_secret=lambda prompt: _block(
+                        "secret.request",
+                        params.get("session_id", ""),
+                        {"prompt": prompt, "env_var": "PLUGIN_SECRET"},
+                        timeout=120,
+                    ),
+                ),
+            )
             return _ok(rid, {"type": "plugin", "output": str(result or "")})
     except Exception:
         pass
@@ -12736,22 +12756,39 @@ def _(rid, params: dict) -> dict:
         pass
 
     plugin_handler = None
-    resolve_plugin_command_result = None
+    invoke_plugin_command = None
     if _cmd_base:
         try:
             from hermes_cli.plugins import (
                 get_plugin_command_handler,
-                resolve_plugin_command_result,
+                invoke_plugin_command,
             )
 
             plugin_handler = get_plugin_command_handler(_cmd_base)
         except Exception:
             plugin_handler = None
-            resolve_plugin_command_result = None
+            invoke_plugin_command = None
 
-    if plugin_handler and resolve_plugin_command_result:
+    if plugin_handler and invoke_plugin_command:
         try:
-            result = resolve_plugin_command_result(plugin_handler(_cmd_arg))
+            from hermes_cli.plugin_command_context import create_plugin_command_context
+
+            result = invoke_plugin_command(
+                _cmd_base,
+                _cmd_arg,
+                create_plugin_command_context(
+                    cwd=_session_cwd(session),
+                    session_id=params.get("session_id", ""),
+                    surface=str(session.get("source") or "tui"),
+                    interactive=True,
+                    request_secret=lambda prompt: _block(
+                        "secret.request",
+                        params.get("session_id", ""),
+                        {"prompt": prompt, "env_var": "PLUGIN_SECRET"},
+                        timeout=120,
+                    ),
+                ),
+            )
             return _ok(rid, {"output": str(result or "(no output)")})
         except Exception as e:
             return _ok(rid, {"output": f"Plugin command error: {e}"})

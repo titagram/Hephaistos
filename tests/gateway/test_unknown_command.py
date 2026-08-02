@@ -364,10 +364,30 @@ async def test_command_hook_rewrite_routes_to_plugin(monkeypatch):
         "get_plugin_command_handler",
         lambda name: (lambda args: f"metrics {args}") if name == "metricas" else None,
     )
+    received_context = {}
+
+    def invoke(name, args, context):
+        received_context.update({
+            "name": name,
+            "args": args,
+            "session_id": context.session_id,
+            "surface": context.surface,
+            "interactive": context.interactive,
+        })
+        return f"metrics {args}"
+
+    monkeypatch.setattr(_plugins_mod, "invoke_plugin_command", invoke)
 
     result = await runner._handle_message(_make_event("/status"))
 
     assert result == "metrics dias:7"
+    assert received_context == {
+        "name": "metricas",
+        "args": "dias:7",
+        "session_id": "sess-1",
+        "surface": "gateway",
+        "interactive": False,
+    }
     # First emit_collect fires on the original command; after rewrite the
     # dispatcher does NOT re-fire for the new command (one decision per turn).
     assert call_log == ["command:status"]

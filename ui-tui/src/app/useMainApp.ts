@@ -939,12 +939,12 @@ export function useMainApp(gw: GatewayClient) {
         return
       }
 
-      return respondWith('secret.respond', { request_id: overlay.secret.requestId, value }, () => {
+      return respondWith('secret.respond', { request_id: overlay.secret.requestId, session_id: ui.sid ?? '', value }, () => {
         patchOverlayState({ secret: null })
         patchUiState({ status: 'running…' })
       })
     },
-    [overlay.secret, respondWith]
+    [overlay.secret, respondWith, ui.sid]
   )
 
   const onModelSelect = useCallback((value: string) => {

@@ -1295,6 +1295,9 @@ def test_slash_exec_handles_plugin_commands_in_live_gateway(server):
     with patch(
         "hermes_cli.plugins.get_plugin_command_handler",
         lambda name: (lambda arg: f"plugin:{arg}") if name == "plugin-cmd" else None,
+    ), patch(
+        "hermes_cli.plugins.invoke_plugin_command",
+        lambda name, arg, context: f"plugin:{arg}",
     ):
         resp = server.handle_request({
             "id": "r-plugin-slash",
@@ -1358,6 +1361,9 @@ def test_slash_exec_plugin_handler_error_returns_output(server):
     with patch(
         "hermes_cli.plugins.get_plugin_command_handler",
         lambda name: handler if name == "plugin-cmd" else None,
+    ), patch(
+        "hermes_cli.plugins.invoke_plugin_command",
+        side_effect=RuntimeError("handler boom: hello"),
     ):
         resp = server.handle_request({
             "id": "r-plugin-handler-error",
@@ -1664,6 +1670,9 @@ def test_command_dispatch_awaits_async_plugin_handler(server):
     with patch(
         "hermes_cli.plugins.get_plugin_command_handler",
         lambda name: _handler if name == "async-cmd" else None,
+    ), patch(
+        "hermes_cli.plugins.invoke_plugin_command",
+        lambda name, arg, context: "async:hello",
     ):
         resp = server.handle_request({
             "id": "r-plugin",

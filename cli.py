@@ -8729,14 +8729,26 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             elif base_cmd.lstrip("/") in _get_plugin_cmd_handler_names():
                 from hermes_cli.plugins import (
                     get_plugin_command_handler,
-                    resolve_plugin_command_result,
+                    invoke_plugin_command,
                 )
                 plugin_handler = get_plugin_command_handler(base_cmd.lstrip("/"))
                 if plugin_handler:
                     user_args = cmd_original[len(base_cmd):].strip()
                     try:
-                        result = resolve_plugin_command_result(
-                            plugin_handler(user_args)
+                        from hermes_cli.plugin_command_context import (
+                            create_plugin_command_context,
+                            request_cli_plugin_secret,
+                        )
+                        result = invoke_plugin_command(
+                            base_cmd.lstrip("/"),
+                            user_args,
+                            create_plugin_command_context(
+                                cwd=os.getenv("TERMINAL_CWD") or os.getcwd(),
+                                session_id=self.session_id,
+                                surface="cli",
+                                interactive=True,
+                                request_secret=lambda prompt: request_cli_plugin_secret(self, prompt),
+                            ),
                         )
                         if result:
                             _cprint(str(result))

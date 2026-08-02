@@ -512,6 +512,7 @@ class PluginContext:
 
         self._manager._plugin_commands[clean] = {
             "handler": handler,
+            "accepts_context": _plugin_handler_accepts_context(handler),
             "description": description or "Plugin command",
             "plugin": self.manifest.name,
             "args_hint": (args_hint or "").strip(),
@@ -2071,6 +2072,45 @@ def get_plugin_command_handler(name: str) -> Optional[Callable]:
     """Return the handler for a plugin-registered slash command, or ``None``."""
     entry = _ensure_plugins_discovered()._plugin_commands.get(name)
     return entry["handler"] if entry else None
+
+
+def _plugin_handler_accepts_context(handler: Callable) -> bool:
+    """Classify the public command ABI once, at registration time.
+
+    A command's own ``TypeError`` must propagate as an error from that command,
+    not be mistaken for evidence that it has the legacy one-argument shape.
+    Uninspectable callables conservatively retain the old ABI.
+    """
+    try:
+        inspect.signature(handler).bind("", object())
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def invoke_plugin_command(name: str, raw_args: str, context) -> Any:
+    """Invoke one registered plugin slash command through its classified ABI.
+
+    This is the sole host dispatch helper.  It preserves legacy handler inputs
+    exactly while allowing handlers registered with ``(raw_args, context)`` to
+    receive the immutable invocation context.
+    """
+    entry = _ensure_plugins_discovered()._plugin_commands.get(name)
+    if not entry:
+        return None
+    handler = entry["handler"]
+    try:
+        result = (
+            handler(raw_args, context)
+            if entry.get("accepts_context", False)
+            else handler(raw_args)
+        )
+        return context.redact(resolve_plugin_command_result(result))
+    except BaseException as exc:
+        message = context.redact(str(exc))
+        if message != str(exc):
+            raise type(exc)(message) from None
+        raise
 
 
 _PLUGIN_COMMAND_AWAIT_TIMEOUT_SECS = 30.0

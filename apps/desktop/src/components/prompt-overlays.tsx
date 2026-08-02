@@ -283,6 +283,7 @@ function SecretDialog() {
       try {
         await gateway.request<{ status?: string }>('secret.respond', {
           request_id: request.requestId,
+          session_id: request.sessionId ?? '',
           value: secret
         })
         triggerHaptic('submit')

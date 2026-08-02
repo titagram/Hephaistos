@@ -4,6 +4,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { HermesGateway } from '@/hermes'
 import { $gateway } from '@/store/gateway'
 import {
+  setSecretRequest,
   $telosApprovalRequest,
   clearAllPrompts,
   setTelosApprovalRequest
@@ -227,6 +228,33 @@ describe('TelosApprovalDialog', () => {
 
     await waitFor(() => {
       expect($telosApprovalRequest.get()).toBeNull()
+    })
+  })
+})
+
+describe('SecretDialog', () => {
+  it('returns a secret only to the runtime session that requested it', async () => {
+    const request = mockGateway()
+    $activeSessionId.set('secret-session')
+    setSecretRequest({
+      requestId: 'secret-request',
+      envVar: 'PLUGIN_SECRET',
+      prompt: 'Project token',
+      sessionId: 'secret-session'
+    })
+    render(<PromptOverlays />)
+
+    fireEvent.change(screen.getByPlaceholderText('PLUGIN_SECRET'), {
+      target: { value: 'do-not-echo' }
+    })
+    fireEvent.click(screen.getByRole('button', { name: /^Send$/ }))
+
+    await waitFor(() => {
+      expect(request).toHaveBeenCalledWith('secret.respond', {
+        request_id: 'secret-request',
+        session_id: 'secret-session',
+        value: 'do-not-echo'
+      })
     })
   })
 })
