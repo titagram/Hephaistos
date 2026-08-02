@@ -81,13 +81,10 @@ codex_status_is_authenticated() {
     unset status_output
     die 'Codex login status failed for the dedicated codex_home volume'
   fi
-  shopt -s nocasematch
-  if [[ ! "$status_output" =~ (logged[[:space:]]+in|authenticated) ]]; then
-    shopt -u nocasematch
+  if [[ "${status_output,,}" != *'logged in using chatgpt'* ]]; then
     unset status_output
     die 'the dedicated codex_home volume is not authenticated'
   fi
-  shopt -u nocasematch
   unset status_output
 }
 
@@ -106,9 +103,33 @@ wait_for_health() {
   die "$service did not become healthy"
 }
 
+verify_basic_auth_label() {
+  local escaped_entry='' expected_entry='' actual_entry='' container_id='' runtime_line=''
+  local entry_count=0
+  while IFS= read -r runtime_line || [[ -n "$runtime_line" ]]; do
+    case "$runtime_line" in
+      SUPERMEMORY_BASIC_AUTH_USERS=*)
+        escaped_entry="${runtime_line#SUPERMEMORY_BASIC_AUTH_USERS=}"
+        entry_count=$((entry_count + 1))
+        ;;
+    esac
+  done <"$ENV_FILE"
+  [[ "$entry_count" == 1 ]] || die "$ENV_FILE_NAME must contain exactly one SUPERMEMORY_BASIC_AUTH_USERS line"
+  expected_entry="${escaped_entry//\$\$/\$}"
+  [[ "$expected_entry" =~ ^titagram:\$2[aby]\$[0-9]{2}\$[./A-Za-z0-9]{53}$ ]] || \
+    die "$ENV_FILE_NAME does not contain a valid Compose-escaped bcrypt entry"
+
+  container_id="$(compose ps -q supermemory-server)"
+  [[ -n "$container_id" ]] || die 'supermemory-server has no container for label verification'
+  actual_entry="$(docker inspect --format '{{index .Config.Labels "traefik.http.middlewares.sm-basic-auth.basicauth.users"}}' "$container_id")"
+  [[ "$actual_entry" == "$expected_entry" ]] || \
+    die 'the rendered Traefik BasicAuth label does not contain the intended bcrypt entry'
+}
+
 if [[ "$resume" == true ]]; then
   codex_status_is_authenticated
   compose up -d --build
+  verify_basic_auth_label
   printf 'Resume complete. Run: %s --local\n' "$DEPLOY_DIR/scripts/smoke.sh"
   exit 0
 fi
@@ -126,7 +147,7 @@ if ! basic_auth_entry="$(
   die 'failed to generate the BasicAuth bcrypt entry'
 fi
 unset basic_auth_password
-[[ "$basic_auth_entry" =~ ^titagram:\$2[aby]\$[0-9]{2}\$.{53}$ ]] || \
+[[ "$basic_auth_entry" =~ ^titagram:\$2[aby]\$[0-9]{2}\$[./A-Za-z0-9]{53}$ ]] || \
   die 'htpasswd returned an invalid bcrypt entry'
 escaped_basic_auth_entry="${basic_auth_entry//\$/\$\$}"
 unset basic_auth_entry
@@ -211,6 +232,7 @@ RUNTIME_TEMP=''
 
 compose up -d --force-recreate supermemory-server
 wait_for_health supermemory-server
+verify_basic_auth_label
 
 printf 'Bootstrap complete. Run local acceptance with: %s --local\n' "$DEPLOY_DIR/scripts/smoke.sh"
 printf 'After DNS and TLS are ready, run: %s --public\n' "$DEPLOY_DIR/scripts/smoke.sh"
