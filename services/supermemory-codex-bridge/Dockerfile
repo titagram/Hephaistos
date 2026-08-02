@@ -22,7 +22,10 @@ WORKDIR /app
 COPY --from=build /app/dist/src ./dist/src
 COPY --from=production-dependencies /app/node_modules ./node_modules
 COPY --from=build /app/package.json ./package.json
-RUN ln -s /app/node_modules/.bin/codex /usr/local/bin/codex \
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -s /app/node_modules/.bin/codex /usr/local/bin/codex \
     && mkdir -p /workspace /var/lib/codex \
     && chown node:node /workspace /var/lib/codex
 
