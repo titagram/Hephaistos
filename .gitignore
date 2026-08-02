@@ -162,5 +162,8 @@ infographic/
 # Host-only Traefik staging files; canonical config lives on the server.
 .codex-tmp-traefik/
 
+# Supermemory deployment credentials are generated at runtime.
+deploy/supermemory/.env.runtime
+
 # Isolated feature worktrees managed by Superpowers skills.
 .worktrees/

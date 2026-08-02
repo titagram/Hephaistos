@@ -1,0 +1,125 @@
+name: supermemory
+
+services:
+  codex-bridge:
+    build:
+      context: ../../services/supermemory-codex-bridge
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      BRIDGE_API_KEY: ${SUPERMEMORY_BRIDGE_API_KEY:?SUPERMEMORY_BRIDGE_API_KEY is required}
+      CODEX_MODEL: ${CODEX_MODEL:-gpt-5.3-codex}
+    expose:
+      - "8646"
+    volumes:
+      - codex_home:/var/lib/codex
+      - type: bind
+        source: ./codex-config.toml
+        target: /var/lib/codex/config.toml
+        read_only: true
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    networks:
+      - backend
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - >-
+          require('http').get('http://127.0.0.1:8646/healthz',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))
+      interval: 10s
+      timeout: 3s
+      start_period: 30s
+      retries: 6
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  supermemory-server:
+    build:
+      context: ../..
+      dockerfile: deploy/supermemory/server.Dockerfile
+    restart: unless-stopped
+    environment:
+      SUPERMEMORY_DATA_DIR: /var/lib/supermemory
+      SUPERMEMORY_SKIP_EMBEDDING_PREWARM: "true"
+      OPENAI_BASE_URL: http://codex-bridge:8646/v1
+      OPENAI_API_KEY: ${SUPERMEMORY_BRIDGE_API_KEY:?SUPERMEMORY_BRIDGE_API_KEY is required}
+      OPENAI_MODEL: supermemory-codex
+      OPENAI_FAST_MODEL: supermemory-codex
+      OPENAI_TEXT_MODEL: supermemory-codex
+    expose:
+      - "6767"
+    volumes:
+      - supermemory_data:/var/lib/supermemory
+    depends_on:
+      codex-bridge:
+        condition: service_healthy
+    networks:
+      - backend
+      - traefik_default
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - >-
+          require('http').get('http://127.0.0.1:6767/',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))
+      interval: 10s
+      timeout: 3s
+      start_period: 30s
+      retries: 6
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: traefik_default
+      traefik.http.routers.sm-http.rule: Host(`persephone.cc`)
+      traefik.http.routers.sm-http.entrypoints: web
+      traefik.http.routers.sm-http.middlewares: sm-https-redirect
+      traefik.http.middlewares.sm-https-redirect.redirectscheme.scheme: https
+      traefik.http.routers.sm-web.rule: Host(`persephone.cc`)
+      traefik.http.routers.sm-web.entrypoints: websecure
+      traefik.http.routers.sm-web.priority: "10"
+      traefik.http.routers.sm-web.middlewares: sm-basic-auth,sm-backend-key
+      traefik.http.routers.sm-web.service: sm-service
+      traefik.http.routers.sm-web.tls: "true"
+      traefik.http.routers.sm-web.tls.certresolver: le
+      traefik.http.routers.sm-docs.rule: Host(`persephone.cc`) && (PathPrefix(`/v4/reference`) || PathPrefix(`/v4/openapi`))
+      traefik.http.routers.sm-docs.entrypoints: websecure
+      traefik.http.routers.sm-docs.priority: "300"
+      traefik.http.routers.sm-docs.middlewares: sm-basic-auth,sm-backend-key
+      traefik.http.routers.sm-docs.service: sm-service
+      traefik.http.routers.sm-docs.tls: "true"
+      traefik.http.routers.sm-docs.tls.certresolver: le
+      traefik.http.routers.sm-api.rule: Host(`persephone.cc`) && (PathPrefix(`/v3`) || PathPrefix(`/v4`) || PathPrefix(`/files`))
+      traefik.http.routers.sm-api.entrypoints: websecure
+      traefik.http.routers.sm-api.priority: "200"
+      traefik.http.routers.sm-api.service: sm-service
+      traefik.http.routers.sm-api.tls: "true"
+      traefik.http.routers.sm-api.tls.certresolver: le
+      traefik.http.middlewares.sm-basic-auth.basicauth.users: ${SUPERMEMORY_BASIC_AUTH_USERS:?SUPERMEMORY_BASIC_AUTH_USERS is required}
+      traefik.http.middlewares.sm-basic-auth.basicauth.removeheader: "true"
+      traefik.http.middlewares.sm-backend-key.headers.customrequestheaders.Authorization: Bearer ${SUPERMEMORY_API_KEY:?SUPERMEMORY_API_KEY is required}
+      traefik.http.services.sm-service.loadbalancer.server.port: "6767"
+
+volumes:
+  codex_home:
+  supermemory_data:
+
+networks:
+  backend:
+    internal: true
+  traefik_default:
+    external: true
