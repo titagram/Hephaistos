@@ -9,8 +9,6 @@ traceback and lost the whole turn.
 """
 
 import pytest
-from pathlib import Path
-from types import SimpleNamespace
 
 from agent.turn_finalizer import finalize_turn
 
@@ -187,57 +185,22 @@ def test_text_response_on_last_allowed_call_is_completed():
     assert result["completed"] is True
 
 
-def test_hades_backend_sync_runs_after_file_mutation(monkeypatch):
+@pytest.mark.parametrize("tool_name", ["terminal", "execute_code", "write_file", "patch"])
+def test_workspace_tool_use_never_runs_backend_sync(monkeypatch, tool_name):
     calls = []
 
-    import agent.runtime_cwd as runtime_cwd
     import hermes_cli.hades_backend_sync as hades_sync
 
-    monkeypatch.setattr(runtime_cwd, "resolve_agent_cwd", lambda: Path("/tmp/project"))
+    def fail_backend_sync(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise AssertionError("ordinary agent lifecycle attempted Backend sync")
 
-    def fake_sync_for_workspace(**kwargs):
-        calls.append(kwargs)
-        return SimpleNamespace(status="started", reason="due")
-
-    monkeypatch.setattr(hades_sync, "maybe_run_backend_sync_for_workspace", fake_sync_for_workspace)
+    monkeypatch.setattr(hades_sync, "maybe_run_backend_sync_for_workspace", fail_backend_sync)
 
     agent = _StubAgent(raise_in=())
-    agent._turn_file_mutation_paths = {"/tmp/project/app.py"}
-
-    result = _run(
-        agent,
-        final_response="done",
-        api_call_count=1,
-        turn_exit_reason="text_response(finish_reason=stop)",
+    agent._turn_file_mutation_paths = (
+        {"/tmp/project/app.py"} if tool_name in {"write_file", "patch"} else set()
     )
-
-    assert result["final_response"] == "done"
-    assert calls == [
-        {
-            "cwd": Path("/tmp/project"),
-            "changed_paths": ["/tmp/project/app.py"],
-            "force": True,
-            "min_interval_seconds": 0,
-        }
-    ]
-
-
-def test_hades_backend_sync_runs_after_terminal_tool_use(monkeypatch):
-    calls = []
-
-    import agent.runtime_cwd as runtime_cwd
-    import hermes_cli.hades_backend_sync as hades_sync
-
-    monkeypatch.setattr(runtime_cwd, "resolve_agent_cwd", lambda: Path("/tmp/project"))
-
-    def fake_sync_for_workspace(**kwargs):
-        calls.append(kwargs)
-        return SimpleNamespace(status="started", reason="due")
-
-    monkeypatch.setattr(hades_sync, "maybe_run_backend_sync_for_workspace", fake_sync_for_workspace)
-
-    agent = _StubAgent(raise_in=())
-    agent._turn_file_mutation_paths = set()
 
     result = _run(
         agent,
@@ -246,17 +209,10 @@ def test_hades_backend_sync_runs_after_terminal_tool_use(monkeypatch):
         turn_exit_reason="text_response(finish_reason=stop)",
         messages=[
             {"role": "user", "content": "generate files"},
-            {"role": "assistant", "tool_calls": [{"id": "c1", "name": "terminal"}]},
+            {"role": "assistant", "tool_calls": [{"id": "c1", "name": tool_name}]},
             {"role": "tool", "tool_call_id": "c1", "content": "ok"},
         ],
     )
 
     assert result["final_response"] == "done"
-    assert calls == [
-        {
-            "cwd": Path("/tmp/project"),
-            "changed_paths": [],
-            "force": True,
-            "min_interval_seconds": 0,
-        }
-    ]
+    assert calls == []

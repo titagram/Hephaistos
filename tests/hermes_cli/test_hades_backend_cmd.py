@@ -495,11 +495,21 @@ def test_backend_bootstrap_awareness_orchestrates_current_workspace(monkeypatch,
     assert fake_client.closed is True
 
 
-def test_backend_setup_registers_agent_and_persists_derived_token(monkeypatch, tmp_path, capsys):
+@pytest.mark.parametrize("provider", ["holographic", "supermemory", ""])
+def test_backend_setup_never_changes_memory_subtree(
+    monkeypatch, tmp_path, capsys, provider
+):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 
     import hermes_cli.hades_backend_cmd as cmd
-    from hermes_cli.config import load_config
+    from hermes_cli.config import load_config, save_config
+
+    requested_memory = {
+        "provider": provider,
+        "custom": {"keep": "exact"},
+    }
+    save_config({"memory": requested_memory})
+    memory_before = load_config()["memory"]
 
     class FakeClient:
         def __init__(self, base_url, token, **kwargs):
@@ -542,7 +552,8 @@ def test_backend_setup_registers_agent_and_persists_derived_token(monkeypatch, t
     assert "Backend setup complete" in output
     assert config["backend"]["base_url"] == "https://backend.example"
     assert config["backend"]["default_project_id"] == "proj_1"
-    assert config["memory"]["provider"] == "hades_backend"
+    assert config["memory"] == memory_before
+    assert "Memory:" not in output
     assert "derived-token" in env_text
     assert "bootstrap-token" not in env_text
 
@@ -1976,7 +1987,7 @@ def test_backend_tasks_explain_shows_cached_quality(monkeypatch, tmp_path, capsy
     assert payload["quality"]["completed_missing_shared_memory_context_count"] == 1
 
 
-def test_backend_sync_updates_memory_cache_and_pending_proposals(monkeypatch, tmp_path, capsys):
+def test_backend_sync_leaves_memory_cache_and_pending_proposals_untouched(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
 
     workspace = tmp_path / "repo"
@@ -2052,20 +2063,18 @@ def test_backend_sync_updates_memory_cache_and_pending_proposals(monkeypatch, tm
         last_error = hdb.get_sync_state(conn, "last_sync_error")
 
     assert rc == 0
-    assert "memory 1" in output
-    assert cache is not None
-    assert cache.version == "mem_v2"
-    assert cache.items[0]["summary"] == "Shared project context"
+    assert "memory 0" in output
+    assert cache is None
     assert proposals[0].id == proposal.id
-    assert proposals[0].status == "accepted"
-    assert proposals[0].reason == "auto_accepted"
-    assert fake.proposals[0]["summary"] == "Use /api/hades/v1 for backend calls"
-    assert summary["memory_snapshots"] == 1
-    assert summary["proposals_synced"] == 1
+    assert proposals[0].status == "pending"
+    assert proposals[0].reason is None
+    assert fake.proposals == []
+    assert summary["memory_snapshots"] == 0
+    assert summary["proposals_synced"] == 0
     assert last_error is None
 
 
-def test_backend_sync_marks_backend_pending_proposals_as_submitted(monkeypatch, tmp_path, capsys):
+def test_backend_sync_does_not_submit_backend_memory_proposals(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
 
     workspace = tmp_path / "repo"
@@ -2138,9 +2147,9 @@ def test_backend_sync_marks_backend_pending_proposals_as_submitted(monkeypatch, 
     assert first_rc == 0
     assert second_rc == 0
     assert proposals[0].id == proposal.id
-    assert proposals[0].status == "submitted"
-    assert proposals[0].reason == "manual_review_required"
-    assert len(fake.proposals) == 1
+    assert proposals[0].status == "pending"
+    assert proposals[0].reason is None
+    assert fake.proposals == []
     assert summary["proposals_synced"] == 0
 
 

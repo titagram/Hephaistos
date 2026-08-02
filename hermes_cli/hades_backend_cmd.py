@@ -446,9 +446,6 @@ def _cmd_setup(args: argparse.Namespace) -> int:
         backend["plugin_token_env_key"] = plugin_env_key
         backend["plugin_device_secret_env_key"] = plugin_secret_env_key
         backend["plugin_device_id"] = plugin_device_id
-    memory = config.setdefault("memory", {})
-    memory["provider"] = "hades_backend"
-    memory.setdefault("orphaned_cache_retention_days", 90)
     save_config(config)
 
     with db.connect_closing() as conn:
@@ -465,7 +462,6 @@ def _cmd_setup(args: argparse.Namespace) -> int:
     print("Backend setup complete")
     print(f"  Project: {args.project_id}")
     print(f"  Agent:   {final_agent_id} ({label})")
-    print("  Memory:  hades_backend")
     if not plugin_token:
         print("  Plugin:  unavailable (upgrade backend to provision task credentials)")
     return 0

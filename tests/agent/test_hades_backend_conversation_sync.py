@@ -1,27 +1,45 @@
-from pathlib import Path
 from types import SimpleNamespace
 
 
-def test_conversation_piggyback_sync_is_scoped_to_runtime_cwd(monkeypatch):
-    from agent.conversation_loop import _maybe_piggyback_hades_backend_sync
-    import agent.runtime_cwd as runtime_cwd
+def test_normal_turn_never_runs_backend_sync(monkeypatch):
+    import agent.conversation_loop as conversation_loop
+    import agent.turn_finalizer as turn_finalizer
     import hermes_cli.hades_backend_sync as hades_sync
 
     calls = []
-    monkeypatch.setattr(runtime_cwd, "resolve_agent_cwd", lambda: Path("/tmp/current-project"))
 
-    def fake_sync_for_workspace(**kwargs):
-        calls.append(kwargs)
-        return SimpleNamespace(status="started", reason="due")
+    def fail_backend_sync(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise AssertionError("ordinary agent lifecycle attempted Backend sync")
 
-    monkeypatch.setattr(hades_sync, "maybe_run_backend_sync_for_workspace", fake_sync_for_workspace)
+    context = SimpleNamespace(
+        user_message="hello",
+        original_user_message="hello",
+        messages=[{"role": "user", "content": "hello"}],
+        conversation_history=[],
+        active_system_prompt="system",
+        effective_task_id="task-1",
+        turn_id="turn-1",
+        current_turn_user_idx=0,
+        should_review_memory=False,
+        plugin_user_context=None,
+        ext_prefetch_cache=None,
+    )
+    monkeypatch.setattr(conversation_loop, "build_turn_context", lambda *args, **kwargs: context)
+    monkeypatch.setattr(
+        turn_finalizer,
+        "finalize_turn",
+        lambda *args, **kwargs: {"final_response": "ok"},
+    )
+    monkeypatch.setattr(hades_sync, "maybe_run_backend_sync_for_workspace", fail_backend_sync)
 
-    _maybe_piggyback_hades_backend_sync(SimpleNamespace(session_id="session-1"))
+    agent = SimpleNamespace(
+        api_mode="chat_completions",
+        max_iterations=0,
+        iteration_budget=SimpleNamespace(remaining=1),
+        _budget_grace_call=False,
+    )
+    result = conversation_loop.run_conversation(agent, "hello")
 
-    assert calls == [
-        {
-            "cwd": Path("/tmp/current-project"),
-            "force": False,
-            "min_interval_seconds": 300,
-        }
-    ]
+    assert result["final_response"] == "ok"
+    assert calls == []
