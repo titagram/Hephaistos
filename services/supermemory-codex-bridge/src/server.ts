@@ -77,6 +77,7 @@ const knownChatCompletionRequestFields = new Set([
   "safety_identifier",
   "seed",
   "service_tier",
+  "serviceTier",
   "stop",
   "store",
   "stream",
@@ -297,7 +298,7 @@ async function handleRequest(
       const result = await abortable(codex.run(buildCodexInvocation(parsed), controller.signal), controller.signal);
       if (disconnected || response.destroyed) return;
       status = 200;
-      sendJson(response, status, createChatCompletion(config.publicModel, result));
+      sendJson(response, status, createChatCompletion(parsed, result));
     } finally {
       clearTimeout(timer);
       release?.();

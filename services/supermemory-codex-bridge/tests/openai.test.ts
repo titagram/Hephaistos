@@ -71,20 +71,100 @@ test("accepts documented compatibility hints without forwarding them", () => {
     max_tokens: 50,
     max_completion_tokens: 50,
     n: 1,
+    serviceTier: "flex",
   }, alias);
 
-  assert.deepEqual(parsed, { model: alias, messages: [], outputSchema: undefined });
+  assert.deepEqual(parsed, {
+    model: alias,
+    messages: [],
+    outputSchema: undefined,
+    tools: [],
+    toolChoice: "none",
+  });
+});
+
+test("parses symbolic tools and correlated assistant/tool history", () => {
+  const parsed = parseChatCompletionRequest({
+    model: alias,
+    messages: [
+      { role: "user", content: "Remember Ada." },
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [{
+          id: "call_1",
+          type: "function",
+          function: { name: "add_memory", arguments: "{\"memory\":\"Ada\"}" },
+        }],
+      },
+      { role: "tool", tool_call_id: "call_1", content: "{\"stored\":true}" },
+    ],
+    tools: [{
+      type: "function",
+      function: {
+        name: "add_memory",
+        description: "Store a memory",
+        strict: true,
+        parameters: {
+          type: "object",
+          properties: { memory: { type: "string" } },
+          required: ["memory"],
+          additionalProperties: false,
+        },
+      },
+    }],
+    tool_choice: "auto",
+  }, alias);
+
+  assert.equal(parsed.toolChoice, "auto");
+  assert.equal(parsed.tools[0]?.name, "add_memory");
+  assert.equal(parsed.tools[0]?.strict, true);
+  assert.equal(parsed.messages[1]?.role, "assistant");
+  assert.equal(parsed.messages[2]?.role, "tool");
+});
+
+test("rejects malformed tool protocol without silently dropping fields", () => {
+  const tool = { type: "function", function: { name: "remember", parameters: { type: "object" } } };
+  assertApiError(() => parseChatCompletionRequest({
+    model: alias,
+    messages: [],
+    tools: [tool, tool],
+  }, alias), 400, "invalid_tools");
+  assertApiError(() => parseChatCompletionRequest({
+    model: alias,
+    messages: [],
+    tools: [{ ...tool, caller_secret: true }],
+  }, alias), 400, "invalid_tools");
+  assertApiError(() => parseChatCompletionRequest({
+    model: alias,
+    messages: [{
+      role: "assistant",
+      content: null,
+      tool_calls: [{ id: "call_1", type: "function", function: { name: "remember", arguments: "{}" } }],
+    }],
+    tools: [tool],
+  }, alias), 400, "invalid_tool_history");
+  assertApiError(() => parseChatCompletionRequest({
+    model: alias,
+    messages: [{ role: "tool", tool_call_id: "missing", content: "x" }],
+    tools: [tool],
+  }, alias), 400, "invalid_tool_history");
+  assertApiError(() => parseChatCompletionRequest({
+    model: alias,
+    messages: [],
+    serviceTier: "priority",
+  }, alias), 400, "invalid_request");
 });
 
 test("rejects unsupported models, modes, and message content", () => {
   assertApiError(() => parseChatCompletionRequest({ model: "other", messages: [] }, alias), 400, "unsupported_model");
   assertApiError(() => parseChatCompletionRequest({ model: alias, messages: [], stream: true }, alias), 400, "unsupported_streaming");
-  assertApiError(() => parseChatCompletionRequest({ model: alias, messages: [], tools: [{}] }, alias), 400, "unsupported_tools");
+  assertApiError(() => parseChatCompletionRequest({ model: alias, messages: [], tools: [{}] }, alias), 400, "invalid_tools");
   assertApiError(() => parseChatCompletionRequest({ model: alias, messages: [], n: 2 }, alias), 400, "unsupported_n");
   assertApiError(() => parseChatCompletionRequest({
     model: alias,
     messages: [{ role: "tool", content: "x" }],
-  }, alias), 400, "unsupported_message");
+  }, alias), 400, "invalid_tool_history");
   assertApiError(() => parseChatCompletionRequest({
     model: alias,
     messages: [{ role: "user", content: [{ type: "image_url", image_url: { url: "x" } }] }],
@@ -97,7 +177,7 @@ test("rejects unlisted and tool-related top-level fields", () => {
     messages: [],
     metadata: { internal: true },
   }, alias), 400, "unsupported_field");
-  for (const field of ["tool_choice", "parallel_tool_calls", "function_call", "functions"]) {
+  for (const field of ["parallel_tool_calls", "function_call", "functions"]) {
     assertApiError(() => parseChatCompletionRequest({
       model: alias,
       messages: [],
@@ -111,12 +191,12 @@ test("rejects unlisted and tool-related top-level fields", () => {
   }, alias), 400, "unsupported_streaming");
 });
 
-test("rejects assistant tool metadata instead of dropping it", () => {
+test("rejects malformed assistant tool metadata instead of dropping it", () => {
   for (const field of ["tool_calls", "function_call"]) {
     assertApiError(() => parseChatCompletionRequest({
       model: alias,
       messages: [{ role: "assistant", content: "private response", [field]: [] }],
-    }, alias), 400, "unsupported_tools");
+    }, alias), 400, "invalid_tool_history");
   }
 });
 
@@ -134,7 +214,8 @@ test("rejects unknown response formats and malformed JSON schemas", () => {
 });
 
 test("returns an OpenAI chat completion with usage from the Codex result", () => {
-  const completion = createChatCompletion(alias, {
+  const request = parseChatCompletionRequest({ model: alias, messages: [] }, alias);
+  const completion = createChatCompletion(request, {
     text: '{"facts":["Ada uses Rust."]}',
     usage: { inputTokens: 12, outputTokens: 7 },
   });
@@ -156,9 +237,52 @@ test("returns an OpenAI chat completion with usage from the Codex result", () =>
 });
 
 test("reports zero usage when Codex does not provide token counts", () => {
-  assert.deepEqual(createChatCompletion(alias, { text: "ok" }).usage, {
+  const request = parseChatCompletionRequest({ model: alias, messages: [] }, alias);
+  assert.deepEqual(createChatCompletion(request, { text: "ok" }).usage, {
     prompt_tokens: 0,
     completion_tokens: 0,
     total_tokens: 0,
   });
+});
+
+test("maps validated symbolic tool results to OpenAI tool calls", () => {
+  const request = parseChatCompletionRequest({
+    model: alias,
+    messages: [{ role: "user", content: "Remember Ada." }],
+    tools: [{ type: "function", function: {
+      name: "add_memory",
+      parameters: { type: "object", properties: { memory: { type: "string" } }, required: ["memory"] },
+    } }],
+    tool_choice: "required",
+  }, alias);
+  const completion = createChatCompletion(request, {
+    text: JSON.stringify({ content: "", tool_calls: [{ name: "add_memory", arguments: "{\"memory\":\"Ada\"}" }] }),
+  });
+
+  assert.equal(completion.choices[0]?.finish_reason, "tool_calls");
+  assert.equal(completion.choices[0]?.message.content, null);
+  assert.match(completion.choices[0]?.message.tool_calls?.[0]?.id ?? "", /^call_/);
+  assert.deepEqual(completion.choices[0]?.message.tool_calls?.[0]?.function, {
+    name: "add_memory",
+    arguments: "{\"memory\":\"Ada\"}",
+  });
+  const finalAnswer = createChatCompletion({ ...request, toolChoice: "auto" }, {
+    text: JSON.stringify({ content: "Nothing to store.", tool_calls: [] }),
+  });
+  assert.deepEqual(finalAnswer.choices[0], {
+    index: 0,
+    message: { role: "assistant", content: "Nothing to store." },
+    finish_reason: "stop",
+  });
+  assertApiError(() => createChatCompletion(request, { text: "not json" }), 502, "codex_structured_output_error");
+  assertApiError(() => createChatCompletion(request, {
+    text: JSON.stringify({ content: "", tool_calls: [{ name: "unknown", arguments: "{}" }] }),
+  }), 502, "codex_structured_output_error");
+  for (const text of [
+    JSON.stringify({ content: "", tool_calls: [], extra: "secret" }),
+    JSON.stringify({ content: "", tool_calls: [{ name: "add_memory", arguments: "{}", extra: true }] }),
+    JSON.stringify({ content: "must not be dropped", tool_calls: [{ name: "add_memory", arguments: "{}" }] }),
+  ]) {
+    assertApiError(() => createChatCompletion({ ...request, toolChoice: "auto" }, { text }), 502, "codex_structured_output_error");
+  }
 });
