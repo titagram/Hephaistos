@@ -1975,32 +1975,55 @@ class _PromptEmission:
         # External I/O is deliberately outside every invocation/session/prompt
         # lock.  This daemon may wait on a socket or flush without delaying
         # session.close, session.interrupt, or disconnect cleanup.
-        self._transport.write(
-            _prompt_event_frame(self._event, self._sid, dict(self._payload))
-        )
-
-        with self._lock:
-            self._request_finished = True
-            cancelled = self._cancelled or not self._guard.lease_is_active(self._lease)
-            if cancelled and not self._dismiss_started:
-                self._dismiss_started = True
-                start_dismiss = True
-            else:
-                start_dismiss = False
+        try:
+            self._transport.write(
+                _prompt_event_frame(self._event, self._sid, dict(self._payload))
+            )
+        except Exception:
+            logger.warning(
+                "plugin prompt request transport write failed: session=%s request=%s",
+                self._sid,
+                self._payload.get("request_id", ""),
+                exc_info=True,
+            )
+        finally:
+            # A write/flush exception can happen after request bytes escaped.
+            # Settle every started attempt so cancellation can order exactly
+            # one best-effort dismissal after the failed write has unwound.
+            with self._lock:
+                self._request_finished = True
+                cancelled = self._cancelled or not self._guard.lease_is_active(
+                    self._lease
+                )
+                if cancelled and not self._dismiss_started:
+                    self._dismiss_started = True
+                    start_dismiss = True
+                else:
+                    start_dismiss = False
         if start_dismiss:
             self._write_dismiss()
 
     def _write_dismiss(self) -> None:
-        self._transport.write(
-            _prompt_event_frame(
-                "prompt.dismiss",
-                self._sid,
-                {
-                    "request_id": self._payload.get("request_id", ""),
-                    "request_type": self._event,
-                },
+        try:
+            self._transport.write(
+                _prompt_event_frame(
+                    "prompt.dismiss",
+                    self._sid,
+                    {
+                        "request_id": self._payload.get("request_id", ""),
+                        "request_type": self._event,
+                    },
+                )
             )
-        )
+        except Exception:
+            # Dismissal is deliberately one-shot/best-effort. A dead transport
+            # must not create a retry loop or another uncaught daemon failure.
+            logger.warning(
+                "plugin prompt dismissal transport write failed: session=%s request=%s",
+                self._sid,
+                self._payload.get("request_id", ""),
+                exc_info=True,
+            )
 
 
 def _cancel_pending_prompt(rid: str) -> None:

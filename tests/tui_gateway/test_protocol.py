@@ -1,8 +1,10 @@
 """Tests for tui_gateway JSON-RPC protocol plumbing."""
 
 import asyncio
+import errno
 import io
 import json
+import logging
 import sys
 import threading
 import time
@@ -2092,6 +2094,107 @@ def test_plugin_prompt_teardown_does_not_wait_for_blocked_stdio_flush(
     assert not server._pending
     assert not server._pending_prompt_payloads
     assert not server._pending_prompt_emissions
+
+
+def test_plugin_prompt_flush_error_still_emits_one_ordered_dismissal(
+    server, monkeypatch, tmp_path, caplog
+):
+    """A maybe-delivered request is settled even when its first flush raises."""
+    from hermes_cli import plugins
+    from tui_gateway.transport import StdioTransport
+
+    first_flush_failed = threading.Event()
+    frames = []
+    flush_attempts = []
+    thread_errors = []
+
+    class FailOnceFlushStream:
+        def write(self, line):
+            frames.append(json.loads(line))
+
+        def flush(self):
+            flush_attempts.append(len(flush_attempts) + 1)
+            if len(flush_attempts) == 1:
+                first_flush_failed.set()
+                raise OSError(errno.ENOSPC, "bounded flush failure after write")
+
+    def handler(_arg, context):
+        context.request_secret("Token")
+        return "must-not-return"
+
+    monkeypatch.setattr(plugins, "_plugin_manager", _registered_plugin_manager(handler))
+    monkeypatch.setattr(server, "_teardown_session", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        threading,
+        "excepthook",
+        lambda args: thread_errors.append((args.thread.name, args.exc_value)),
+    )
+    caplog.set_level(logging.WARNING, logger="tui_gateway.server")
+    stream = FailOnceFlushStream()
+    transport = StdioTransport(lambda: stream, threading.Lock())
+    sid = "stdio-flush-error-prompt"
+    _plugin_session(server, sid, tmp_path, transport=transport)
+    response = {}
+    dispatch = threading.Thread(
+        target=lambda: response.setdefault(
+            "value",
+            server.handle_request(
+                {
+                    "id": "plugin",
+                    "method": "slash.exec",
+                    "params": {"command": "async-cmd", "session_id": sid},
+                }
+            ),
+        )
+    )
+    dispatch.start()
+    assert first_flush_failed.wait(1), "request JSON never reached the real transport"
+
+    started = time.monotonic()
+    closed = server.handle_request(
+        {"id": "close", "method": "session.close", "params": {"session_id": sid}}
+    )
+    elapsed = time.monotonic() - started
+    dispatch.join(1)
+    deadline = time.time() + 1
+    while (
+        len(frames) < 2
+        or any(
+            thread.name.startswith(("tui-prompt-emit-", "tui-prompt-dismiss-"))
+            for thread in threading.enumerate()
+        )
+    ) and time.time() < deadline:
+        time.sleep(0.01)
+
+    assert elapsed < 0.1
+    assert closed["result"] == {"closed": True}
+    assert not dispatch.is_alive()
+    assert response["value"]["result"] == {
+        "output": "Plugin command error: plugin command cancelled"
+    }
+    assert [frame["params"]["type"] for frame in frames] == [
+        "secret.request",
+        "prompt.dismiss",
+    ]
+    assert (
+        frames[0]["params"]["payload"]["request_id"]
+        == frames[1]["params"]["payload"]["request_id"]
+    )
+    assert flush_attempts == [1, 2]
+    assert thread_errors == []
+    assert any(
+        record.exc_info and isinstance(record.exc_info[1], OSError)
+        for record in caplog.records
+    )
+    assert not any(
+        thread.name.startswith(("tui-prompt-emit-", "tui-prompt-dismiss-"))
+        for thread in threading.enumerate()
+    )
+    assert not server._pending
+    assert not server._pending_prompt_payloads
+    assert not server._pending_prompt_emissions
+    assert not server._answers
+    assert sid not in server._plugin_invocations
 
 
 @pytest.mark.parametrize("method", ["slash.exec", "command.dispatch"])
