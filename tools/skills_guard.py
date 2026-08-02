@@ -701,7 +701,7 @@ def should_allow_install(result: ScanResult, force: bool = False) -> Tuple[bool,
     if decision == "allow":
         return True, f"Allowed ({result.trust_level} source, {result.verdict} verdict)"
 
-    if force and not (result.verdict == "dangerous" and result.trust_level in ("community", "trusted")):
+    if force:
         return True, (
             f"Force-installed despite {result.verdict} verdict "
             f"({len(result.findings)} findings)"
@@ -714,13 +714,6 @@ def should_allow_install(result: ScanResult, force: bool = False) -> Tuple[bool,
             f"{len(result.findings)} findings)"
         )
 
-    # Dangerous verdicts cannot be overridden by --force (community/trusted);
-    # other blocks can.
-    if result.verdict == "dangerous" and result.trust_level in ("community", "trusted"):
-        return False, (
-            f"Blocked ({result.trust_level} source + dangerous verdict, "
-            f"{len(result.findings)} findings). --force does not override a dangerous verdict."
-        )
     return False, (
         f"Blocked ({result.trust_level} source + {result.verdict} verdict, "
         f"{len(result.findings)} findings). Use --force to override."

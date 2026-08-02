@@ -158,25 +158,21 @@ class TestShouldAllowInstall:
         allowed, _ = should_allow_install(self._result("community", "dangerous", f), force=False)
         assert allowed is False
 
-    def test_force_does_not_override_dangerous_for_community(self):
+    def test_force_overrides_dangerous_for_community(self):
         f = [Finding("x", "critical", "c", "f", 1, "m", "d")]
         allowed, reason = should_allow_install(
             self._result("community", "dangerous", f), force=True
         )
-        assert allowed is False
-        assert "Blocked" in reason
-        # Error message MUST explain why --force didn't work, not invite a retry.
-        assert "does not override" in reason
-        assert "Use --force to override" not in reason
+        assert allowed is True
+        assert "Force-installed" in reason
 
-    def test_force_does_not_override_dangerous_for_trusted_message(self):
+    def test_force_overrides_dangerous_for_trusted(self):
         f = [Finding("x", "critical", "c", "f", 1, "m", "d")]
         allowed, reason = should_allow_install(
             self._result("trusted", "dangerous", f), force=True
         )
-        assert allowed is False
-        assert "does not override" in reason
-        assert "Use --force to override" not in reason
+        assert allowed is True
+        assert "Force-installed" in reason
 
     def test_non_dangerous_block_keeps_force_hint(self):
         # When --force CAN override the block, the error message must still
@@ -190,14 +186,6 @@ class TestShouldAllowInstall:
         )
         assert allowed is False
         assert "Use --force to override" in reason
-
-    def test_force_does_not_override_dangerous_for_trusted(self):
-        f = [Finding("x", "critical", "c", "f", 1, "m", "d")]
-        allowed, reason = should_allow_install(
-            self._result("trusted", "dangerous", f), force=True
-        )
-        assert allowed is False
-        assert "Blocked" in reason
 
     # -- agent-created policy --
 
