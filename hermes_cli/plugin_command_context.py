@@ -35,6 +35,8 @@ class PluginCommandContext:
     interactive: bool
     _request_secret: SecretRequest = field(default=_unavailable_secret, repr=False, compare=False)
     _redact: Callable[[Any], Any] = field(default=_identity, repr=False, compare=False)
+    _render: Callable[[Any], Any] = field(default=_identity, repr=False, compare=False)
+    _revoke: Callable[[], None] = field(default=lambda: None, repr=False, compare=False)
 
     def request_secret(self, prompt: str) -> str | None:
         """Request a one-shot secret without persisting or exposing its value."""
@@ -45,6 +47,14 @@ class PluginCommandContext:
     def redact(self, value: Any) -> Any:
         """Remove this invocation's secrets before a host boundary is crossed."""
         return self._redact(value)
+
+    def render(self, value: Any) -> Any:
+        """Return the legacy value unless a secret was requested, then safe text."""
+        return self._render(value)
+
+    def revoke(self) -> None:
+        """Disable secret requests once the host has finished this invocation."""
+        self._revoke()
 
 
 def create_plugin_command_context(
@@ -57,9 +67,12 @@ def create_plugin_command_context(
 ) -> PluginCommandContext:
     """Create an invocation-scoped context with a private secret redactor."""
     secrets: list[str] = []
+    active = True
     broker = request_secret or _unavailable_secret
 
     def request(prompt: str) -> str | None:
+        if not active:
+            return None
         value = broker(prompt)
         if value:
             secrets.append(value)
@@ -81,6 +94,16 @@ def create_plugin_command_context(
             return tuple(redact(item) for item in value)
         return value
 
+    def render(value: Any) -> Any:
+        # The established public ABI returns text/None. Preserve arbitrary
+        # legacy objects exactly until a secret is requested; after that every
+        # host boundary receives one redacted final string.
+        return value if not secrets else redact(str(value))
+
+    def revoke() -> None:
+        nonlocal active
+        active = False
+
     return PluginCommandContext(
         cwd=Path(cwd).expanduser().resolve(),
         session_id=str(session_id),
@@ -88,6 +111,8 @@ def create_plugin_command_context(
         interactive=bool(interactive),
         _request_secret=request,
         _redact=redact,
+        _render=render,
+        _revoke=revoke,
     )
 
 

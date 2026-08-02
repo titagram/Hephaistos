@@ -9736,7 +9736,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # Plugin-registered slash commands
         if command:
             try:
-                from hermes_cli.plugins import get_plugin_command_handler, invoke_plugin_command
+                from hermes_cli.plugins import get_plugin_command_handler, invoke_plugin_command_async
                 from hermes_cli.plugin_command_context import create_plugin_command_context
                 # Normalize underscores to hyphens so Telegram's underscored
                 # autocomplete form matches plugin commands registered with
@@ -9746,7 +9746,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 if plugin_handler:
                     user_args = event.get_command_args().strip()
                     session_entry = self.session_store.get_or_create_session(source)
-                    result = invoke_plugin_command(
+                    result = await invoke_plugin_command_async(
                         plugin_name,
                         user_args,
                         create_plugin_command_context(

@@ -781,6 +781,7 @@ export function useSessionActions({
         const resumePromise = requestGateway<SessionResumeResponse>('session.resume', {
           session_id: storedSessionId,
           cols: 96,
+          source: 'desktop',
           // Watch windows attach lazily (live mirror). Every other cold resume
           // gets the gateway's default deferred build: the RPC returns the
           // transcript immediately instead of blocking the switch on _make_agent

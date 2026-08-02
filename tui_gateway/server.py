@@ -181,6 +181,7 @@ _LONG_HANDLERS = frozenset(
         "billing.step_up",
         "browser.manage",
         "cli.exec",
+        "command.dispatch",
         # Completion RPCs run inline on the reader thread by default, but both
         # can block it for seconds: complete.path spawns `git ls-files` and
         # fuzzy-ranks the whole repo (slow on large repos / WSL2 mounts), and
@@ -630,6 +631,7 @@ def _close_session_by_id(sid: str, *, end_reason: str = "tui_close") -> bool:
         session = _sessions.pop(sid, None)
     if session is None:
         return False
+    _clear_pending(sid)
     _teardown_session(session, end_reason=end_reason)
     return True
 
@@ -5229,7 +5231,10 @@ def _claim_or_reuse_live(
         if live is not None:
             if lease is not None:
                 lease.release()
-            return live
+            live_sid, live_session = live
+            live_session["source"] = record.get("source") or live_session.get("source")
+            live_session["transport"] = current_transport() or _stdio_transport
+            return live_sid, live_session
         with _sessions_lock:
             _sessions[sid] = record
             _register_session_cwd(_sessions[sid])
@@ -5321,6 +5326,9 @@ def _(rid, params: dict) -> dict:
     )
 
     def _reuse_live_payload(sid: str, session: dict) -> dict:
+        source = str(params.get("source") or "").strip()
+        if source:
+            session["source"] = source
         payload = _live_session_payload(
             sid,
             session,
@@ -9705,7 +9713,19 @@ def _(rid, params: dict) -> dict:
 
 @method("secret.respond")
 def _(rid, params: dict) -> dict:
-    return _respond(rid, params, "value")
+    request_id = params.get("request_id", "")
+    responder_sid = params.get("session_id")
+    if not request_id or not isinstance(responder_sid, str) or not responder_sid:
+        return _err(rid, 4009, "no pending secret request")
+    with _prompt_lock:
+        entry = _pending.get(request_id)
+        if not entry or entry[0] != responder_sid:
+            return _err(rid, 4009, "no pending secret request")
+        _pending.pop(request_id, None)
+        _pending_prompt_payloads.pop(request_id, None)
+        _answers[request_id] = params.get("value", "")
+        entry[1].set()
+    return _ok(rid, {"status": "ok"})
 
 
 @method("approval.respond")
@@ -11482,6 +11502,8 @@ def _(rid, params: dict) -> dict:
 
         handler = get_plugin_command_handler(name)
         if handler:
+            if session is None:
+                return _err(rid, 4001, "session not found")
             from hermes_cli.plugin_command_context import create_plugin_command_context
 
             result = invoke_plugin_command(

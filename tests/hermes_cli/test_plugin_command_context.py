@@ -23,6 +23,8 @@ from hermes_cli.plugins import (
     PluginManager,
     PluginManifest,
     invoke_plugin_command,
+    invoke_plugin_command_async,
+    PluginCommandError,
 )
 
 
@@ -112,7 +114,7 @@ def test_secret_values_are_redacted_from_handler_output(monkeypatch, tmp_path):
     monkeypatch.setattr("hermes_cli.plugins._plugin_manager", manager)
 
     result = invoke_plugin_command("context-test", "", _context(tmp_path, secret=lambda _prompt: "s3cr3t"))
-    assert result == {"token": "[secret]"}
+    assert result == "{'token': '[secret]'}"
 
 
 def test_tui_and_desktop_dispatch_keep_context_and_secrets_per_session(monkeypatch, server, tmp_path):
@@ -209,3 +211,81 @@ def test_tui_secret_response_is_owned_by_its_session(server):
     assert right["result"] == {"status": "ok"}
     worker.join(timeout=1)
     assert values == ["right"]
+
+
+@pytest.mark.parametrize("params", [
+    {"request_id": "RID", "value": "wrong"},
+    {"request_id": "RID", "session_id": "", "value": "wrong"},
+    {"request_id": "RID", "session_id": "session-b", "value": "wrong"},
+])
+def test_secret_response_requires_nonempty_exact_owner(server, params):
+    """A missing, empty, or foreign sid must not consume another session's secret."""
+    event = threading.Event()
+    with server._prompt_lock:
+        server._pending["RID"] = ("session-a", event)
+        server._pending_prompt_payloads["RID"] = ("secret.request", {})
+    response = server.handle_request({"id": "reply", "method": "secret.respond", "params": params})
+    assert response["error"]["code"] == 4009
+    assert not event.is_set()
+    assert "RID" in server._pending
+
+
+def test_secret_response_consumes_request_once(server):
+    """The first valid response wins; a duplicate cannot overwrite its answer."""
+    event = threading.Event()
+    with server._prompt_lock:
+        server._pending["RID"] = ("session-a", event)
+        server._pending_prompt_payloads["RID"] = ("secret.request", {})
+    valid = {"request_id": "RID", "session_id": "session-a", "value": "first"}
+    assert server.handle_request({"id": "one", "method": "secret.respond", "params": valid})["result"] == {"status": "ok"}
+    duplicate = {**valid, "value": "second"}
+    assert server.handle_request({"id": "two", "method": "secret.respond", "params": duplicate})["error"]["code"] == 4009
+    assert server._answers["RID"] == "first"
+
+
+@pytest.mark.asyncio
+async def test_async_invocation_awaits_and_redacts_final_custom_rendering(monkeypatch, tmp_path):
+    """Async hosts must await without helper-thread blocking and redact final text."""
+    class Rendered:
+        def __str__(self):
+            return "set={'async-secret'} bytes=b'async-secret'"
+
+    async def handler(_raw, context):
+        context.request_secret("Token")
+        await __import__("asyncio").sleep(0)
+        return Rendered()
+
+    manager = _registered_manager(handler)
+    monkeypatch.setattr("hermes_cli.plugins._plugin_manager", manager)
+    result = await invoke_plugin_command_async(
+        "context-test", "", _context(tmp_path, secret=lambda _prompt: "async-secret")
+    )
+    assert result == "set={'[secret]'} bytes=b'[secret]'"
+
+
+def test_secret_redacted_exception_uses_host_error(monkeypatch, tmp_path):
+    """Secret-bearing custom exception constructors are never reconstructed."""
+    class PluginFailure(Exception):
+        def __init__(self, code, message):
+            self.code = code
+            self.message = message
+        def __str__(self):
+            return self.message
+
+    def handler(_raw, context):
+        context.request_secret("Token")
+        raise PluginFailure(42, "secret-error")
+
+    manager = _registered_manager(handler)
+    monkeypatch.setattr("hermes_cli.plugins._plugin_manager", manager)
+    with pytest.raises(PluginCommandError, match=r"\[secret\]"):
+        invoke_plugin_command("context-test", "", _context(tmp_path, secret=lambda _prompt: "secret-error"))
+
+
+def test_context_secret_capability_is_revoked_when_invocation_returns(monkeypatch, tmp_path):
+    """A retained context cannot open a late secret prompt after its command ends."""
+    retained = []
+    manager = _registered_manager(lambda _raw, context: retained.append(context) or "done")
+    monkeypatch.setattr("hermes_cli.plugins._plugin_manager", manager)
+    assert invoke_plugin_command("context-test", "", _context(tmp_path, secret=lambda _prompt: "late")) == "done"
+    assert retained[0].request_secret("too late") is None

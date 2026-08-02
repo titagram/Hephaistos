@@ -1667,6 +1667,7 @@ def test_command_dispatch_awaits_async_plugin_handler(server):
     async def _handler(arg):
         return f"async:{arg}"
 
+    server._sessions["async-session"] = {"session_key": "async", "cwd": "/tmp", "source": "tui"}
     with patch(
         "hermes_cli.plugins.get_plugin_command_handler",
         lambda name: _handler if name == "async-cmd" else None,
@@ -1677,7 +1678,7 @@ def test_command_dispatch_awaits_async_plugin_handler(server):
         resp = server.handle_request({
             "id": "r-plugin",
             "method": "command.dispatch",
-            "params": {"name": "async-cmd", "arg": "hello"},
+            "params": {"name": "async-cmd", "arg": "hello", "session_id": "async-session"},
         })
 
     assert "error" not in resp

@@ -166,7 +166,11 @@ export function useInputHandlers(ctx: InputHandlerContext): InputHandlerResult {
 
     if (overlay.secret) {
       return gateway
-        .rpc<SecretRespondResponse>('secret.respond', { request_id: overlay.secret.requestId, value: '' })
+        .rpc<SecretRespondResponse>('secret.respond', {
+          request_id: overlay.secret.requestId,
+          session_id: overlay.secret.sessionId ?? '',
+          value: ''
+        })
         .then(r => r && (patchOverlayState({ secret: null }), actions.sys('secret entry cancelled')))
     }
 

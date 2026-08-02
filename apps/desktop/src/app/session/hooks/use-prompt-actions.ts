@@ -782,7 +782,8 @@ export function usePromptActions({
           if (isSessionNotFoundError(firstErr) && selectedStoredSessionIdRef.current) {
             // Re-register the session in the gateway and get a fresh live ID.
             const resumed = await requestGateway<{ session_id: string }>('session.resume', {
-              session_id: selectedStoredSessionIdRef.current
+              session_id: selectedStoredSessionIdRef.current,
+              source: 'desktop'
             })
 
             const recoveredId = resumed?.session_id
@@ -1568,7 +1569,8 @@ export function usePromptActions({
       if (isSessionNotFoundError(err) && selectedStoredSessionIdRef.current) {
         try {
           const resumed = await requestGateway<{ session_id: string }>('session.resume', {
-            session_id: selectedStoredSessionIdRef.current
+            session_id: selectedStoredSessionIdRef.current,
+            source: 'desktop'
           })
 
           const recoveredId = resumed?.session_id

@@ -939,7 +939,7 @@ export function useMainApp(gw: GatewayClient) {
         return
       }
 
-      return respondWith('secret.respond', { request_id: overlay.secret.requestId, session_id: ui.sid ?? '', value }, () => {
+      return respondWith('secret.respond', { request_id: overlay.secret.requestId, session_id: overlay.secret.sessionId, value }, () => {
         patchOverlayState({ secret: null })
         patchUiState({ status: 'running…' })
       })

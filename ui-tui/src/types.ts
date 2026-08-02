@@ -206,6 +206,7 @@ export interface SecretReq {
   envVar: string
   prompt: string
   requestId: string
+  sessionId?: string
 }
 
 export interface PanelData {

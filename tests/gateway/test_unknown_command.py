@@ -366,7 +366,7 @@ async def test_command_hook_rewrite_routes_to_plugin(monkeypatch):
     )
     received_context = {}
 
-    def invoke(name, args, context):
+    async def invoke(name, args, context):
         received_context.update({
             "name": name,
             "args": args,
@@ -376,7 +376,7 @@ async def test_command_hook_rewrite_routes_to_plugin(monkeypatch):
         })
         return f"metrics {args}"
 
-    monkeypatch.setattr(_plugins_mod, "invoke_plugin_command", invoke)
+    monkeypatch.setattr(_plugins_mod, "invoke_plugin_command_async", invoke)
 
     result = await runner._handle_message(_make_event("/status"))
 

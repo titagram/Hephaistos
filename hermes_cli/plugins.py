@@ -473,8 +473,15 @@ class PluginContext:
     ) -> None:
         """Register a slash command (e.g. ``/lcm``) available in CLI and gateway sessions.
 
-        The handler signature is ``fn(raw_args: str) -> str | None``.
-        It may also be an async callable — the gateway dispatch handles both.
+        The legacy handler signature is ``fn(raw_args: str) -> str | None``.
+        Context-aware handlers may use
+        ``fn(raw_args: str, context: PluginCommandContext) -> str | None``.
+        ``context`` is immutable and invocation-scoped: it carries the resolved
+        cwd, session ID, current surface, and interactive flag. Its
+        ``request_secret(prompt)`` capability is available only while the
+        handler runs and returns a one-shot, non-persisted value (or ``None``).
+        Handlers may also be async; async hosts await them without blocking
+        their event loop.
 
         Unlike ``register_cli_command()`` (which creates ``hermes <subcommand>``
         terminal commands), this registers in-session slash commands that users
@@ -2100,17 +2107,39 @@ def invoke_plugin_command(name: str, raw_args: str, context) -> Any:
         return None
     handler = entry["handler"]
     try:
-        result = (
-            handler(raw_args, context)
-            if entry.get("accepts_context", False)
-            else handler(raw_args)
-        )
-        return context.redact(resolve_plugin_command_result(result))
+        result = handler(raw_args, context) if entry.get("accepts_context", False) else handler(raw_args)
+        return context.render(resolve_plugin_command_result(result))
     except BaseException as exc:
         message = context.redact(str(exc))
         if message != str(exc):
-            raise type(exc)(message) from None
+            raise PluginCommandError(message) from None
         raise
+    finally:
+        context.revoke()
+
+
+class PluginCommandError(RuntimeError):
+    """Host-owned, secret-safe command error."""
+
+
+async def invoke_plugin_command_async(name: str, raw_args: str, context) -> Any:
+    """Async host dispatch without blocking the current event loop."""
+    entry = _ensure_plugins_discovered()._plugin_commands.get(name)
+    if not entry:
+        return None
+    handler = entry["handler"]
+    try:
+        result = handler(raw_args, context) if entry.get("accepts_context", False) else handler(raw_args)
+        if inspect.isawaitable(result):
+            result = await result
+        return context.render(result)
+    except BaseException as exc:
+        message = context.redact(str(exc))
+        if message != str(exc):
+            raise PluginCommandError(message) from None
+        raise
+    finally:
+        context.revoke()
 
 
 _PLUGIN_COMMAND_AWAIT_TIMEOUT_SECS = 30.0
