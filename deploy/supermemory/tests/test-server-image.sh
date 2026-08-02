@@ -8,7 +8,10 @@ cleanup() { docker rm -f "$container" >/dev/null 2>&1 || true; docker volume rm 
 trap cleanup EXIT
 cleanup
 
-docker build -f deploy/supermemory/server.Dockerfile -t "$image" .
+grep -Fx 'ARG SUPERMEMORY_PLATFORM=linux/amd64' deploy/supermemory/server.Dockerfile
+test "$(grep -Fc 'FROM --platform=$SUPERMEMORY_PLATFORM node:22-bookworm-slim@sha256:7af03b14a13c8cdd38e45058fd957bf00a72bbe17feac43b1c15a689c029c732' deploy/supermemory/server.Dockerfile)" = "2"
+docker build --platform linux/amd64 -f deploy/supermemory/server.Dockerfile -t "$image" .
+test "$(docker image inspect -f '{{.Os}}/{{.Architecture}}' "$image")" = "linux/amd64"
 docker volume create "$volume" >/dev/null
 docker run -d --name "$container" -p 127.0.0.1:16767:6767 \
   -e SUPERMEMORY_DATA_DIR=/var/lib/supermemory \

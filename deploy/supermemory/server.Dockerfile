@@ -1,4 +1,6 @@
-FROM node:22-bookworm-slim@sha256:7af03b14a13c8cdd38e45058fd957bf00a72bbe17feac43b1c15a689c029c732 AS download
+ARG SUPERMEMORY_PLATFORM=linux/amd64
+
+FROM --platform=$SUPERMEMORY_PLATFORM node:22-bookworm-slim@sha256:7af03b14a13c8cdd38e45058fd957bf00a72bbe17feac43b1c15a689c029c732 AS download
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \
@@ -7,7 +9,7 @@ RUN curl -fsSL https://github.com/supermemoryai/supermemory/releases/download/se
       -o /tmp/supermemory-server \
     && echo 'bb1b7cee393818236873b8e2518a435e10d9195e27ea5608a3af48a733ef8ee8  /tmp/supermemory-server' | sha256sum -c -
 
-FROM node:22-bookworm-slim@sha256:7af03b14a13c8cdd38e45058fd957bf00a72bbe17feac43b1c15a689c029c732
+FROM --platform=$SUPERMEMORY_PLATFORM node:22-bookworm-slim@sha256:7af03b14a13c8cdd38e45058fd957bf00a72bbe17feac43b1c15a689c029c732
 
 COPY --from=download --chmod=0755 /tmp/supermemory-server /usr/local/bin/supermemory-server
 
