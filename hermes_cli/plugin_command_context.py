@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 import queue
+import threading
 import time
 from typing import Any, Callable
 
@@ -25,6 +26,38 @@ def _identity(value: Any) -> Any:
     return value
 
 
+class PluginCommandInvocation:
+    """Thread-safe cooperative lifecycle handle for one command invocation."""
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._active = True
+        self._task = None
+        self._loop = None
+        self.done = threading.Event()
+
+    @property
+    def cancelled(self) -> bool:
+        with self._lock:
+            return not self._active
+
+    def bind_task(self, task, loop) -> None:
+        with self._lock:
+            self._task, self._loop = task, loop
+            cancelled = not self._active
+        if cancelled:
+            loop.call_soon_threadsafe(task.cancel)
+
+    def cancel(self) -> None:
+        with self._lock:
+            self._active = False
+            task, loop = self._task, self._loop
+        if task is not None and loop is not None:
+            loop.call_soon_threadsafe(task.cancel)
+
+    def finish(self) -> None:
+        self.done.set()
+
+
 @dataclass(frozen=True, slots=True)
 class PluginCommandContext:
     """Immutable metadata and safe interactive capabilities for one invocation."""
@@ -37,6 +70,7 @@ class PluginCommandContext:
     _redact: Callable[[Any], Any] = field(default=_identity, repr=False, compare=False)
     _render: Callable[[Any], Any] = field(default=_identity, repr=False, compare=False)
     _revoke: Callable[[], None] = field(default=lambda: None, repr=False, compare=False)
+    invocation: PluginCommandInvocation = field(default_factory=PluginCommandInvocation, repr=False, compare=False)
 
     def request_secret(self, prompt: str) -> str | None:
         """Request a one-shot secret without persisting or exposing its value."""
@@ -55,6 +89,7 @@ class PluginCommandContext:
     def revoke(self) -> None:
         """Disable secret requests once the host has finished this invocation."""
         self._revoke()
+        self.invocation.cancel()
 
 
 def create_plugin_command_context(
@@ -67,16 +102,16 @@ def create_plugin_command_context(
 ) -> PluginCommandContext:
     """Create an invocation-scoped context with a private secret redactor."""
     secrets: list[str] = []
-    active = True
+    handle = PluginCommandInvocation()
     broker = request_secret or _unavailable_secret
 
     def request(prompt: str) -> str | None:
-        if not active:
+        if handle.cancelled:
             return None
         value = broker(prompt)
         # A concurrent close/interrupt may revoke the context while the broker
         # is blocked. Never publish that late response to the handler.
-        if not active:
+        if handle.cancelled:
             return None
         if value:
             secrets.append(value)
@@ -105,8 +140,7 @@ def create_plugin_command_context(
         return value if not secrets else redact(str(value))
 
     def revoke() -> None:
-        nonlocal active
-        active = False
+        handle.cancel()
 
     return PluginCommandContext(
         cwd=Path(cwd).expanduser().resolve(),
@@ -117,6 +151,7 @@ def create_plugin_command_context(
         _redact=redact,
         _render=render,
         _revoke=revoke,
+        invocation=handle,
     )
 
 

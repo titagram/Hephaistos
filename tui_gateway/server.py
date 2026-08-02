@@ -1888,10 +1888,12 @@ def _enable_gateway_prompts() -> None:
 # ── Blocking prompt factory ──────────────────────────────────────────
 
 
-def _block(event: str, sid: str, payload: dict, timeout: int = 300) -> str:
+def _block(event: str, sid: str, payload: dict, timeout: int = 300, guard=None) -> str:
     rid = uuid.uuid4().hex[:8]
     ev = threading.Event()
     with _prompt_lock:
+        if guard is not None and guard.cancelled:
+            return ""
         _pending[rid] = (sid, ev)
         payload["request_id"] = rid
         _pending_prompt_payloads[rid] = (event, dict(payload))
@@ -11546,6 +11548,7 @@ def _(rid, params: dict) -> dict:
                         params.get("session_id", ""),
                         {"prompt": prompt, "env_var": "PLUGIN_SECRET"},
                         timeout=120,
+                        guard=context.invocation,
                     ),
             )
             sid = params.get("session_id", "")
@@ -12837,6 +12840,7 @@ def _(rid, params: dict) -> dict:
                         params.get("session_id", ""),
                         {"prompt": prompt, "env_var": "PLUGIN_SECRET"},
                         timeout=120,
+                        guard=context.invocation,
                     ),
             )
             sid = params.get("session_id", "")

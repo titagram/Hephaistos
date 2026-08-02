@@ -2108,7 +2108,10 @@ def invoke_plugin_command(name: str, raw_args: str, context) -> Any:
     handler = entry["handler"]
     try:
         result = handler(raw_args, context) if entry.get("accepts_context", False) else handler(raw_args)
-        return context.render(resolve_plugin_command_result(result))
+        result = resolve_plugin_command_result(result)
+        if context.invocation.cancelled:
+            raise PluginCommandError("plugin command cancelled")
+        return context.render(result)
     except BaseException as exc:
         message = context.redact(str(exc))
         if message != str(exc):
@@ -2116,6 +2119,7 @@ def invoke_plugin_command(name: str, raw_args: str, context) -> Any:
         raise
     finally:
         context.revoke()
+        context.invocation.finish()
 
 
 class PluginCommandError(RuntimeError):
@@ -2132,6 +2136,7 @@ async def invoke_plugin_command_async(name: str, raw_args: str, context) -> Any:
         result = handler(raw_args, context) if entry.get("accepts_context", False) else handler(raw_args)
         if inspect.isawaitable(result):
             task = asyncio.create_task(result)
+            context.invocation.bind_task(task, asyncio.get_running_loop())
             try:
                 result = await asyncio.wait_for(task, timeout=_PLUGIN_COMMAND_AWAIT_TIMEOUT_SECS)
             except BaseException:
@@ -2142,6 +2147,8 @@ async def invoke_plugin_command_async(name: str, raw_args: str, context) -> Any:
                     except BaseException:
                         pass
                 raise
+        if context.invocation.cancelled:
+            raise PluginCommandError("plugin command cancelled")
         return context.render(result)
     except BaseException as exc:
         message = context.redact(str(exc))
@@ -2150,6 +2157,7 @@ async def invoke_plugin_command_async(name: str, raw_args: str, context) -> Any:
         raise
     finally:
         context.revoke()
+        context.invocation.finish()
 
 
 _PLUGIN_COMMAND_AWAIT_TIMEOUT_SECS = 120.0

@@ -289,3 +289,19 @@ def test_context_secret_capability_is_revoked_when_invocation_returns(monkeypatc
     monkeypatch.setattr("hermes_cli.plugins._plugin_manager", manager)
     assert invoke_plugin_command("context-test", "", _context(tmp_path, secret=lambda _prompt: "late")) == "done"
     assert retained[0].request_secret("too late") is None
+
+
+def test_cancelled_handle_blocks_late_broker_result(tmp_path):
+    """A lifecycle cancellation that races a broker cannot publish its value."""
+    started = threading.Event()
+    release = threading.Event()
+    context = _context(tmp_path, secret=lambda _prompt: (started.set(), release.wait(1), "late")[2])
+    result = []
+    worker = threading.Thread(target=lambda: result.append(context.request_secret("Token")))
+    worker.start()
+    assert started.wait(1)
+    context.revoke()
+    release.set()
+    worker.join(1)
+    assert result == [None]
+    assert context.invocation.done.is_set() is False
