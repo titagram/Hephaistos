@@ -7,7 +7,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "tsx --test tests/*.test.ts",
-    "start": "node dist/index.js"
+    "start": "node dist/src/index.js"
   },
   "dependencies": { "@openai/codex": "0.146.0" },
   "devDependencies": {

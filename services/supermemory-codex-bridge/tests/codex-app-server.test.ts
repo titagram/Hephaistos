@@ -311,6 +311,38 @@ test("starts one dedicated app-server and uses a fresh ephemeral thread for ever
   await server.close();
 });
 
+test("concurrent start and run share one app-server initialization", async () => {
+  const { server, processes, calls } = createHarness();
+  const controller = new AbortController();
+  const starting = server.start();
+  const invocation = { prompt: "Run while initialization is pending." };
+  const result = server.run(invocation, controller.signal);
+
+  assert.equal(processes.length, 1);
+  assert.equal(calls.length, 1);
+  const peer = new FakeRpcPeer(processes[0]!);
+  await initialize(peer);
+  await starting;
+  await acceptRun(peer, "thread-start", "turn-start", invocation);
+  completeRun(peer, "thread-start", "turn-start", "shared initialization");
+
+  assert.equal((await result).text, "shared initialization");
+  assert.equal(processes.length, 1);
+  await server.close();
+});
+
+test("start surfaces sanitized initialization failures", async () => {
+  const { server, processes } = createHarness();
+  const starting = server.start();
+  const peer = new FakeRpcPeer(processes[0]!);
+  const initializeRequest = await peer.next();
+  peer.respondError(initializeRequest.id!, -32000, "initialization secret must stay private");
+
+  const error = await expectKind(starting, "unavailable");
+  assert.doesNotMatch(error.message, /secret|initialization/i);
+  await server.close();
+});
+
 for (const itemType of ["commandExecution", "fileChange", "mcpToolCall", "collabToolCall", "webSearch"]) {
   test(`interrupts and rejects a ${itemType} event`, async () => {
     const { server, processes } = createHarness();

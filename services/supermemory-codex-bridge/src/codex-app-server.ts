@@ -22,7 +22,9 @@ export class CodexUpstreamError extends Error {
 }
 
 export interface CodexRunner {
-  run(invocation: CodexInvocation, signal?: AbortSignal): Promise<CodexResult>;
+  start(): Promise<void>;
+  run(invocation: CodexInvocation, signal: AbortSignal): Promise<CodexResult>;
+  close(): Promise<void>;
 }
 
 export interface CodexProcess {
@@ -152,7 +154,11 @@ export class CodexAppServer implements CodexRunner {
     this.environment = options.environment ?? process.env;
   }
 
-  async run(invocation: CodexInvocation, signal?: AbortSignal): Promise<CodexResult> {
+  async start(): Promise<void> {
+    await this.startedClient();
+  }
+
+  async run(invocation: CodexInvocation, signal: AbortSignal): Promise<CodexResult> {
     if (this.closed) {
       throw new CodexUpstreamError("unavailable");
     }
