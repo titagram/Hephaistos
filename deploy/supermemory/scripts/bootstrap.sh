@@ -14,10 +14,12 @@ escaped_basic_auth_entry=''
 bridge_api_key=''
 supermemory_logs=''
 supermemory_api_key=''
+RUNTIME_STATE=''
 
 cleanup() {
   unset basic_auth_password basic_auth_entry escaped_basic_auth_entry
   unset bridge_api_key supermemory_logs supermemory_api_key
+  unset RUNTIME_STATE
   if [[ -n "$RUNTIME_TEMP" && -e "$RUNTIME_TEMP" ]]; then
     rm -f -- "$RUNTIME_TEMP"
   fi
@@ -75,17 +77,31 @@ compose() {
   docker compose --env-file "$ENV_FILE" -f "$DEPLOY_DIR/compose.yaml" "$@"
 }
 
-codex_status_is_authenticated() {
+codex_is_authenticated() {
   local status_output=''
   if ! status_output="$(compose run --rm --entrypoint codex codex-bridge login status 2>&1)"; then
     unset status_output
-    die 'Codex login status failed for the dedicated codex_home volume'
+    return 1
   fi
   if [[ "${status_output,,}" != *'logged in using chatgpt'* ]]; then
     unset status_output
-    die 'the dedicated codex_home volume is not authenticated'
+    return 1
   fi
   unset status_output
+  return 0
+}
+
+require_codex_authentication() {
+  codex_is_authenticated || die 'the dedicated codex_home volume is not authenticated'
+}
+
+authenticate_codex_if_needed() {
+  if codex_is_authenticated; then
+    return 0
+  fi
+  printf '%s\n' 'Authenticate the dedicated Codex volume using device authentication.'
+  compose run --rm --entrypoint codex codex-bridge login --device-auth
+  require_codex_authentication
 }
 
 wait_for_health() {
@@ -126,48 +142,90 @@ verify_basic_auth_label() {
     die 'the rendered Traefik BasicAuth label does not contain the intended bcrypt entry'
 }
 
+load_runtime_state() {
+  local runtime_line='' api_key='' escaped_entry='' existing_bridge_key=''
+  local api_count=0 basic_count=0 bridge_count=0
+  while IFS= read -r runtime_line || [[ -n "$runtime_line" ]]; do
+    case "$runtime_line" in
+      SUPERMEMORY_API_KEY=*)
+        api_key="${runtime_line#SUPERMEMORY_API_KEY=}"
+        api_count=$((api_count + 1))
+        ;;
+      SUPERMEMORY_BASIC_AUTH_USERS=*)
+        escaped_entry="${runtime_line#SUPERMEMORY_BASIC_AUTH_USERS=}"
+        basic_count=$((basic_count + 1))
+        ;;
+      SUPERMEMORY_BRIDGE_API_KEY=*)
+        existing_bridge_key="${runtime_line#SUPERMEMORY_BRIDGE_API_KEY=}"
+        bridge_count=$((bridge_count + 1))
+        ;;
+    esac
+  done <"$ENV_FILE"
+
+  [[ "$api_count" == 1 ]] || die "$ENV_FILE_NAME must contain exactly one SUPERMEMORY_API_KEY line"
+  [[ "$basic_count" == 1 ]] || die "$ENV_FILE_NAME must contain exactly one SUPERMEMORY_BASIC_AUTH_USERS line"
+  [[ "$bridge_count" == 1 ]] || die "$ENV_FILE_NAME must contain exactly one SUPERMEMORY_BRIDGE_API_KEY line"
+  [[ "$escaped_entry" =~ ^titagram:\$\$2[aby]\$\$[0-9]{2}\$\$[./A-Za-z0-9]{53}$ ]] || \
+    die "$ENV_FILE_NAME does not contain a valid Compose-escaped bcrypt entry"
+  [[ "$existing_bridge_key" =~ ^[0-9a-f]{64}$ ]] || \
+    die "$ENV_FILE_NAME does not contain a valid bridge key"
+
+  if [[ "$api_key" == sm_bootstrap_pending ]]; then
+    RUNTIME_STATE=pending
+  elif [[ "$api_key" =~ ^sm_[A-Za-z0-9_-]+$ ]]; then
+    RUNTIME_STATE=complete
+  else
+    die "$ENV_FILE_NAME does not contain a valid Supermemory API key state"
+  fi
+}
+
 if [[ "$resume" == true ]]; then
-  codex_status_is_authenticated
-  compose up -d --build
-  verify_basic_auth_label
-  printf 'Resume complete. Run: %s --local\n' "$DEPLOY_DIR/scripts/smoke.sh"
-  exit 0
+  load_runtime_state
+  if [[ "$RUNTIME_STATE" == complete ]]; then
+    require_codex_authentication
+    compose up -d --build
+    verify_basic_auth_label
+    printf 'Resume complete. Run: %s --local\n' "$DEPLOY_DIR/scripts/smoke.sh"
+    exit 0
+  fi
 fi
 
-command -v openssl >/dev/null 2>&1 || die 'openssl is required'
+if [[ "$RUNTIME_STATE" != pending ]]; then
+  command -v openssl >/dev/null 2>&1 || die 'openssl is required'
 
-IFS= read -r -s -p 'Choose the BasicAuth password for titagram: ' basic_auth_password
-printf '\n'
-[[ -n "$basic_auth_password" ]] || die 'BasicAuth password must not be empty'
-if ! basic_auth_entry="$(
-  printf '%s\n' "$basic_auth_password" |
-    docker run --rm -i httpd:2.4-alpine htpasswd -niB titagram
-)"; then
+  IFS= read -r -s -p 'Choose the BasicAuth password for titagram: ' basic_auth_password
+  printf '\n'
+  [[ -n "$basic_auth_password" ]] || die 'BasicAuth password must not be empty'
+  if ! basic_auth_entry="$(
+    printf '%s\n' "$basic_auth_password" |
+      docker run --rm -i httpd:2.4-alpine htpasswd -niB titagram
+  )"; then
+    unset basic_auth_password
+    die 'failed to generate the BasicAuth bcrypt entry'
+  fi
   unset basic_auth_password
-  die 'failed to generate the BasicAuth bcrypt entry'
+  [[ "$basic_auth_entry" =~ ^titagram:\$2[aby]\$[0-9]{2}\$[./A-Za-z0-9]{53}$ ]] || \
+    die 'htpasswd returned an invalid bcrypt entry'
+  escaped_basic_auth_entry="${basic_auth_entry//\$/\$\$}"
+  unset basic_auth_entry
+
+  bridge_api_key="$(openssl rand -hex 32)"
+  [[ "$bridge_api_key" =~ ^[0-9a-f]{64}$ ]] || die 'openssl returned an invalid bridge key'
+
+  umask 077
+  RUNTIME_TEMP="$(mktemp "$DEPLOY_DIR/.env.runtime.tmp.XXXXXX")"
+  chmod 600 "$RUNTIME_TEMP"
+  {
+    printf '%s\n' 'CODEX_MODEL=gpt-5.3-codex'
+    printf 'SUPERMEMORY_BASIC_AUTH_USERS=%s\n' "$escaped_basic_auth_entry"
+    printf '%s\n' 'SUPERMEMORY_API_KEY=sm_bootstrap_pending'
+    printf 'SUPERMEMORY_BRIDGE_API_KEY=%s\n' "$bridge_api_key"
+  } >"$RUNTIME_TEMP"
+  chmod 600 "$RUNTIME_TEMP"
+  mv -f -- "$RUNTIME_TEMP" "$ENV_FILE"
+  RUNTIME_TEMP=''
+  unset escaped_basic_auth_entry bridge_api_key
 fi
-unset basic_auth_password
-[[ "$basic_auth_entry" =~ ^titagram:\$2[aby]\$[0-9]{2}\$[./A-Za-z0-9]{53}$ ]] || \
-  die 'htpasswd returned an invalid bcrypt entry'
-escaped_basic_auth_entry="${basic_auth_entry//\$/\$\$}"
-unset basic_auth_entry
-
-bridge_api_key="$(openssl rand -hex 32)"
-[[ "$bridge_api_key" =~ ^[0-9a-f]{64}$ ]] || die 'openssl returned an invalid bridge key'
-
-umask 077
-RUNTIME_TEMP="$(mktemp "$DEPLOY_DIR/.env.runtime.tmp.XXXXXX")"
-chmod 600 "$RUNTIME_TEMP"
-{
-  printf '%s\n' 'CODEX_MODEL=gpt-5.3-codex'
-  printf 'SUPERMEMORY_BASIC_AUTH_USERS=%s\n' "$escaped_basic_auth_entry"
-  printf '%s\n' 'SUPERMEMORY_API_KEY=sm_bootstrap_pending'
-  printf 'SUPERMEMORY_BRIDGE_API_KEY=%s\n' "$bridge_api_key"
-} >"$RUNTIME_TEMP"
-chmod 600 "$RUNTIME_TEMP"
-mv -f -- "$RUNTIME_TEMP" "$ENV_FILE"
-RUNTIME_TEMP=''
-unset escaped_basic_auth_entry bridge_api_key
 
 printf '%s\n' 'Running image and Compose configuration tests...'
 (
@@ -179,13 +237,19 @@ printf '%s\n' 'Running image and Compose configuration tests...'
 printf '%s\n' 'Building deployment images...'
 compose build codex-bridge supermemory-server
 
-printf '%s\n' 'Authenticate the dedicated Codex volume using device authentication.'
-compose run --rm --entrypoint codex codex-bridge login --device-auth
-codex_status_is_authenticated
-
-compose up -d codex-bridge
+if [[ "$RUNTIME_STATE" == pending ]]; then
+  authenticate_codex_if_needed
+  compose up -d --build
+else
+  printf '%s\n' 'Authenticate the dedicated Codex volume using device authentication.'
+  compose run --rm --entrypoint codex codex-bridge login --device-auth
+  require_codex_authentication
+  compose up -d codex-bridge
+fi
 wait_for_health codex-bridge
-compose up -d supermemory-server
+if [[ "$RUNTIME_STATE" != pending ]]; then
+  compose up -d supermemory-server
+fi
 
 key_count=0
 for attempt in {1..60}; do
