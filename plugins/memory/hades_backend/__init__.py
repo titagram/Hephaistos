@@ -7,7 +7,6 @@ import json
 import math
 import os
 import re
-import time
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -15,11 +14,10 @@ from agent.memory_provider import MemoryProvider
 from hermes_cli import hades_backend_db as db
 from hermes_cli import hades_backend_runtime as runtime
 from hermes_cli.hades_backend_client import redact_secret
-from hermes_cli.hades_backend_sync import _graph_v2_active_cache_key, run_backend_sync
+from hermes_cli.hades_backend_sync import _graph_v2_active_cache_key
 from tools.registry import tool_error, tool_result
 
 
-PIGGYBACK_SYNC_INTERVAL_SECONDS = 60
 LIVE_SEARCH_TIMEOUT_SECONDS = 0.75
 DOCUMENT_PREFETCH_TIMEOUT_SECONDS = 2.0
 SOURCE_SLICE_FETCH_TIMEOUT_SECONDS = 1.25
@@ -652,7 +650,6 @@ RESOLVED_BUG_PROMOTE_TOOL_SCHEMA: Dict[str, Any] = {
 class HadesBackendMemoryProvider(MemoryProvider):
     def __init__(self) -> None:
         self._binding: db.WorkspaceBinding | None = None
-        self._last_sync_at: float | None = None
 
     @property
     def name(self) -> str:
@@ -757,32 +754,6 @@ class HadesBackendMemoryProvider(MemoryProvider):
         with db.connect_closing() as conn:
             cache = db.get_memory_cache(conn, self._binding.backend_workspace_binding_id)
         return cache
-
-    def sync_turn(
-        self,
-        user_content: str,
-        assistant_content: str,
-        *,
-        session_id: str = "",
-        messages: List[Dict[str, Any]] | None = None,
-    ) -> None:
-        self._binding = self._current_owned_binding(Path(os.getcwd()))
-        if self._binding is None:
-            return None
-        now = time.time()
-        if (
-            self._last_sync_at is not None
-            and now - self._last_sync_at < PIGGYBACK_SYNC_INTERVAL_SECONDS
-        ):
-            return None
-        self._last_sync_at = now
-        run_backend_sync(
-            quiet=True,
-            project_id=self._binding.project_id,
-            workspace_binding_ids=[self._binding.backend_workspace_binding_id],
-            include_memory=True,
-        )
-        return None
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
         return [
