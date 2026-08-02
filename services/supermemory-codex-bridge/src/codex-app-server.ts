@@ -376,8 +376,11 @@ export class CodexAppServer implements CodexRunner {
     const turnId = readId(record.turnId) ?? readId(turn?.id);
     if (turnId && !state.turnId) {
       const error = new CodexUpstreamError("forbidden_tool");
-      if (active.length > 1) this.failTurns(active, error, rpc);
-      else this.failTurn(state, error);
+      if (active.length > 1) {
+        this.failTurns(active, error, rpc);
+        return;
+      }
+      this.failTurn(state, error);
       this.interruptTurn(state, rpc, turnId);
       return;
     }

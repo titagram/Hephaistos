@@ -85,6 +85,10 @@ class FakeRpcPeer {
     return new Promise((resolve) => this.waiters.push(resolve));
   }
 
+  queuedMessageCount(): number {
+    return this.messages.length;
+  }
+
   respond(id: string | number, result: unknown): void {
     this.write({ jsonrpc: "2.0", id, result });
   }
@@ -817,6 +821,7 @@ for (const approval of [
     peer.respond(byThread.get("thread-approval-b")!.id!, {
       turn: { id: "turn-approval-b", status: "inProgress", items: [], error: null },
     });
+    if (approval.name === "conflicting") await Promise.resolve();
 
     peer.request("approval-unroutable", "item/commandExecution/requestApproval", approval.params);
     assert.deepEqual(await peer.next(), {
@@ -828,28 +833,71 @@ for (const approval of [
       within(expectKind(first, "forbidden_tool")),
       within(expectKind(second, "forbidden_tool")),
     ]);
-    const expectedInterrupts = approval.name === "conflicting"
-      ? [
-          { threadId: "thread-approval-a", turnId: "turn-approval-a" },
-          { threadId: "thread-approval-a", turnId: "turn-approval-b" },
-          { threadId: "thread-approval-b", turnId: "turn-approval-b" },
-        ]
-      : [
-          { threadId: "thread-approval-a", turnId: "turn-approval-a" },
-          { threadId: "thread-approval-b", turnId: "turn-approval-b" },
-        ];
+    const expectedInterrupts = [
+      { threadId: "thread-approval-a", turnId: "turn-approval-a" },
+      { threadId: "thread-approval-b", turnId: "turn-approval-b" },
+    ];
     const interrupts: RpcMessage[] = [];
     for (let index = 0; index < expectedInterrupts.length; index += 1) {
       interrupts.push(await within(peer.next()));
     }
+    assert.equal(interrupts.every((message) => message.method === "turn/interrupt"), true);
     assert.deepEqual(
       interrupts.map((message) => message.params).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))),
       expectedInterrupts,
     );
+    assert.equal(peer.queuedMessageCount(), 0);
     for (const interrupt of interrupts) peer.respond(interrupt.id!, {});
     await server.close();
   });
 }
+
+test("does not send a crossed candidate interrupt when multiple unbound turns make approval routing ambiguous", async () => {
+  const { server, processes } = createHarness();
+  const first = server.run({ prompt: "Ambiguous candidate A." });
+  const second = server.run({ prompt: "Ambiguous candidate B." });
+  const peer = new FakeRpcPeer(processes[0]!);
+  await initialize(peer);
+  const threadStarts = [await peer.next(), await peer.next()];
+  peer.respond(threadStarts[0]!.id!, { thread: { id: "thread-ambiguous-a" } });
+  peer.respond(threadStarts[1]!.id!, { thread: { id: "thread-ambiguous-b" } });
+  const turnStarts = [await peer.next(), await peer.next()];
+  const byThread = new Map(turnStarts.map((request) => [(request.params as { threadId: string }).threadId, request]));
+
+  peer.request("approval-ambiguous", "item/commandExecution/requestApproval", {
+    threadId: "thread-ambiguous-a",
+    turnId: "turn-ambiguous-b",
+  });
+  assert.deepEqual(await peer.next(), {
+    jsonrpc: "2.0",
+    id: "approval-ambiguous",
+    error: { code: -32601, message: "Interactive requests are disabled" },
+  });
+  await Promise.all([
+    within(expectKind(first, "forbidden_tool")),
+    within(expectKind(second, "forbidden_tool")),
+  ]);
+  assert.equal(peer.queuedMessageCount(), 0);
+
+  peer.respond(byThread.get("thread-ambiguous-a")!.id!, {
+    turn: { id: "turn-ambiguous-a", status: "inProgress", items: [], error: null },
+  });
+  peer.respond(byThread.get("thread-ambiguous-b")!.id!, {
+    turn: { id: "turn-ambiguous-b", status: "inProgress", items: [], error: null },
+  });
+  const interrupts = [await within(peer.next()), await within(peer.next())];
+  assert.equal(interrupts.every((message) => message.method === "turn/interrupt"), true);
+  assert.deepEqual(
+    interrupts.map((message) => message.params).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))),
+    [
+      { threadId: "thread-ambiguous-a", turnId: "turn-ambiguous-a" },
+      { threadId: "thread-ambiguous-b", turnId: "turn-ambiguous-b" },
+    ],
+  );
+  assert.equal(peer.queuedMessageCount(), 0);
+  for (const interrupt of interrupts) peer.respond(interrupt.id!, {});
+  await server.close();
+});
 
 test("interrupts the candidate turn id from an approval received before turn binding", async () => {
   const { server, processes } = createHarness();
