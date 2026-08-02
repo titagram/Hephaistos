@@ -51,6 +51,7 @@ services:
     environment:
       SUPERMEMORY_DATA_DIR: /var/lib/supermemory
       SUPERMEMORY_SKIP_EMBEDDING_PREWARM: "true"
+      WORKFLOW_ENGINE: direct
       OPENAI_BASE_URL: http://codex-bridge:8646/v1
       OPENAI_API_KEY: ${SUPERMEMORY_BRIDGE_API_KEY:?SUPERMEMORY_BRIDGE_API_KEY is required}
       OPENAI_MODEL: supermemory-codex

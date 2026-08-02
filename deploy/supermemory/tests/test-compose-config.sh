@@ -82,6 +82,11 @@ for (const name of ["OPENAI_MODEL", "OPENAI_FAST_MODEL", "OPENAI_TEXT_MODEL"]) {
   assert.equal(server.environment[name], "supermemory-codex", `${name} must select the bridge model`);
 }
 assert.equal(server.environment.SUPERMEMORY_SKIP_EMBEDDING_PREWARM, "true");
+assert.equal(
+  server.environment.WORKFLOW_ENGINE,
+  "direct",
+  "server must process ingestion directly without the unavailable Rivet runtime",
+);
 assert.equal(bridge.environment.BRIDGE_API_KEY, "bridge-test-key");
 assert.equal(bridge.environment.CODEX_MODEL, "gpt-5.6-sol");
 assert.ok(!Object.hasOwn(bridge.environment, "OPENAI_API_KEY"), "bridge must not receive OPENAI_API_KEY");
