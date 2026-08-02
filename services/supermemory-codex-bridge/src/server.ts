@@ -28,6 +28,16 @@ interface MappedError {
   message: string;
 }
 
+type RequestValueType = "null" | "array" | "object" | "string" | "number" | "boolean" | "undefined/other";
+
+interface RequestShapeField {
+  readonly field: string;
+  readonly type: RequestValueType;
+}
+
+const MAX_REQUEST_SHAPE_FIELDS = 32;
+const MAX_REQUEST_SHAPE_FIELD_CODE_UNITS = 64;
+
 const startupByServer = new WeakMap<http.Server, Promise<void>>();
 
 interface Waiter {
@@ -185,6 +195,7 @@ async function handleRequest(
   const logRoute = canonicalRoute(route);
   let status = 500;
   let errorCode: string | undefined;
+  let requestShape: RequestShapeField[] | undefined;
   let disconnected = false;
   const controller = new AbortController();
   const onDisconnect = () => {
@@ -227,6 +238,7 @@ async function handleRequest(
       } catch {
         throw mappedApiError(genericErrors.invalidJson);
       }
+      requestShape = describeRequestShape(parsedBody);
       const parsed = parseChatCompletionRequest(parsedBody, config.publicModel);
       release = await semaphore.acquire(controller.signal);
       const result = await abortable(codex.run(buildCodexInvocation(parsed), controller.signal), controller.signal);
@@ -256,7 +268,34 @@ async function handleRequest(
       status,
       durationMs: Date.now() - startedAt,
       ...(errorCode ? { errorCode } : {}),
+      ...(requestShape ? { requestShape } : {}),
     }));
+  }
+}
+
+function describeRequestShape(value: unknown): RequestShapeField[] {
+  if (value === null || Array.isArray(value) || typeof value !== "object") return [];
+
+  return Object.keys(value)
+    .sort()
+    .slice(0, MAX_REQUEST_SHAPE_FIELDS)
+    .map((field) => ({
+      field: field.length > MAX_REQUEST_SHAPE_FIELD_CODE_UNITS
+        ? `${field.slice(0, MAX_REQUEST_SHAPE_FIELD_CODE_UNITS)}…`
+        : field,
+      type: requestValueType((value as Record<string, unknown>)[field]),
+    }));
+}
+
+function requestValueType(value: unknown): RequestValueType {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "array";
+  switch (typeof value) {
+    case "object": return "object";
+    case "string": return "string";
+    case "number": return "number";
+    case "boolean": return "boolean";
+    default: return "undefined/other";
   }
 }
 
