@@ -74,6 +74,10 @@ def create_plugin_command_context(
         if not active:
             return None
         value = broker(prompt)
+        # A concurrent close/interrupt may revoke the context while the broker
+        # is blocked. Never publish that late response to the handler.
+        if not active:
+            return None
         if value:
             secrets.append(value)
         return value or None

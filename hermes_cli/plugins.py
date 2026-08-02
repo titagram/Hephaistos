@@ -2131,7 +2131,17 @@ async def invoke_plugin_command_async(name: str, raw_args: str, context) -> Any:
     try:
         result = handler(raw_args, context) if entry.get("accepts_context", False) else handler(raw_args)
         if inspect.isawaitable(result):
-            result = await result
+            task = asyncio.create_task(result)
+            try:
+                result = await asyncio.wait_for(task, timeout=_PLUGIN_COMMAND_AWAIT_TIMEOUT_SECS)
+            except BaseException:
+                if not task.done():
+                    task.cancel()
+                    try:
+                        await task
+                    except BaseException:
+                        pass
+                raise
         return context.render(result)
     except BaseException as exc:
         message = context.redact(str(exc))
@@ -2142,7 +2152,7 @@ async def invoke_plugin_command_async(name: str, raw_args: str, context) -> Any:
         context.revoke()
 
 
-_PLUGIN_COMMAND_AWAIT_TIMEOUT_SECS = 30.0
+_PLUGIN_COMMAND_AWAIT_TIMEOUT_SECS = 120.0
 
 
 def resolve_plugin_command_result(result: Any) -> Any:
@@ -2161,34 +2171,20 @@ def resolve_plugin_command_result(result: Any) -> Any:
     try:
         asyncio.get_running_loop()
     except RuntimeError:
-        return asyncio.run(result)
-
-    outcome: Dict[str, Any] = {}
-    failure: Dict[str, BaseException] = {}
-    done = threading.Event()
-
-    def _runner() -> None:
-        try:
-            outcome["value"] = asyncio.run(result)
-        except BaseException as exc:  # pragma: no cover - re-raised below
-            failure["exc"] = exc
-        finally:
-            done.set()
-
-    thread = threading.Thread(
-        target=_runner,
-        name="hermes-plugin-command-await",
-        daemon=True,
-    )
-    thread.start()
-    if not done.wait(timeout=_PLUGIN_COMMAND_AWAIT_TIMEOUT_SECS):
-        raise TimeoutError(
-            "Plugin command async handler did not complete within "
-            f"{_PLUGIN_COMMAND_AWAIT_TIMEOUT_SECS:.0f}s"
-        )
-    if "exc" in failure:
-        raise failure["exc"]
-    return outcome.get("value")
+        async def _await_owned():
+            task = asyncio.create_task(result)
+            try:
+                return await asyncio.wait_for(task, timeout=_PLUGIN_COMMAND_AWAIT_TIMEOUT_SECS)
+            except BaseException:
+                if not task.done():
+                    task.cancel()
+                    try:
+                        await task
+                    except BaseException:
+                        pass
+                raise
+        return asyncio.run(_await_owned())
+    raise RuntimeError("async plugin command invoked from a running loop; use invoke_plugin_command_async")
 
 
 def get_plugin_commands() -> Dict[str, dict]:

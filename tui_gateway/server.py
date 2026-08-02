@@ -131,12 +131,14 @@ _methods: dict[str, callable] = {}
 _pending: dict[str, tuple[str, threading.Event]] = {}
 _pending_prompt_payloads: dict[str, tuple[str, dict]] = {}
 _answers: dict[str, str] = {}
+_plugin_invocations: dict[str, list] = {}
 _db = None
 _db_error: str | None = None
 _stdout_lock = threading.Lock()
 _cfg_lock = threading.Lock()
 _sessions_lock = threading.RLock()  # reentrant: _close_session_by_id may run under callers that already hold it
 _prompt_lock = threading.Lock()
+_plugin_invocation_lock = threading.Lock()
 _cfg_cache: dict | None = None
 _cfg_mtime: float | None = None
 _cfg_path = None
@@ -1913,11 +1915,39 @@ def _clear_pending(sid: str | None = None) -> None:
     sessions sharing the same tui_gateway process.  When *sid* is
     None, every pending prompt is released (used during shutdown).
     """
+    _revoke_plugin_invocations(sid)
     with _prompt_lock:
         for rid, (owner_sid, ev) in list(_pending.items()):
             if sid is None or owner_sid == sid:
                 _answers[rid] = ""
                 ev.set()
+
+
+def _register_plugin_invocation(sid: str, context) -> None:
+    with _plugin_invocation_lock:
+        _plugin_invocations.setdefault(sid, []).append(context)
+
+
+def _unregister_plugin_invocation(sid: str, context) -> None:
+    with _plugin_invocation_lock:
+        contexts = _plugin_invocations.get(sid)
+        if contexts:
+            try:
+                contexts.remove(context)
+            except ValueError:
+                pass
+            if not contexts:
+                _plugin_invocations.pop(sid, None)
+
+
+def _revoke_plugin_invocations(sid: str | None) -> None:
+    with _plugin_invocation_lock:
+        contexts = (
+            [context for items in _plugin_invocations.values() for context in items]
+            if sid is None else list(_plugin_invocations.pop(sid, []))
+        )
+    for context in contexts:
+        context.revoke()
 
 
 # ── Agent factory ────────────────────────────────────────────────────
@@ -11506,10 +11536,7 @@ def _(rid, params: dict) -> dict:
                 return _err(rid, 4001, "session not found")
             from hermes_cli.plugin_command_context import create_plugin_command_context
 
-            result = invoke_plugin_command(
-                name,
-                arg,
-                create_plugin_command_context(
+            context = create_plugin_command_context(
                     cwd=_session_cwd(session),
                     session_id=params.get("session_id", ""),
                     surface=str((session or {}).get("source") or "tui"),
@@ -11520,8 +11547,13 @@ def _(rid, params: dict) -> dict:
                         {"prompt": prompt, "env_var": "PLUGIN_SECRET"},
                         timeout=120,
                     ),
-                ),
             )
+            sid = params.get("session_id", "")
+            _register_plugin_invocation(sid, context)
+            try:
+                result = invoke_plugin_command(name, arg, context)
+            finally:
+                _unregister_plugin_invocation(sid, context)
             return _ok(rid, {"type": "plugin", "output": str(result or "")})
     except Exception:
         pass
@@ -12795,10 +12827,7 @@ def _(rid, params: dict) -> dict:
         try:
             from hermes_cli.plugin_command_context import create_plugin_command_context
 
-            result = invoke_plugin_command(
-                _cmd_base,
-                _cmd_arg,
-                create_plugin_command_context(
+            context = create_plugin_command_context(
                     cwd=_session_cwd(session),
                     session_id=params.get("session_id", ""),
                     surface=str(session.get("source") or "tui"),
@@ -12809,8 +12838,13 @@ def _(rid, params: dict) -> dict:
                         {"prompt": prompt, "env_var": "PLUGIN_SECRET"},
                         timeout=120,
                     ),
-                ),
             )
+            sid = params.get("session_id", "")
+            _register_plugin_invocation(sid, context)
+            try:
+                result = invoke_plugin_command(_cmd_base, _cmd_arg, context)
+            finally:
+                _unregister_plugin_invocation(sid, context)
             return _ok(rid, {"output": str(result or "(no output)")})
         except Exception as e:
             return _ok(rid, {"output": f"Plugin command error: {e}"})

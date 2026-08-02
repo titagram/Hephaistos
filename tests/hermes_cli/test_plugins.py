@@ -1666,7 +1666,7 @@ class TestPluginCommandResultResolution:
 
         assert resolve_plugin_command_result(_handler()) == "async-ok"
 
-    def test_awaits_async_result_with_running_loop(self, monkeypatch):
+    def test_running_loop_requires_async_invocation_helper(self, monkeypatch):
         class _Loop:
             pass
 
@@ -1674,10 +1674,13 @@ class TestPluginCommandResultResolution:
             return "threaded-ok"
 
         monkeypatch.setattr("hermes_cli.plugins.asyncio.get_running_loop", lambda: _Loop())
-        assert resolve_plugin_command_result(_handler()) == "threaded-ok"
+        result = _handler()
+        with pytest.raises(RuntimeError, match="invoke_plugin_command_async"):
+            resolve_plugin_command_result(result)
+        result.close()
 
-    def test_running_loop_timeout_does_not_hang_forever(self, monkeypatch):
-        """Threaded path must abort a hung async handler instead of blocking the caller."""
+    def test_running_loop_never_starts_a_helper_thread(self, monkeypatch):
+        """Sync dispatch fails fast rather than leaking a daemon helper thread."""
         import asyncio as _asyncio
 
         class _Loop:
@@ -1688,10 +1691,10 @@ class TestPluginCommandResultResolution:
             return "should-not-reach"
 
         monkeypatch.setattr("hermes_cli.plugins.asyncio.get_running_loop", lambda: _Loop())
-        monkeypatch.setattr("hermes_cli.plugins._PLUGIN_COMMAND_AWAIT_TIMEOUT_SECS", 0.1)
-
-        with pytest.raises(TimeoutError):
-            resolve_plugin_command_result(_slow_handler())
+        result = _slow_handler()
+        with pytest.raises(RuntimeError, match="invoke_plugin_command_async"):
+            resolve_plugin_command_result(result)
+        result.close()
 
 
 # ── TestPluginDispatchTool ────────────────────────────────────────────────
