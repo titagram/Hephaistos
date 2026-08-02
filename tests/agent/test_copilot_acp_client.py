@@ -258,6 +258,7 @@ if __name__ == "__main__":
 # ── HOME env propagation tests (from PR #11285) ─────────────────────
 
 from unittest.mock import patch as _patch
+import hermes_constants
 import pytest
 
 
@@ -280,6 +281,7 @@ def _fake_popen_capture(captured):
 
 
 def test_run_prompt_preserves_real_home_when_profile_home_available(monkeypatch, tmp_path):
+    monkeypatch.setattr(hermes_constants, "is_container", lambda: False)
     hermes_home = tmp_path / "hermes"
     (hermes_home / "home").mkdir(parents=True)
     real_home = tmp_path / "real-home"
