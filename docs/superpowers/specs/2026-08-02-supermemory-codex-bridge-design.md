@@ -36,8 +36,8 @@ Internet
    |
    v
 Traefik :443
-   |-- web routes                 -> supermemory-server or minimal landing
-   |   (BasicAuth)
+   |-- web and reference routes   -> supermemory-server
+   |   (BasicAuth, then backend Bearer injection)
    |
    `-- /v3, /v4, /files          -> supermemory-server
        (Supermemory Bearer auth)
@@ -51,17 +51,21 @@ Traefik :443
                               Codex SDK/app-server
 ```
 
-The deployment is a dedicated Compose project with two required services:
+The deployment is a dedicated Compose project with two services:
 
 1. `supermemory-server`, built around the pinned official native binary.
 2. `codex-bridge`, a standalone Node/TypeScript OpenAI-compatibility service.
 
-A third minimal landing service is added only if the running Supermemory binary
-does not serve a useful web response or interface at `/`.
-
 Only the Supermemory-facing web service joins `traefik_default`. The bridge
 joins only the private project network and publishes no host port. Supermemory
 addresses it by Docker service name.
+
+The runtime probe of official release `server-v0.0.6` confirmed that `/` serves
+a complete `supermemory · local` HTML interface with status, SDK examples, API
+key guidance, and links to `/v4/reference` and `/v4/openapi`. The Linux x64
+binary matched the upstream SHA-256
+`bb1b7cee393818236873b8e2518a435e10d9195e27ea5608a3af48a733ef8ee8`.
+No replacement landing service is needed.
 
 ## Traefik routing and authentication
 
@@ -72,12 +76,16 @@ they retain the native Supermemory Bearer authentication expected by its SDKs.
 A lower-priority fallback web router for the same host uses Traefik BasicAuth
 with username `titagram`. The password is converted to an htpasswd hash outside
 version control and supplied through deployment-only configuration. Traefik
-strips the Basic `Authorization` header before forwarding the request.
+strips the Basic `Authorization` header, then injects the generated Supermemory
+Bearer credential before forwarding web and reference requests. The
+higher-priority API router does not inject or replace `Authorization`, so SDK
+clients retain native Supermemory Bearer authentication.
 
 HTTP redirects permanently to HTTPS. HTTPS uses the existing `le` certificate
-resolver. The first runtime probe determines whether `/` serves a Supermemory
-UI. If it does, the fallback router forwards all non-API web routes and assets
-to it. Otherwise, a minimal authenticated status landing is used.
+resolver. The fallback router forwards non-API web routes to the built-in UI;
+the API-reference routes `/v4/reference` and `/v4/openapi` receive dedicated
+higher-priority BasicAuth routers so they remain usable in a browser without
+weakening authentication for the rest of `/v4`.
 
 This split is required because HTTP Basic and Supermemory Bearer authentication
 both use the `Authorization` request header and cannot coexist on the same API
@@ -142,8 +150,8 @@ log levels.
 
 The milestone is complete only when all of the following pass:
 
-1. Start the official binary against temporary storage and inspect `/` to
-   establish whether it includes a usable web UI.
+1. Reconfirm that the pinned official binary serves the observed built-in UI at
+   `/` inside the deployed container.
 2. Build and start the persistent Compose deployment.
 3. Confirm `persephone.cc` resolves to `162.19.229.31` and presents a valid TLS
    certificate.
@@ -171,5 +179,4 @@ included in the bridge deployment work.
 - Modifying Hermes model-provider selection.
 - Exposing the Codex bridge publicly.
 - Hosting Supermemory connectors or other platform-only features.
-- Building a custom Supermemory dashboard before checking the binary's actual
-  root behavior.
+- Building a custom Supermemory dashboard or replacement landing page.
