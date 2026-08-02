@@ -3,7 +3,7 @@ import { pathToFileURL } from "node:url";
 
 import { CodexAppServer, CodexUpstreamError, type CodexRunner } from "./codex-app-server.js";
 import { ConfigurationError, loadConfig, type BridgeConfig } from "./config.js";
-import { createBridgeServer } from "./server.js";
+import { createBridgeServer, waitForBridgeStartup } from "./server.js";
 
 const SHUTDOWN_TIMEOUT_MS = 30_000;
 
@@ -11,8 +11,8 @@ export async function startBridge(
   config: BridgeConfig,
   codex: CodexRunner,
 ): Promise<http.Server> {
-  await codex.start();
   const server = createBridgeServer(config, codex);
+  await waitForBridgeStartup(server);
   await new Promise<void>((resolve, reject) => {
     const onError = (error: Error) => {
       server.off("listening", onListening);

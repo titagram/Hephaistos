@@ -432,6 +432,29 @@ test("error responses and logs never expose request or upstream secrets", async 
   }
 });
 
+test("unknown request paths are logged canonically without path secrets", async (t) => {
+  const runner = new FakeRunner();
+  const secret = "unknown-path-secret-token";
+  const logs: string[] = [];
+  t.mock.method(console, "info", (...values: unknown[]) => logs.push(values.join(" ")));
+  const harness = await listen(runner);
+  try {
+    const response = await fetch(`${harness.origin}/v1/${secret}`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: "{}",
+    });
+    assert.equal(response.status, 404);
+    const body = await response.text();
+    await waitFor(() => logs.length === 1);
+    assert.doesNotMatch(body, new RegExp(secret));
+    assert.doesNotMatch(logs.join("\n"), new RegExp(secret));
+    assert.match(logs.join("\n"), /"route":"unknown"/);
+  } finally {
+    await harness.close();
+  }
+});
+
 test("production lifecycle listens only after startup and closes Codex after HTTP draining", async () => {
   const runner = new FakeRunner();
   const startup = deferred<void>();
@@ -444,11 +467,28 @@ test("production lifecycle listens only after startup and closes Codex after HTT
 
   startup.resolve();
   const server = await starting;
-  assert.equal(server.listening, true);
+  try {
+    assert.equal(server.listening, true);
+    assert.equal(runner.startCalls, 1);
+  } finally {
+    await stopBridge(server, runner, 50);
+  }
 
-  await stopBridge(server, runner, 50);
   assert.equal(server.listening, false);
   assert.equal(runner.closeCalls, 1);
+});
+
+test("production lifecycle surfaces startup failure before listening", async () => {
+  const runner = new FakeRunner();
+  const failure = new CodexUpstreamError("authentication");
+  runner.startImplementation = async () => { throw failure; };
+
+  await assert.rejects(
+    startBridge({ ...config, port: 0 }, runner),
+    (error: unknown) => error === failure,
+  );
+  assert.equal(runner.startCalls, 1);
+  assert.equal(runner.closeCalls, 0);
 });
 
 test("bounded shutdown disconnects in-flight HTTP before closing Codex", async () => {

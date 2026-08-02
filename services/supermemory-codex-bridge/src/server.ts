@@ -28,6 +28,8 @@ interface MappedError {
   message: string;
 }
 
+const startupByServer = new WeakMap<http.Server, Promise<void>>();
+
 interface Waiter {
   readonly resolve: (release: () => void) => void;
   readonly reject: (error: Error) => void;
@@ -147,7 +149,8 @@ const genericErrors = {
 export function createBridgeServer(config: BridgeConfig, codex: CodexRunner): http.Server {
   const semaphore = new FifoSemaphore(config.maxConcurrency);
   let ready = false;
-  void codex.start().then(() => {
+  const startup = codex.start();
+  void startup.then(() => {
     ready = true;
   }, () => {
     ready = false;
@@ -156,10 +159,16 @@ export function createBridgeServer(config: BridgeConfig, codex: CodexRunner): ht
   const server = http.createServer((request, response) => {
     void handleRequest(request, response, config, codex, semaphore, () => ready);
   });
+  startupByServer.set(server, startup);
   server.requestTimeout = config.timeoutMs + 5_000;
   server.headersTimeout = 10_000;
   server.keepAliveTimeout = 5_000;
   return server;
+}
+
+export function waitForBridgeStartup(server: http.Server): Promise<void> {
+  return startupByServer.get(server)
+    ?? Promise.reject(new CodexUpstreamError("unavailable"));
 }
 
 async function handleRequest(
@@ -173,6 +182,7 @@ async function handleRequest(
   const startedAt = Date.now();
   const requestId = crypto.randomUUID();
   const route = requestPath(request);
+  const logRoute = canonicalRoute(route);
   let status = 500;
   let errorCode: string | undefined;
   let disconnected = false;
@@ -242,7 +252,7 @@ async function handleRequest(
     }
     console.info(JSON.stringify({
       requestId,
-      route,
+      route: logRoute,
       status,
       durationMs: Date.now() - startedAt,
       ...(errorCode ? { errorCode } : {}),
@@ -256,6 +266,12 @@ function requestPath(request: IncomingMessage): string {
   } catch {
     return "/";
   }
+}
+
+function canonicalRoute(route: string): string {
+  if (route === "/healthz") return "/healthz";
+  if (route === "/v1/chat/completions") return "/v1/chat/completions";
+  return "unknown";
 }
 
 function isAuthorized(header: string | undefined, expectedKey: string): boolean {
