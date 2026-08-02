@@ -326,6 +326,7 @@ describe('resumeSession failure recovery', () => {
 
     await runResume(requestGateway)
 
+    expect(resumeParams).toMatchObject({ session_id: 'stored-1', source: 'desktop' })
     expect(resumeParams).not.toHaveProperty('lazy')
     expect(resumeParams).not.toHaveProperty('eager_build')
   })
@@ -469,7 +470,7 @@ describe('resumeSession warm-cache mapping integrity', () => {
     // resume RPC ran, for the session that was actually requested.
     const resumeCalls = requestGateway.mock.calls.filter(([method]) => method === 'session.resume')
     expect(resumeCalls.length).toBe(1)
-    expect(resumeCalls[0][1]).toMatchObject({ session_id: 'stored-A' })
+    expect(resumeCalls[0][1]).toMatchObject({ session_id: 'stored-A', source: 'desktop' })
 
     // The corrupt mapping was purged so it can't mis-resolve again.
     expect(runtimeIdByStoredSessionIdRef.current.has('stored-A')).toBe(false)

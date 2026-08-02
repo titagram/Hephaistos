@@ -28,11 +28,13 @@ def _identity(value: Any) -> Any:
 
 class PluginCommandInvocation:
     """Thread-safe cooperative lifecycle handle for one command invocation."""
+
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._active = True
         self._task = None
         self._loop = None
+        self._loop_thread_id: int | None = None
         self.done = threading.Event()
 
     @property
@@ -43,19 +45,56 @@ class PluginCommandInvocation:
     def bind_task(self, task, loop) -> None:
         with self._lock:
             self._task, self._loop = task, loop
+            self._loop_thread_id = threading.get_ident()
             cancelled = not self._active
         if cancelled:
             loop.call_soon_threadsafe(task.cancel)
 
+    @property
+    def has_bound_task(self) -> bool:
+        with self._lock:
+            return self._task is not None
+
+    def run_if_active(self, operation: Callable[[], None]) -> bool:
+        """Run one capability operation atomically against cancellation.
+
+        Prompt registration and emission use this guard so teardown either
+        wins before both operations or waits until both have completed.
+        """
+        with self._lock:
+            if not self._active:
+                return False
+            operation()
+            return True
+
     def cancel(self) -> None:
         with self._lock:
+            if not self._active:
+                return
             self._active = False
             task, loop = self._task, self._loop
         if task is not None and loop is not None:
-            loop.call_soon_threadsafe(task.cancel)
+            try:
+                loop.call_soon_threadsafe(task.cancel)
+            except RuntimeError:
+                # The owner can finish between the lock snapshot and enqueue.
+                pass
 
     def finish(self) -> None:
         self.done.set()
+
+    def wait_for_bound_task(self, timeout: float) -> bool:
+        """Join an async invocation after cancellation.
+
+        Synchronous handlers have no safely preemptible task, so their host
+        output is suppressed cooperatively instead of blocking teardown.
+        """
+        with self._lock:
+            task_bound = self._task is not None
+            same_thread = self._loop_thread_id == threading.get_ident()
+        if not task_bound or same_thread:
+            return True
+        return self.done.wait(timeout=max(0.0, timeout))
 
 
 @dataclass(frozen=True, slots=True)

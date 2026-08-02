@@ -1,5 +1,6 @@
 """Tests for tui_gateway JSON-RPC protocol plumbing."""
 
+import asyncio
 import io
 import json
 import sys
@@ -40,7 +41,9 @@ def server():
         # via reload (which we don't do).
         mod._sessions.clear()
         mod._pending.clear()
+        mod._pending_prompt_payloads.clear()
         mod._answers.clear()
+        mod._plugin_invocations.clear()
 
 
 @pytest.fixture()
@@ -885,6 +888,7 @@ def test_session_resume_reuses_live_agent_after_compression_rotation(server, mon
     target = "20260409_020202_child"
     stale_parent = "20260409_010101_parent"
     sid = "live-rotated"
+    rebound_transport = types.SimpleNamespace(write=lambda _obj: True)
     server._sessions[sid] = {
         "agent": types.SimpleNamespace(model="test/model", session_id=target),
         "created_at": 123.0,
@@ -895,6 +899,7 @@ def test_session_resume_reuses_live_agent_after_compression_rotation(server, mon
         "running": False,
         "session_key": stale_parent,
         "transport": server._stdio_transport,
+        "source": "tui",
     }
 
     class _DB:
@@ -908,6 +913,7 @@ def test_session_resume_reuses_live_agent_after_compression_rotation(server, mon
             return target
 
     monkeypatch.setattr(server, "_get_db", lambda: _DB())
+    monkeypatch.setattr(server, "current_transport", lambda: rebound_transport)
     monkeypatch.setattr(server, "_emit", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         server,
@@ -919,7 +925,11 @@ def test_session_resume_reuses_live_agent_after_compression_rotation(server, mon
         {
             "id": "r1",
             "method": "session.resume",
-            "params": {"session_id": target, "cols": 100},
+            "params": {
+                "session_id": target,
+                "cols": 100,
+                "source": "desktop",
+            },
         }
     )
 
@@ -927,6 +937,8 @@ def test_session_resume_reuses_live_agent_after_compression_rotation(server, mon
     assert result["result"]["session_id"] == sid
     assert result["result"]["session_key"] == target
     assert len(server._sessions) == 1
+    assert server._sessions[sid]["source"] == "desktop"
+    assert server._sessions[sid]["transport"] is rebound_transport
 
 
 def test_sync_session_key_after_compress_reanchors_active_session_lease(
@@ -1683,6 +1695,338 @@ def test_command_dispatch_awaits_async_plugin_handler(server):
 
     assert "error" not in resp
     assert resp["result"] == {"type": "plugin", "output": "async:hello"}
+
+
+def _registered_plugin_manager(handler):
+    from hermes_cli.plugins import PluginContext, PluginManager, PluginManifest
+
+    manager = PluginManager()
+    context = PluginContext(PluginManifest(name="protocol-plugin", source="user"), manager)
+    context.register_command("async-cmd", handler)
+    return manager
+
+
+def _plugin_session(server, sid, tmp_path, *, transport=None, close_on_disconnect=False):
+    session = {
+        "agent": types.SimpleNamespace(),
+        "close_on_disconnect": close_on_disconnect,
+        "created_at": time.time(),
+        "cwd": str(tmp_path),
+        "history": [],
+        "history_lock": threading.RLock(),
+        "last_active": time.time(),
+        "running": False,
+        "session_key": sid,
+        "slash_worker": None,
+        "source": "tui",
+        "transport": transport or server._stdio_transport,
+    }
+    server._sessions[sid] = session
+    return session
+
+
+@pytest.mark.parametrize("method", ["slash.exec", "command.dispatch"])
+@pytest.mark.parametrize(
+    "lifecycle",
+    ["session.close", "session.interrupt", "ws.detach", "ws.close_on_disconnect"],
+)
+def test_plugin_async_dispatch_is_cancelled_and_joined_before_lifecycle_returns(
+    server, monkeypatch, tmp_path, method, lifecycle
+):
+    """Close/interrupt must finalize the real owned task before reporting success."""
+    from hermes_cli import plugins
+
+    started = threading.Event()
+    finalized = threading.Event()
+    continued = threading.Event()
+    ordering = []
+
+    async def handler(_arg, _context):
+        started.set()
+        try:
+            await asyncio.sleep(30)
+            continued.set()
+            return "must-not-cross-host-boundary"
+        finally:
+            ordering.append("handler-finally")
+            finalized.set()
+
+    monkeypatch.setattr(plugins, "_plugin_manager", _registered_plugin_manager(handler))
+    # Keeps a broken implementation from leaving this RED test alive for 120s.
+    monkeypatch.setattr(plugins, "_PLUGIN_COMMAND_AWAIT_TIMEOUT_SECS", 0.25)
+    monkeypatch.setattr(server, "_PLUGIN_INVOCATION_JOIN_TIMEOUT_S", 0.5)
+    sid = f"{method}-{lifecycle}"
+    transport = object()
+    _plugin_session(
+        server,
+        sid,
+        tmp_path,
+        transport=transport,
+        close_on_disconnect=lifecycle == "ws.close_on_disconnect",
+    )
+    response = {}
+    params = (
+        {"command": "async-cmd wait", "session_id": sid}
+        if method == "slash.exec"
+        else {"name": "async-cmd", "arg": "wait", "session_id": sid}
+    )
+
+    worker = threading.Thread(
+        target=lambda: response.setdefault(
+            "value",
+            server.handle_request({"id": "plugin", "method": method, "params": params}),
+        )
+    )
+    worker.start()
+    assert started.wait(1), "production plugin task never started"
+
+    if lifecycle.startswith("ws."):
+        lifecycle_response = server._close_sessions_for_transport(transport)
+    else:
+        lifecycle_response = server.handle_request(
+            {"id": "stop", "method": lifecycle, "params": {"session_id": sid}}
+        )
+    ordering.append("lifecycle-returned")
+    worker.join(1)
+
+    assert finalized.is_set()
+    assert not worker.is_alive()
+    assert ordering[:2] == ["handler-finally", "lifecycle-returned"]
+    assert not continued.is_set()
+    assert sid not in server._plugin_invocations
+    if lifecycle == "ws.detach":
+        assert lifecycle_response == (0, 1)
+    elif lifecycle == "ws.close_on_disconnect":
+        assert lifecycle_response == (1, 0)
+    else:
+        assert "error" not in lifecycle_response
+    expected = "Plugin command error: plugin command cancelled"
+    if method == "slash.exec":
+        assert response["value"]["result"] == {"output": expected}
+    else:
+        assert response["value"]["result"] == {"type": "plugin", "output": expected}
+
+
+def test_plugin_registration_rejects_context_after_session_close(
+    server, monkeypatch, tmp_path
+):
+    """A close that wins before registration must tombstone the stale context."""
+    from hermes_cli.plugin_command_context import create_plugin_command_context
+
+    sid = "close-before-register"
+    _plugin_session(server, sid, tmp_path)
+    context = create_plugin_command_context(
+        cwd=tmp_path,
+        session_id=sid,
+        surface="tui",
+        interactive=True,
+    )
+
+    real_register = server._register_plugin_invocation
+    register_entered = threading.Event()
+    allow_register = threading.Event()
+    accepted = []
+
+    def delayed_register(*args, **kwargs):
+        register_entered.set()
+        assert allow_register.wait(1)
+        return real_register(*args, **kwargs)
+
+    monkeypatch.setattr(server, "_register_plugin_invocation", delayed_register)
+    register = threading.Thread(
+        target=lambda: accepted.append(server._register_plugin_invocation(sid, context))
+    )
+    register.start()
+    assert register_entered.wait(1)
+    assert server._close_session_by_id(sid)
+    allow_register.set()
+    register.join(1)
+
+    assert accepted == [False]
+    assert context.invocation.cancelled
+    assert sid not in server._plugin_invocations
+
+
+def test_multiple_plugin_invocations_unregister_safely_while_session_is_cancelled(
+    server, tmp_path
+):
+    """One completion racing teardown cannot strand a sibling invocation."""
+    from hermes_cli.plugin_command_context import create_plugin_command_context
+
+    sid = "multi-invocation-race"
+    _plugin_session(server, sid, tmp_path)
+    first = create_plugin_command_context(
+        cwd=tmp_path, session_id=sid, surface="tui", interactive=True
+    )
+    second = create_plugin_command_context(
+        cwd=tmp_path, session_id=sid, surface="tui", interactive=True
+    )
+    assert server._register_plugin_invocation(sid, first) is True
+    assert server._register_plugin_invocation(sid, second) is True
+
+    first.revoke()
+    first.invocation.finish()
+    barrier = threading.Barrier(3)
+    unregister = threading.Thread(
+        target=lambda: (barrier.wait(), server._unregister_plugin_invocation(sid, first))
+    )
+    cancel = threading.Thread(target=lambda: (barrier.wait(), server._clear_pending(sid)))
+    unregister.start()
+    cancel.start()
+    barrier.wait()
+    unregister.join(1)
+    cancel.join(1)
+
+    assert not unregister.is_alive()
+    assert not cancel.is_alive()
+    assert first.invocation.cancelled
+    assert second.invocation.cancelled
+    assert sid not in server._plugin_invocations
+
+
+def test_secret_prompt_is_never_emitted_after_lifecycle_cancellation_wins(
+    server, monkeypatch, tmp_path
+):
+    """Prompt insertion and emission must share the invocation cancellation guard."""
+    from hermes_cli.plugin_command_context import create_plugin_command_context
+
+    sid = "insert-before-emit"
+    _plugin_session(server, sid, tmp_path)
+    context = create_plugin_command_context(
+        cwd=tmp_path,
+        session_id=sid,
+        surface="tui",
+        interactive=True,
+    )
+    server._register_plugin_invocation(sid, context)
+    emit_entered = threading.Event()
+    allow_emit = threading.Event()
+    teardown_done = threading.Event()
+    emitted_after_teardown = []
+
+    def delayed_emit(_event, _sid, _payload=None):
+        emit_entered.set()
+        assert allow_emit.wait(1)
+        emitted_after_teardown.append(teardown_done.is_set())
+
+    monkeypatch.setattr(server, "_emit", delayed_emit)
+    broker = threading.Thread(
+        target=lambda: server._block(
+            "secret.request",
+            sid,
+            {"prompt": "Token", "env_var": "PLUGIN_SECRET"},
+            timeout=1,
+            guard=context.invocation,
+        )
+    )
+    broker.start()
+    assert emit_entered.wait(1)
+
+    teardown = threading.Thread(
+        target=lambda: (server._clear_pending(sid), teardown_done.set())
+    )
+    teardown.start()
+    time.sleep(0.05)
+    allow_emit.set()
+    broker.join(1)
+    teardown.join(1)
+
+    assert not broker.is_alive()
+    assert not teardown.is_alive()
+    assert emitted_after_teardown == [False]
+
+
+@pytest.mark.parametrize("method", ["slash.exec", "command.dispatch"])
+def test_plugin_async_timeout_finalizes_task_and_returns_stable_output(
+    server, monkeypatch, tmp_path, method
+):
+    """The sync TUI bridge owns timeout cancellation and never reports success."""
+    from hermes_cli import plugins
+
+    finalized = threading.Event()
+    continued = threading.Event()
+
+    async def handler(_arg, _context):
+        try:
+            await asyncio.sleep(30)
+            continued.set()
+            return "must-not-return"
+        finally:
+            finalized.set()
+
+    monkeypatch.setattr(plugins, "_plugin_manager", _registered_plugin_manager(handler))
+    monkeypatch.setattr(plugins, "_PLUGIN_COMMAND_AWAIT_TIMEOUT_SECS", 0.02)
+    sid = f"timeout-{method}"
+    _plugin_session(server, sid, tmp_path)
+    params = (
+        {"command": "async-cmd wait", "session_id": sid}
+        if method == "slash.exec"
+        else {"name": "async-cmd", "arg": "wait", "session_id": sid}
+    )
+
+    response = server.handle_request(
+        {"id": "timeout", "method": method, "params": params}
+    )
+
+    assert finalized.is_set()
+    assert not continued.is_set()
+    assert sid not in server._plugin_invocations
+    expected = "Plugin command error: plugin command timed out"
+    if method == "slash.exec":
+        assert response["result"] == {"output": expected}
+    else:
+        assert response["result"] == {"type": "plugin", "output": expected}
+
+
+def test_sync_plugin_handler_is_cooperative_but_late_output_is_suppressed(
+    server, monkeypatch, tmp_path
+):
+    """Teardown does not preempt Python sync code, but revokes every capability."""
+    from hermes_cli import plugins
+
+    started = threading.Event()
+    release = threading.Event()
+    retained = []
+
+    def handler(_arg, context):
+        retained.append(context)
+        started.set()
+        assert release.wait(1)
+        assert context.request_secret("too late") is None
+        return "late-success"
+
+    monkeypatch.setattr(plugins, "_plugin_manager", _registered_plugin_manager(handler))
+    sid = "cooperative-sync"
+    _plugin_session(server, sid, tmp_path)
+    response = {}
+    worker = threading.Thread(
+        target=lambda: response.setdefault(
+            "value",
+            server.handle_request(
+                {
+                    "id": "plugin",
+                    "method": "slash.exec",
+                    "params": {"command": "async-cmd", "session_id": sid},
+                }
+            ),
+        )
+    )
+    worker.start()
+    assert started.wait(1)
+
+    closed = server.handle_request(
+        {"id": "close", "method": "session.close", "params": {"session_id": sid}}
+    )
+    assert closed["result"] == {"closed": True}
+    assert worker.is_alive()
+    assert retained[0].invocation.cancelled
+    release.set()
+    worker.join(1)
+
+    assert not worker.is_alive()
+    assert response["value"]["result"] == {
+        "output": "Plugin command error: plugin command cancelled"
+    }
 
 
 # ── dispatch(): pool routing for long handlers (#12546) ──────────────

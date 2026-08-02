@@ -7,6 +7,17 @@ from tui_gateway import server
 from tui_gateway import ws as ws_mod
 
 
+def _context_for(sid):
+    from hermes_cli.plugin_command_context import create_plugin_command_context
+
+    return create_plugin_command_context(
+        cwd="/tmp",
+        session_id=sid,
+        surface="desktop",
+        interactive=True,
+    )
+
+
 def test_ws_startup_starts_background_mcp_discovery(monkeypatch):
     """The desktop app and dashboard chat reach the agent through this WS
     sidecar, not through tui_gateway.entry.main() (which spawns the discovery
@@ -125,6 +136,130 @@ def test_ws_disconnect_preserves_and_repoints_reconnectable_session(monkeypatch)
         assert server._sessions["plain"]["transport"] is server._detached_ws_transport
     finally:
         server._sessions.clear()
+
+
+def test_ws_disconnect_cancels_interactive_invocations_for_close_and_detach(monkeypatch):
+    """Both WS policies revoke contexts and release prompts immediately."""
+    monkeypatch.setattr(server, "_WS_ORPHAN_REAP_GRACE_S", 0)
+    transport = object()
+    server._sessions.clear()
+    server._pending.clear()
+    server._pending_prompt_payloads.clear()
+    server._answers.clear()
+    server._plugin_invocations.clear()
+    try:
+        contexts = {}
+        events = {}
+        for sid, closes in (("closing", True), ("detaching", False)):
+            server._sessions[sid] = {
+                "transport": transport,
+                "close_on_disconnect": closes,
+                "session_key": sid,
+            }
+            contexts[sid] = _context_for(sid)
+            assert server._register_plugin_invocation(sid, contexts[sid]) is True
+            events[sid] = threading.Event()
+            with server._prompt_lock:
+                server._pending[f"prompt-{sid}"] = (sid, events[sid])
+                server._pending_prompt_payloads[f"prompt-{sid}"] = (
+                    "secret.request",
+                    {"request_id": f"prompt-{sid}", "session_id": sid},
+                )
+
+        assert server._close_sessions_for_transport(transport) == (1, 1)
+
+        assert "closing" not in server._sessions
+        assert server._sessions["detaching"]["transport"] is server._detached_ws_transport
+        assert all(context.invocation.cancelled for context in contexts.values())
+        assert all(event.is_set() for event in events.values())
+        assert not server._pending
+        assert not server._pending_prompt_payloads
+        assert not server._plugin_invocations
+    finally:
+        server._clear_pending()
+        server._sessions.clear()
+        server._pending.clear()
+        server._pending_prompt_payloads.clear()
+        server._answers.clear()
+        server._plugin_invocations.clear()
+
+
+def test_ws_reconnect_accepts_a_fresh_invocation_without_prompt_replay(monkeypatch):
+    """A detached session reattaches cleanly; cancelled prompts never replay."""
+    monkeypatch.setattr(server, "_WS_ORPHAN_REAP_GRACE_S", 0)
+    old_transport = object()
+    new_transport = object()
+    sid = "reconnectable"
+    server._sessions.clear()
+    server._pending.clear()
+    server._pending_prompt_payloads.clear()
+    server._plugin_invocations.clear()
+    try:
+        server._sessions[sid] = {
+            "transport": old_transport,
+            "close_on_disconnect": False,
+            "session_key": sid,
+        }
+        stale = _context_for(sid)
+        assert server._register_plugin_invocation(sid, stale) is True
+        prompt = threading.Event()
+        with server._prompt_lock:
+            server._pending["stale-prompt"] = (sid, prompt)
+            server._pending_prompt_payloads["stale-prompt"] = (
+                "secret.request",
+                {"request_id": "stale-prompt", "session_id": sid},
+            )
+
+        assert server._close_sessions_for_transport(old_transport) == (0, 1)
+        assert stale.invocation.cancelled
+        assert prompt.is_set()
+        assert not server._pending_prompt_payloads
+
+        # This is the production live-reuse transition performed by resume/activate
+        # before the next client request reaches plugin dispatch.
+        server._sessions[sid]["transport"] = new_transport
+        fresh = _context_for(sid)
+        assert server._register_plugin_invocation(sid, fresh) is True
+        assert not fresh.invocation.cancelled
+        assert server._pending_prompt_payloads == {}
+    finally:
+        server._clear_pending()
+        server._sessions.clear()
+        server._pending.clear()
+        server._pending_prompt_payloads.clear()
+        server._plugin_invocations.clear()
+
+
+def test_ws_grace_reap_closes_detached_session_after_immediate_plugin_cancel(monkeypatch):
+    """Grace reaping finalizes an already-cancelled, prompt-free orphan."""
+    monkeypatch.setattr(server, "_WS_ORPHAN_REAP_GRACE_S", 0.02)
+    monkeypatch.setattr(server, "_teardown_session", lambda *_args, **_kwargs: None)
+    transport = object()
+    sid = "grace-reap"
+    context = _context_for(sid)
+    server._sessions.clear()
+    server._plugin_invocations.clear()
+    try:
+        server._sessions[sid] = {
+            "transport": transport,
+            "close_on_disconnect": False,
+            "session_key": sid,
+            "running": False,
+        }
+        assert server._register_plugin_invocation(sid, context) is True
+
+        assert server._close_sessions_for_transport(transport) == (0, 1)
+        deadline = time.time() + 1
+        while sid in server._sessions and time.time() < deadline:
+            time.sleep(0.01)
+
+        assert context.invocation.cancelled
+        assert sid not in server._sessions
+        assert sid not in server._plugin_invocations
+    finally:
+        server._clear_pending()
+        server._sessions.clear()
+        server._plugin_invocations.clear()
 
 
 def test_ws_write_loop_stall_does_not_latch_transport(monkeypatch):

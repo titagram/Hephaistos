@@ -2107,12 +2107,20 @@ def invoke_plugin_command(name: str, raw_args: str, context) -> Any:
         return None
     handler = entry["handler"]
     try:
+        if context.invocation.cancelled:
+            raise PluginCommandError("plugin command cancelled")
         result = handler(raw_args, context) if entry.get("accepts_context", False) else handler(raw_args)
-        result = resolve_plugin_command_result(result)
+        result = resolve_plugin_command_result(result, context.invocation)
         if context.invocation.cancelled:
             raise PluginCommandError("plugin command cancelled")
         return context.render(result)
+    except asyncio.TimeoutError:
+        raise PluginCommandError("plugin command timed out") from None
+    except asyncio.CancelledError:
+        raise PluginCommandError("plugin command cancelled") from None
     except BaseException as exc:
+        if context.invocation.cancelled and not isinstance(exc, PluginCommandError):
+            raise PluginCommandError("plugin command cancelled") from None
         message = context.redact(str(exc))
         if message != str(exc):
             raise PluginCommandError(message) from None
@@ -2133,6 +2141,8 @@ async def invoke_plugin_command_async(name: str, raw_args: str, context) -> Any:
         return None
     handler = entry["handler"]
     try:
+        if context.invocation.cancelled:
+            raise PluginCommandError("plugin command cancelled")
         result = handler(raw_args, context) if entry.get("accepts_context", False) else handler(raw_args)
         if inspect.isawaitable(result):
             task = asyncio.create_task(result)
@@ -2150,7 +2160,13 @@ async def invoke_plugin_command_async(name: str, raw_args: str, context) -> Any:
         if context.invocation.cancelled:
             raise PluginCommandError("plugin command cancelled")
         return context.render(result)
+    except asyncio.TimeoutError:
+        raise PluginCommandError("plugin command timed out") from None
+    except asyncio.CancelledError:
+        raise PluginCommandError("plugin command cancelled") from None
     except BaseException as exc:
+        if context.invocation.cancelled and not isinstance(exc, PluginCommandError):
+            raise PluginCommandError("plugin command cancelled") from None
         message = context.redact(str(exc))
         if message != str(exc):
             raise PluginCommandError(message) from None
@@ -2163,15 +2179,13 @@ async def invoke_plugin_command_async(name: str, raw_args: str, context) -> Any:
 _PLUGIN_COMMAND_AWAIT_TIMEOUT_SECS = 120.0
 
 
-def resolve_plugin_command_result(result: Any) -> Any:
+def resolve_plugin_command_result(result: Any, invocation=None) -> Any:
     """Resolve a plugin command return value, awaiting async handlers when needed.
 
-    Sync CLI/TUI dispatch sites call plugin handlers from plain functions.
-    If a handler is async, await it directly when no loop is running; if
-    we're already inside an active loop, run it in a helper thread with its
-    own loop so the caller still gets a concrete result synchronously. The
-    threaded path is bounded by a 30s timeout so a hung async handler cannot
-    wedge the terminal indefinitely.
+    Sync CLI/TUI dispatch sites call plugin handlers from plain worker
+    functions. An async result is owned by a local event loop, bound to the
+    invocation before its first await, and cancelled by the shared 120-second
+    timeout. Async hosts must use ``invoke_plugin_command_async`` directly.
     """
     if not inspect.isawaitable(result):
         return result
@@ -2181,6 +2195,8 @@ def resolve_plugin_command_result(result: Any) -> Any:
     except RuntimeError:
         async def _await_owned():
             task = asyncio.create_task(result)
+            if invocation is not None:
+                invocation.bind_task(task, asyncio.get_running_loop())
             try:
                 return await asyncio.wait_for(task, timeout=_PLUGIN_COMMAND_AWAIT_TIMEOUT_SECS)
             except BaseException:

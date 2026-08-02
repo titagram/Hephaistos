@@ -139,6 +139,7 @@ _cfg_lock = threading.Lock()
 _sessions_lock = threading.RLock()  # reentrant: _close_session_by_id may run under callers that already hold it
 _prompt_lock = threading.Lock()
 _plugin_invocation_lock = threading.Lock()
+_PLUGIN_INVOCATION_JOIN_TIMEOUT_S = 5.0
 _cfg_cache: dict | None = None
 _cfg_mtime: float | None = None
 _cfg_path = None
@@ -630,10 +631,14 @@ def _close_session_by_id(sid: str, *, end_reason: str = "tui_close") -> bool:
     session. The ``_finalized`` / worker ``_closed`` guards make concurrent or
     repeat calls (e.g. session.close racing the WS-orphan reaper) harmless."""
     with _sessions_lock:
-        session = _sessions.pop(sid, None)
+        session = _sessions.get(sid)
+        if session is not None:
+            session["_plugin_invocations_closing"] = True
+            contexts = _take_plugin_invocations_locked(sid, session)
+            _sessions.pop(sid, None)
     if session is None:
         return False
-    _clear_pending(sid)
+    _clear_pending(sid, contexts=contexts)
     _teardown_session(session, end_reason=end_reason)
     return True
 
@@ -708,10 +713,18 @@ def _close_sessions_for_transport(
             _close_session_by_id(sid, end_reason=end_reason)
             reaped += 1
         else:
-            # Point detached sessions at the drop sentinel (NOT real stdio) so
-            # _ws_session_is_orphaned recognizes them and the grace-reap can
-            # actually fire; a standalone `hermes --tui` keeps real _stdio.
-            session["transport"] = _detached_ws_transport
+            with _sessions_lock:
+                if (
+                    _sessions.get(sid) is not session
+                    or session.get("transport") is not transport
+                ):
+                    continue
+                # Point detached sessions at the drop sentinel (NOT real stdio)
+                # and invalidate every interactive invocation before a later
+                # registration can observe the parked session.
+                session["transport"] = _detached_ws_transport
+                contexts = _take_plugin_invocations_locked(sid, session)
+            _clear_pending(sid, contexts=contexts)
             detached += 1
             try:
                 _schedule_ws_orphan_reap(sid)
@@ -1891,14 +1904,22 @@ def _enable_gateway_prompts() -> None:
 def _block(event: str, sid: str, payload: dict, timeout: int = 300, guard=None) -> str:
     rid = uuid.uuid4().hex[:8]
     ev = threading.Event()
-    with _prompt_lock:
-        if guard is not None and guard.cancelled:
-            return ""
-        _pending[rid] = (sid, ev)
-        payload["request_id"] = rid
-        _pending_prompt_payloads[rid] = (event, dict(payload))
-    try:
+
+    def _register_and_emit() -> None:
+        with _prompt_lock:
+            _pending[rid] = (sid, ev)
+            payload["request_id"] = rid
+            _pending_prompt_payloads[rid] = (event, dict(payload))
+        # The invocation guard remains held across this emit, while the prompt
+        # lock is released so a fast client response cannot deadlock on write.
         _emit(event, sid, payload)
+
+    if guard is not None:
+        if not guard.run_if_active(_register_and_emit):
+            return ""
+    else:
+        _register_and_emit()
+    try:
         ev.wait(timeout=timeout)
     finally:
         with _prompt_lock:
@@ -1908,7 +1929,7 @@ def _block(event: str, sid: str, payload: dict, timeout: int = 300, guard=None) 
         return _answers.pop(rid, "")
 
 
-def _clear_pending(sid: str | None = None) -> None:
+def _clear_pending(sid: str | None = None, *, contexts=None) -> None:
     """Release pending prompts with an empty answer.
 
     When *sid* is provided, only prompts owned by that session are
@@ -1917,17 +1938,57 @@ def _clear_pending(sid: str | None = None) -> None:
     sessions sharing the same tui_gateway process.  When *sid* is
     None, every pending prompt is released (used during shutdown).
     """
-    _revoke_plugin_invocations(sid)
+    if contexts is None:
+        contexts = _take_plugin_invocations(sid)
+    for context in contexts:
+        context.revoke()
     with _prompt_lock:
         for rid, (owner_sid, ev) in list(_pending.items()):
             if sid is None or owner_sid == sid:
                 _answers[rid] = ""
+                _pending.pop(rid, None)
+                _pending_prompt_payloads.pop(rid, None)
                 ev.set()
+    for context in contexts:
+        if not context.invocation.wait_for_bound_task(_PLUGIN_INVOCATION_JOIN_TIMEOUT_S):
+            logger.warning(
+                "plugin invocation did not finalize within %.1fs: session=%s",
+                _PLUGIN_INVOCATION_JOIN_TIMEOUT_S,
+                sid or "*",
+            )
 
 
-def _register_plugin_invocation(sid: str, context) -> None:
-    with _plugin_invocation_lock:
-        _plugin_invocations.setdefault(sid, []).append(context)
+def _plugin_invocation_generation(session: dict) -> int:
+    return int(session.get("_plugin_invocation_generation") or 0)
+
+
+def _register_plugin_invocation(
+    sid: str,
+    context,
+    *,
+    expected_session: dict | None = None,
+    expected_generation: int | None = None,
+) -> bool:
+    """Atomically validate a live attached session and register its context."""
+    accepted = False
+    with _sessions_lock:
+        session = _sessions.get(sid)
+        if (
+            session is not None
+            and not session.get("_plugin_invocations_closing")
+            and session.get("transport") is not _detached_ws_transport
+            and (expected_session is None or session is expected_session)
+            and (
+                expected_generation is None
+                or _plugin_invocation_generation(session) == expected_generation
+            )
+        ):
+            with _plugin_invocation_lock:
+                _plugin_invocations.setdefault(sid, []).append(context)
+            accepted = True
+    if not accepted:
+        context.revoke()
+    return accepted
 
 
 def _unregister_plugin_invocation(sid: str, context) -> None:
@@ -1942,12 +2003,37 @@ def _unregister_plugin_invocation(sid: str, context) -> None:
                 _plugin_invocations.pop(sid, None)
 
 
-def _revoke_plugin_invocations(sid: str | None) -> None:
+def _take_plugin_invocations_locked(sid: str, session: dict) -> list:
+    """Invalidate and detach contexts while the caller holds sessions_lock."""
+    session["_plugin_invocation_generation"] = _plugin_invocation_generation(session) + 1
     with _plugin_invocation_lock:
-        contexts = (
-            [context for items in _plugin_invocations.values() for context in items]
-            if sid is None else list(_plugin_invocations.pop(sid, []))
-        )
+        return list(_plugin_invocations.pop(sid, []))
+
+
+def _take_plugin_invocations(sid: str | None) -> list:
+    with _sessions_lock:
+        if sid is None:
+            for session in _sessions.values():
+                session["_plugin_invocation_generation"] = (
+                    _plugin_invocation_generation(session) + 1
+                )
+            with _plugin_invocation_lock:
+                contexts = [
+                    context
+                    for items in _plugin_invocations.values()
+                    for context in items
+                ]
+                _plugin_invocations.clear()
+            return contexts
+        session = _sessions.get(sid)
+        if session is not None:
+            return _take_plugin_invocations_locked(sid, session)
+        with _plugin_invocation_lock:
+            return list(_plugin_invocations.pop(sid, []))
+
+
+def _revoke_plugin_invocations(sid: str | None) -> None:
+    contexts = _take_plugin_invocations(sid)
     for context in contexts:
         context.revoke()
 
@@ -11497,7 +11583,12 @@ def _(rid, params: dict) -> dict:
     resolved = _resolve_name(name)
     if resolved != name:
         name = resolved
-    session = _sessions.get(params.get("session_id", ""))
+    sid = params.get("session_id", "")
+    with _sessions_lock:
+        session = _sessions.get(sid)
+        invocation_generation = (
+            _plugin_invocation_generation(session) if session is not None else None
+        )
 
     qcmds = _load_cfg().get("quick_commands", {})
     if name in qcmds:
@@ -11530,6 +11621,7 @@ def _(rid, params: dict) -> dict:
         from hermes_cli.plugins import (
             get_plugin_command_handler,
             invoke_plugin_command,
+            PluginCommandError,
         )
 
         handler = get_plugin_command_handler(name)
@@ -11551,13 +11643,23 @@ def _(rid, params: dict) -> dict:
                         guard=context.invocation,
                     ),
             )
-            sid = params.get("session_id", "")
-            _register_plugin_invocation(sid, context)
+            if not _register_plugin_invocation(
+                sid,
+                context,
+                expected_session=session,
+                expected_generation=invocation_generation,
+            ):
+                raise PluginCommandError("plugin command cancelled")
             try:
                 result = invoke_plugin_command(name, arg, context)
             finally:
                 _unregister_plugin_invocation(sid, context)
             return _ok(rid, {"type": "plugin", "output": str(result or "")})
+    except PluginCommandError as exc:
+        return _ok(
+            rid,
+            {"type": "plugin", "output": f"Plugin command error: {exc}"},
+        )
     except Exception:
         pass
 
@@ -12749,6 +12851,13 @@ def _(rid, params: dict) -> dict:
     session, err = _sess(params, rid)
     if err:
         return err
+    sid = params.get("session_id", "")
+    with _sessions_lock:
+        invocation_generation = (
+            _plugin_invocation_generation(session)
+            if _sessions.get(sid) is session
+            else None
+        )
 
     cmd = params.get("command", "").strip()
     if not cmd:
@@ -12843,8 +12952,15 @@ def _(rid, params: dict) -> dict:
                         guard=context.invocation,
                     ),
             )
-            sid = params.get("session_id", "")
-            _register_plugin_invocation(sid, context)
+            if not _register_plugin_invocation(
+                sid,
+                context,
+                expected_session=session,
+                expected_generation=invocation_generation,
+            ):
+                from hermes_cli.plugins import PluginCommandError
+
+                raise PluginCommandError("plugin command cancelled")
             try:
                 result = invoke_plugin_command(_cmd_base, _cmd_arg, context)
             finally:

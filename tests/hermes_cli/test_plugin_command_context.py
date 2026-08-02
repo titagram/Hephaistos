@@ -305,3 +305,53 @@ def test_cancelled_handle_blocks_late_broker_result(tmp_path):
     worker.join(1)
     assert result == [None]
     assert context.invocation.done.is_set() is False
+
+
+def test_inflight_broker_cancellation_finalizes_owned_async_invocation(
+    monkeypatch, tmp_path
+):
+    """A broker already in flight cannot revive its task after host cancellation."""
+    broker_started = threading.Event()
+    release_broker = threading.Event()
+    finalized = threading.Event()
+    continued = threading.Event()
+
+    def broker(_prompt):
+        broker_started.set()
+        assert release_broker.wait(1)
+        return "must-not-reach-handler"
+
+    async def handler(_raw, context):
+        try:
+            assert context.request_secret("Token") is None
+            await __import__("asyncio").sleep(0)
+            continued.set()
+            return "must-not-return"
+        finally:
+            finalized.set()
+
+    manager = _registered_manager(handler)
+    monkeypatch.setattr("hermes_cli.plugins._plugin_manager", manager)
+    context = _context(tmp_path, secret=broker)
+    outcome = []
+
+    def invoke():
+        try:
+            invoke_plugin_command("context-test", "", context)
+        except BaseException as exc:
+            outcome.append(exc)
+
+    worker = threading.Thread(target=invoke)
+    worker.start()
+    assert broker_started.wait(1)
+    context.revoke()
+    release_broker.set()
+    worker.join(1)
+
+    assert not worker.is_alive()
+    assert finalized.is_set()
+    assert not continued.is_set()
+    assert len(outcome) == 1
+    assert isinstance(outcome[0], PluginCommandError)
+    assert str(outcome[0]) == "plugin command cancelled"
+    assert context.invocation.done.is_set()
