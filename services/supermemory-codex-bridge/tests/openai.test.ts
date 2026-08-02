@@ -91,6 +91,35 @@ test("rejects unsupported models, modes, and message content", () => {
   }, alias), 400, "unsupported_content");
 });
 
+test("rejects unlisted and tool-related top-level fields", () => {
+  assertApiError(() => parseChatCompletionRequest({
+    model: alias,
+    messages: [],
+    metadata: { internal: true },
+  }, alias), 400, "unsupported_field");
+  for (const field of ["tool_choice", "parallel_tool_calls", "function_call", "functions"]) {
+    assertApiError(() => parseChatCompletionRequest({
+      model: alias,
+      messages: [],
+      [field]: "unsupported",
+    }, alias), 400, "unsupported_tools");
+  }
+  assertApiError(() => parseChatCompletionRequest({
+    model: alias,
+    messages: [],
+    stream_options: { include_usage: true },
+  }, alias), 400, "unsupported_streaming");
+});
+
+test("rejects assistant tool metadata instead of dropping it", () => {
+  for (const field of ["tool_calls", "function_call"]) {
+    assertApiError(() => parseChatCompletionRequest({
+      model: alias,
+      messages: [{ role: "assistant", content: "private response", [field]: [] }],
+    }, alias), 400, "unsupported_tools");
+  }
+});
+
 test("rejects unknown response formats and malformed JSON schemas", () => {
   assertApiError(() => parseChatCompletionRequest({
     model: alias,

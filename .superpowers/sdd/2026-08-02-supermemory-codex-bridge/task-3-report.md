@@ -47,3 +47,27 @@ Output: `11` tests passed, `0` failed; TypeScript build exited `0`.
 ## Concerns
 
 None. The task brief intentionally leaves semantic JSON Schema validation to the downstream schema consumer; this task validates the required OpenAI `json_schema` envelope and preserves the schema object unchanged.
+## Review fix round 1/5
+
+### RED
+
+Added focused tests for an unlisted top-level field, `tool_choice`, `parallel_tool_calls`, legacy `function_call`/`functions`, `stream_options`, and assistant `tool_calls`/`function_call` metadata.
+
+```text
+cd services/supermemory-codex-bridge && npx tsx --test tests/openai.test.ts tests/prompt.test.ts
+```
+
+Output: `9` passed, `2` failed. Both failures were `Missing expected exception`, proving the prior parser silently accepted the unsupported fields.
+
+### GREEN and verification
+
+Implemented an explicit top-level allowlist and stable `ApiError` rejection codes: `unsupported_field`, `unsupported_tools`, and `unsupported_streaming`. Assistant tool metadata is rejected before text content is normalized, so it cannot be silently discarded.
+
+```text
+cd services/supermemory-codex-bridge && npx tsx --test tests/openai.test.ts tests/prompt.test.ts
+# 11 passed, 0 failed
+cd services/supermemory-codex-bridge && npm test && npm run build
+# 13 passed, 0 failed; TypeScript build exited 0
+```
+
+Self-review: the allowlist contains exactly the documented request fields; unknown keys are rejected without echoing raw request values, and tool metadata uses the existing generic tools error.

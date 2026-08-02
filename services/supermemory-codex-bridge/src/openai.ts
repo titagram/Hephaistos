@@ -49,6 +49,19 @@ export class ApiError extends Error {
 }
 
 const supportedRoles = new Set<ChatRole>(["system", "developer", "user", "assistant"]);
+const supportedRequestFields = new Set([
+  "model",
+  "messages",
+  "response_format",
+  "temperature",
+  "top_p",
+  "max_tokens",
+  "max_completion_tokens",
+  "n",
+  "stream",
+  "tools",
+]);
+const toolRequestFields = new Set(["tool_choice", "parallel_tool_calls", "function_call", "functions"]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -56,6 +69,21 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function invalidRequest(message: string): never {
   throw new ApiError(400, "invalid_request", message);
+}
+
+function rejectUnsupportedRequestFields(body: Record<string, unknown>): void {
+  for (const field of Object.keys(body)) {
+    if (supportedRequestFields.has(field)) {
+      continue;
+    }
+    if (field === "stream_options") {
+      throw new ApiError(400, "unsupported_streaming", "Streaming options are not supported.");
+    }
+    if (toolRequestFields.has(field)) {
+      throw new ApiError(400, "unsupported_tools", "Tools are not supported.");
+    }
+    throw new ApiError(400, "unsupported_field", "The request contains an unsupported field.");
+  }
 }
 
 function parseMessages(value: unknown): ChatMessage[] {
@@ -69,6 +97,9 @@ function parseMessages(value: unknown): ChatMessage[] {
     }
     if (!supportedRoles.has(message.role as ChatRole)) {
       throw new ApiError(400, "unsupported_message", "The message role is not supported.");
+    }
+    if (Object.hasOwn(message, "tool_calls") || Object.hasOwn(message, "function_call")) {
+      throw new ApiError(400, "unsupported_tools", "Tools are not supported.");
     }
 
     return { role: message.role as ChatRole, content: parseContent(message.content) };
@@ -141,6 +172,7 @@ export function parseChatCompletionRequest(value: unknown, publicModel: string):
   if (!isRecord(value)) {
     invalidRequest("The request body must be an object.");
   }
+  rejectUnsupportedRequestFields(value);
   if (typeof value.model !== "string") {
     invalidRequest("model must be a string.");
   }
