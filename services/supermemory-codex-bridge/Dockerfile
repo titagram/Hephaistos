@@ -19,9 +19,9 @@ RUN npm ci --omit=dev
 FROM --platform=$SUPERMEMORY_PLATFORM node:22-bookworm-slim@sha256:7af03b14a13c8cdd38e45058fd957bf00a72bbe17feac43b1c15a689c029c732
 
 WORKDIR /app
-COPY --from=build --chown=node:node /app/dist ./dist
-COPY --from=production-dependencies --chown=node:node /app/node_modules ./node_modules
-COPY --from=build --chown=node:node /app/package.json ./package.json
+COPY --from=build /app/dist/src ./dist/src
+COPY --from=production-dependencies /app/node_modules ./node_modules
+COPY --from=build /app/package.json ./package.json
 RUN ln -s /app/node_modules/.bin/codex /usr/local/bin/codex \
     && mkdir -p /workspace /var/lib/codex \
     && chown node:node /workspace /var/lib/codex
