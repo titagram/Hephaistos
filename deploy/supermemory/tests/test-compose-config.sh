@@ -41,7 +41,7 @@ assert.deepEqual(
   ["backend", "traefik_default"],
   "server must join backend and traefik_default",
 );
-assert.equal(config.networks.backend.internal, true, "backend must be private");
+assert.notEqual(config.networks.backend.internal, true, "backend must permit outbound Internet egress");
 assert.equal(config.networks.traefik_default.external, true, "Traefik network must be external");
 
 for (const [name, service] of Object.entries({ bridge, server })) {

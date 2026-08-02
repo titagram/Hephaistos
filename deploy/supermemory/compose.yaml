@@ -120,6 +120,5 @@ volumes:
 
 networks:
   backend:
-    internal: true
   traefik_default:
     external: true
