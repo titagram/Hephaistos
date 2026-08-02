@@ -160,3 +160,6 @@ infographic/
 
 # Host-only Traefik staging files; canonical config lives on the server.
 .codex-tmp-traefik/
+
+# Isolated feature worktrees managed by Superpowers skills.
+.worktrees/
