@@ -32,11 +32,19 @@ class FakeCodexProcess extends EventEmitter implements CodexProcess {
   signalCode: NodeJS.Signals | null = null;
   exitOnTerminate = true;
   exitOnKill = true;
+  errorOnTerminate = false;
+  errorOnKill = false;
 
   kill(signal: NodeJS.Signals = "SIGTERM"): boolean {
     this.signals.push(signal);
+    if (signal === "SIGTERM" && this.errorOnTerminate) {
+      queueMicrotask(() => this.emit("error", new Error("signal delivery failed")));
+    }
     if (signal === "SIGTERM" && this.exitOnTerminate) {
       queueMicrotask(() => this.exit(0, signal));
+    }
+    if (signal === "SIGKILL" && this.errorOnKill) {
+      queueMicrotask(() => this.emit("error", new Error("forced signal delivery failed")));
     }
     if (signal === "SIGKILL" && this.exitOnKill) {
       queueMicrotask(() => this.exit(null, signal));
@@ -466,11 +474,6 @@ test("routes interleaved concurrent notifications by thread and turn", async () 
     turnId: "turn-b",
     item: { id: "message-b", type: "agentMessage", text: "answer B" },
   });
-  peer.notify("item/completed", {
-    threadId: "thread-b",
-    turnId: "turn-a",
-    item: { id: "crossed-message", type: "agentMessage", text: "must be ignored" },
-  });
   peer.notify("thread/tokenUsage/updated", {
     threadId: "thread-b",
     turnId: "turn-b",
@@ -506,6 +509,47 @@ test("routes interleaved concurrent notifications by thread and turn", async () 
     { text: "answer B", usage: { inputTokens: 22, outputTokens: 2 } },
   ]);
   assert.equal(processes.length, 1);
+  await server.close();
+});
+
+test("fails and interrupts both turns when a notification crosses known thread and turn ids", async () => {
+  const { server, processes } = createHarness();
+  const first = server.run({ prompt: "Conflicting notification A." });
+  const second = server.run({ prompt: "Conflicting notification B." });
+  const peer = new FakeRpcPeer(processes[0]!);
+  await initialize(peer);
+
+  const threadStarts = [await peer.next(), await peer.next()];
+  peer.respond(threadStarts[0]!.id!, { thread: { id: "thread-conflict-a" } });
+  peer.respond(threadStarts[1]!.id!, { thread: { id: "thread-conflict-b" } });
+  const turnStarts = [await peer.next(), await peer.next()];
+  const byThread = new Map(turnStarts.map((request) => [(request.params as { threadId: string }).threadId, request]));
+  peer.respond(byThread.get("thread-conflict-a")!.id!, {
+    turn: { id: "turn-conflict-a", status: "inProgress", items: [], error: null },
+  });
+  peer.respond(byThread.get("thread-conflict-b")!.id!, {
+    turn: { id: "turn-conflict-b", status: "inProgress", items: [], error: null },
+  });
+  await Promise.resolve();
+
+  peer.notify("turn/completed", {
+    threadId: "thread-conflict-a",
+    turn: { id: "turn-conflict-b", status: "completed", items: [], error: null },
+  });
+
+  await Promise.all([
+    within(expectKind(first, "upstream")),
+    within(expectKind(second, "upstream")),
+  ]);
+  const interrupts = [await within(peer.next()), await within(peer.next())];
+  assert.deepEqual(
+    interrupts.map((message) => message.params).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))),
+    [
+      { threadId: "thread-conflict-a", turnId: "turn-conflict-a" },
+      { threadId: "thread-conflict-b", turnId: "turn-conflict-b" },
+    ],
+  );
+  for (const interrupt of interrupts) peer.respond(interrupt.id!, {});
   await server.close();
 });
 
@@ -601,13 +645,15 @@ test("reaps a child after initialize failure before allowing one replacement", a
   await server.close();
 });
 
-test("does not start a replacement until a signaled child actually exits", async () => {
+test("does not release a child when an error fires during reap without an exit", async () => {
   const { server, processes } = createHarness({
     shutdownTimeoutMs: 5,
     configureProcess: (process, index) => {
       if (index === 0) {
         process.exitOnTerminate = false;
         process.exitOnKill = false;
+        process.errorOnTerminate = true;
+        process.errorOnKill = true;
       }
     },
   });
@@ -782,18 +828,57 @@ for (const approval of [
       within(expectKind(first, "forbidden_tool")),
       within(expectKind(second, "forbidden_tool")),
     ]);
-    const interrupts = [await peer.next(), await peer.next()];
+    const expectedInterrupts = approval.name === "conflicting"
+      ? [
+          { threadId: "thread-approval-a", turnId: "turn-approval-a" },
+          { threadId: "thread-approval-a", turnId: "turn-approval-b" },
+          { threadId: "thread-approval-b", turnId: "turn-approval-b" },
+        ]
+      : [
+          { threadId: "thread-approval-a", turnId: "turn-approval-a" },
+          { threadId: "thread-approval-b", turnId: "turn-approval-b" },
+        ];
+    const interrupts: RpcMessage[] = [];
+    for (let index = 0; index < expectedInterrupts.length; index += 1) {
+      interrupts.push(await within(peer.next()));
+    }
     assert.deepEqual(
       interrupts.map((message) => message.params).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))),
-      [
-        { threadId: "thread-approval-a", turnId: "turn-approval-a" },
-        { threadId: "thread-approval-b", turnId: "turn-approval-b" },
-      ],
+      expectedInterrupts,
     );
     for (const interrupt of interrupts) peer.respond(interrupt.id!, {});
     await server.close();
   });
 }
+
+test("interrupts the candidate turn id from an approval received before turn binding", async () => {
+  const { server, processes } = createHarness();
+  const result = server.run({ prompt: "Approval before turn binding." });
+  const peer = new FakeRpcPeer(processes[0]!);
+  await initialize(peer);
+  const threadStart = await peer.next();
+  peer.respond(threadStart.id!, { thread: { id: "thread-approval-candidate" } });
+  await peer.next();
+
+  peer.request("approval-candidate", "item/commandExecution/requestApproval", {
+    threadId: "thread-approval-candidate",
+    turnId: "turn-approval-candidate",
+  });
+  assert.deepEqual(await peer.next(), {
+    jsonrpc: "2.0",
+    id: "approval-candidate",
+    error: { code: -32601, message: "Interactive requests are disabled" },
+  });
+  await within(expectKind(result, "forbidden_tool"));
+  const interrupt = await within(peer.next());
+  assert.equal(interrupt.method, "turn/interrupt");
+  assert.deepEqual(interrupt.params, {
+    threadId: "thread-approval-candidate",
+    turnId: "turn-approval-candidate",
+  });
+  peer.respond(interrupt.id!, {});
+  await server.close();
+});
 
 test("rejects a successful completion snapshot containing a forbidden item", async () => {
   const { server, processes } = createHarness();

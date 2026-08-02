@@ -32,9 +32,10 @@ export interface CodexProcess {
   readonly exitCode: number | null;
   readonly signalCode: NodeJS.Signals | null;
   kill(signal?: NodeJS.Signals): boolean;
-  once(event: "exit", listener: (code: number | null, signal: NodeJS.Signals | null) => void): this;
+  once(event: "exit" | "close", listener: (code: number | null, signal: NodeJS.Signals | null) => void): this;
   once(event: "error", listener: (error: Error) => void): this;
-  off(event: "exit", listener: (code: number | null, signal: NodeJS.Signals | null) => void): this;
+  on(event: "error", listener: (error: Error) => void): this;
+  off(event: "exit" | "close", listener: (code: number | null, signal: NodeJS.Signals | null) => void): this;
 }
 
 export interface CodexProcessSpawnOptions {
@@ -227,6 +228,9 @@ export class CodexAppServer implements CodexRunner {
     if (this.closed) {
       throw new CodexUpstreamError("unavailable");
     }
+    if (this.process && !this.rpc) {
+      throw new CodexUpstreamError("unavailable");
+    }
     if (this.startPromise) {
       return this.startPromise;
     }
@@ -252,7 +256,8 @@ export class CodexAppServer implements CodexRunner {
     this.process = process;
 
     process.once("exit", (code, signal) => this.handleProcessDeath(process, code, signal));
-    process.once("error", () => this.handleProcessDeath(process, null, null));
+    process.once("close", (code, signal) => this.handleProcessDeath(process, code, signal));
+    process.on("error", () => this.handleProcessError(process));
     this.drainSanitizedStderr(process.stderr);
 
     let rpc: JsonRpcClient | undefined;
@@ -285,7 +290,14 @@ export class CodexAppServer implements CodexRunner {
     const record = asRecord(params);
     if (!record) return;
     const state = this.findTurn(record);
-    if (!state) return;
+    if (!state) {
+      const conflicts = this.findConflictingTurns(record);
+      if (conflicts.length > 0) {
+        const error = new CodexUpstreamError("upstream");
+        for (const conflict of conflicts) this.failTurn(conflict, error, rpc, true);
+      }
+      return;
+    }
 
     const turn = asRecord(record.turn);
     const notificationTurnId = readId(record.turnId) ?? readId(turn?.id);
@@ -363,7 +375,10 @@ export class CodexAppServer implements CodexRunner {
     const turn = asRecord(record.turn);
     const turnId = readId(record.turnId) ?? readId(turn?.id);
     if (turnId && !state.turnId) {
-      this.failTurns(active, new CodexUpstreamError("forbidden_tool"), rpc);
+      const error = new CodexUpstreamError("forbidden_tool");
+      if (active.length > 1) this.failTurns(active, error, rpc);
+      else this.failTurn(state, error);
+      this.interruptTurn(state, rpc, turnId);
       return;
     }
     if (turnId && !this.bindTurnId(state, turnId, rpc)) {
@@ -382,6 +397,19 @@ export class CodexAppServer implements CodexRunner {
     const byThread = threadId ? this.turnsByThread.get(threadId) : undefined;
     if (turnId && byThread?.turnId && byThread.turnId !== turnId) return undefined;
     return byThread;
+  }
+
+  private findConflictingTurns(params: Record<string, unknown>): TurnState[] {
+    const turn = asRecord(params.turn);
+    const turnId = readId(params.turnId) ?? readId(turn?.id);
+    const threadId = readId(params.threadId);
+    if (!turnId || !threadId) return [];
+    const byTurn = this.turnsById.get(turnId);
+    const byThread = this.turnsByThread.get(threadId);
+    if (byTurn && byThread && byTurn !== byThread) return [byThread, byTurn];
+    if (byTurn && byTurn.threadId !== threadId) return [byTurn];
+    if (byThread?.turnId && byThread.turnId !== turnId) return [byThread];
+    return [];
   }
 
   private bindTurnId(state: TurnState, turnId: string, rpc: JsonRpcClient): boolean {
@@ -493,6 +521,19 @@ export class CodexAppServer implements CodexRunner {
     }
   }
 
+  private handleProcessError(process: CodexProcess): void {
+    if (this.process !== process) return;
+    const rpc = this.rpc;
+    if (this.rpc === rpc) this.rpc = undefined;
+    rpc?.close();
+    for (const state of [...this.turnsByThread.values()]) {
+      this.failTurn(state, new CodexUpstreamError("unavailable"));
+    }
+    void this.terminateAndReap(process).then((reaped) => {
+      if (reaped && this.process === process) this.process = undefined;
+    });
+  }
+
   private drainSanitizedStderr(stderr: Readable): void {
     let hasPartialLine = false;
     stderr.on("data", (chunk: Buffer | string) => {
@@ -543,7 +584,7 @@ export class CodexAppServer implements CodexRunner {
   private terminateAndReap(process: CodexProcess): Promise<boolean> {
     const existing = this.terminationPromises.get(process as object);
     if (existing) return existing;
-    const termination = this.terminateAndReapOnce(process);
+    const termination = Promise.resolve().then(() => this.terminateAndReapOnce(process));
     this.terminationPromises.set(process as object, termination);
     return termination;
   }
@@ -687,14 +728,18 @@ function waitForExit(process: CodexProcess, timeoutMs: number): Promise<boolean>
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      process.off("exit", onExit);
+      process.off("close", onExit);
       resolve(true);
     };
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
       process.off("exit", onExit);
+      process.off("close", onExit);
       resolve(false);
     }, timeoutMs);
     process.once("exit", onExit);
+    process.once("close", onExit);
   });
 }
