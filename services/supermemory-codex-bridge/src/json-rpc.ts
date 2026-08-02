@@ -1,3 +1,4 @@
+import { StringDecoder } from "node:string_decoder";
 import type { Readable, Writable } from "node:stream";
 
 const MAX_PROTOCOL_LINE_LENGTH = 4 * 1024 * 1024;
@@ -27,8 +28,11 @@ export class JsonRpcClient {
   private readonly pending = new Map<JsonRpcId, PendingRequest>();
   private readonly notificationListeners = new Set<NotificationListener>();
   private readonly requestListeners = new Set<RequestListener>();
+  private readonly decoder = new StringDecoder("utf8");
+  private readonly completeLineByteLengths: number[] = [];
   private nextId = 1;
   private buffer = "";
+  private bufferedLineByteLength = 0;
   private closed = false;
 
   private readonly onData = (chunk: unknown): void => {
@@ -36,23 +40,41 @@ export class JsonRpcClient {
       return;
     }
 
-    this.buffer += String(chunk);
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+    let start = 0;
+    for (let index = 0; index < bytes.length; index += 1) {
+      if (bytes[index] !== 0x0A) {
+        continue;
+      }
+      this.bufferedLineByteLength += index - start;
+      this.completeLineByteLengths.push(this.bufferedLineByteLength);
+      this.bufferedLineByteLength = 0;
+      start = index + 1;
+    }
+    this.bufferedLineByteLength += bytes.length - start;
+    if (this.bufferedLineByteLength > MAX_PROTOCOL_LINE_LENGTH) {
+      this.closeProtocolError();
+      return;
+    }
 
+    this.buffer += this.decoder.write(bytes);
     let newlineIndex = this.buffer.indexOf("\n");
     while (newlineIndex !== -1) {
       let line = this.buffer.slice(0, newlineIndex);
       this.buffer = this.buffer.slice(newlineIndex + 1);
+      const lineByteLength = this.completeLineByteLengths.shift();
+      if (lineByteLength === undefined) {
+        this.closeProtocolError();
+        return;
+      }
       if (line.endsWith("\r")) {
         line = line.slice(0, -1);
       }
-      if (line.length > MAX_PROTOCOL_LINE_LENGTH || !this.handleLine(line)) {
+      if (lineByteLength > MAX_PROTOCOL_LINE_LENGTH || !this.handleLine(line)) {
         this.closeProtocolError();
         return;
       }
       newlineIndex = this.buffer.indexOf("\n");
-    }
-    if (this.buffer.length > MAX_PROTOCOL_LINE_LENGTH) {
-      this.closeProtocolError();
     }
   };
 
@@ -186,6 +208,9 @@ export class JsonRpcClient {
 
     if (hasId && (hasResult || hasError)) {
       if (hasResult === hasError) {
+        return false;
+      }
+      if (hasError && !isJsonRpcError(message.error)) {
         return false;
       }
       this.handleResponse(message.id as JsonRpcId, message);

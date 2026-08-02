@@ -72,6 +72,20 @@ test("buffers a JSON-RPC line split across stdout chunks", async () => {
   client.close();
 });
 
+test("preserves a multi-byte result split between stdout chunks", async () => {
+  const { client, stdin, stdout } = createTransport();
+  const request = client.request<string>("thread/read");
+  await nextLine(stdin);
+  const response = Buffer.from("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"café\"}\n");
+  const splitAt = response.indexOf(Buffer.from("é")) + 1;
+
+  stdout.write(response.subarray(0, splitAt));
+  stdout.write(response.subarray(splitAt));
+
+  assert.equal(await request, "café");
+  client.close();
+});
+
 test("dispatches every message delivered in one stdout chunk", async () => {
   const { client, stdin, stdout } = createTransport();
   const notifications: Array<{ method: string; params: unknown }> = [];
@@ -186,16 +200,44 @@ test("rejects malformed JSON-RPC error responses as protocol failures", async ()
   await expectRejection(request, "protocol");
 });
 
-test("accepts a protocol line exactly four MiB long", async () => {
+test("rejects malformed errors for unknown response ids", async () => {
+  const { client, stdin, stdout } = createTransport();
+  const request = client.request("turn/start");
+  await nextLine(stdin);
+
+  stdout.write('{"jsonrpc":"2.0","id":999,"error":{"code":"bad","message":"Not ready"}}\n');
+
+  let outcome = "still pending";
+  void request.then(() => { outcome = "resolved"; }, () => { outcome = "rejected"; });
+  await Promise.resolve();
+  assert.equal(outcome, "rejected");
+});
+
+test("accepts a four MiB protocol line containing multi-byte text", async () => {
   const { client, stdin, stdout } = createTransport();
   const request = client.request<string>("turn/start");
   await nextLine(stdin);
   const prefix = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"";
   const suffix = "\"}";
-  stdout.write(`${prefix}${"x".repeat(4 * 1024 * 1024 - prefix.length - suffix.length)}${suffix}\n`);
+  const resultBytes = 4 * 1024 * 1024 - Buffer.byteLength(prefix) - Buffer.byteLength(suffix);
+  const result = "é".repeat(Math.floor(resultBytes / 2)) + (resultBytes % 2 === 0 ? "" : "x");
+  stdout.write(`${prefix}${result}${suffix}\n`);
 
-  assert.equal((await request).length, 4 * 1024 * 1024 - prefix.length - suffix.length);
+  assert.equal(Buffer.byteLength(await request), resultBytes);
   client.close();
+});
+
+test("closes when multi-byte text exceeds the four MiB protocol limit", async () => {
+  const { client, stdin, stdout } = createTransport();
+  const request = client.request("turn/start");
+  await nextLine(stdin);
+  const prefix = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"";
+  const suffix = "\"}";
+  const resultBytes = 4 * 1024 * 1024 - Buffer.byteLength(prefix) - Buffer.byteLength(suffix);
+  const result = "é".repeat(Math.floor(resultBytes / 2) + 1) + (resultBytes % 2 === 0 ? "" : "x");
+  stdout.write(`${prefix}${result}${suffix}\n`);
+
+  await expectRejection(request, "protocol");
 });
 
 test("closes when a protocol line exceeds four MiB", async () => {
