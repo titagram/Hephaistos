@@ -130,6 +130,7 @@ _sessions: dict[str, dict] = {}
 _methods: dict[str, callable] = {}
 _pending: dict[str, tuple[str, threading.Event]] = {}
 _pending_prompt_payloads: dict[str, tuple[str, dict]] = {}
+_pending_prompt_emissions: dict[str, Any] = {}
 _answers: dict[str, str] = {}
 _plugin_invocations: dict[str, list] = {}
 _db = None
@@ -1003,7 +1004,7 @@ def _emit(event: str, sid: str, payload: dict | None = None):
     params = {"type": event, "session_id": sid}
     if payload is not None:
         params["payload"] = payload
-    write_json({"jsonrpc": "2.0", "method": "event", "params": params})
+    return write_json({"jsonrpc": "2.0", "method": "event", "params": params})
 
 
 def _emit_approval_request(sid: str, data: dict | None) -> None:
@@ -1901,32 +1902,167 @@ def _enable_gateway_prompts() -> None:
 # ── Blocking prompt factory ──────────────────────────────────────────
 
 
+def _prompt_event_frame(event: str, sid: str, payload: dict) -> dict:
+    return {
+        "jsonrpc": "2.0",
+        "method": "event",
+        "params": {"type": event, "session_id": sid, "payload": payload},
+    }
+
+
+def _prompt_transport(sid: str):
+    """Capture the request's transport before a detach/close can rebind it."""
+    with _sessions_lock:
+        transport = (_sessions.get(sid) or {}).get("transport")
+    return transport or current_transport() or _stdio_transport
+
+
+class _PromptEmission:
+    """Non-blocking, ordered request/tombstone transport sequencer.
+
+    A guarded plugin prompt must not make lifecycle teardown inherit a socket
+    timeout or a blocked stdio flush.  One daemon owns the potentially blocking
+    request write.  Cancellation only flips local state; if the request was (or
+    may have been) sent, the same sequencer writes ``prompt.dismiss`` strictly
+    afterward on the captured transport.
+    """
+
+    def __init__(
+        self, *, event: str, sid: str, payload: dict, transport, guard, lease: int
+    ) -> None:
+        self._event = event
+        self._sid = sid
+        self._payload = dict(payload)
+        self._transport = transport
+        self._guard = guard
+        self._lease = lease
+        self._lock = threading.Lock()
+        self._cancelled = False
+        self._request_started = False
+        self._request_finished = False
+        self._dismiss_started = False
+
+    def start(self) -> None:
+        thread = threading.Thread(
+            target=self._run,
+            name=f"tui-prompt-emit-{self._payload.get('request_id', 'unknown')}",
+            daemon=True,
+        )
+        thread.start()
+
+    def cancel(self) -> None:
+        start_dismiss = False
+        with self._lock:
+            if self._cancelled:
+                return
+            self._cancelled = True
+            if self._request_finished and not self._dismiss_started:
+                self._dismiss_started = True
+                start_dismiss = True
+        if start_dismiss:
+            threading.Thread(
+                target=self._write_dismiss,
+                name=f"tui-prompt-dismiss-{self._payload.get('request_id', 'unknown')}",
+                daemon=True,
+            ).start()
+
+    def _run(self) -> None:
+        with self._lock:
+            if self._cancelled or not self._guard.lease_is_active(self._lease):
+                return
+            self._request_started = True
+
+        # External I/O is deliberately outside every invocation/session/prompt
+        # lock.  This daemon may wait on a socket or flush without delaying
+        # session.close, session.interrupt, or disconnect cleanup.
+        self._transport.write(
+            _prompt_event_frame(self._event, self._sid, dict(self._payload))
+        )
+
+        with self._lock:
+            self._request_finished = True
+            cancelled = self._cancelled or not self._guard.lease_is_active(self._lease)
+            if cancelled and not self._dismiss_started:
+                self._dismiss_started = True
+                start_dismiss = True
+            else:
+                start_dismiss = False
+        if start_dismiss:
+            self._write_dismiss()
+
+    def _write_dismiss(self) -> None:
+        self._transport.write(
+            _prompt_event_frame(
+                "prompt.dismiss",
+                self._sid,
+                {
+                    "request_id": self._payload.get("request_id", ""),
+                    "request_type": self._event,
+                },
+            )
+        )
+
+
+def _cancel_pending_prompt(rid: str) -> None:
+    emission = None
+    with _prompt_lock:
+        entry = _pending.pop(rid, None)
+        _pending_prompt_payloads.pop(rid, None)
+        emission = _pending_prompt_emissions.pop(rid, None)
+        if entry is not None:
+            _answers[rid] = ""
+            entry[1].set()
+    if emission is not None:
+        emission.cancel()
+
+
 def _block(event: str, sid: str, payload: dict, timeout: int = 300, guard=None) -> str:
     rid = uuid.uuid4().hex[:8]
     ev = threading.Event()
+    payload["request_id"] = rid
+    emission = None
+    lease = guard.reserve() if guard is not None else None
+    if guard is not None and lease is None:
+        return ""
+    transport = _prompt_transport(sid) if guard is not None else None
 
-    def _register_and_emit() -> None:
-        with _prompt_lock:
-            _pending[rid] = (sid, ev)
-            payload["request_id"] = rid
-            _pending_prompt_payloads[rid] = (event, dict(payload))
-        # The invocation guard remains held across this emit, while the prompt
-        # lock is released so a fast client response cannot deadlock on write.
-        _emit(event, sid, payload)
-
-    if guard is not None:
-        if not guard.run_if_active(_register_and_emit):
+    with _prompt_lock:
+        if guard is not None and not guard.lease_is_active(lease):
             return ""
+        _pending[rid] = (sid, ev)
+        _pending_prompt_payloads[rid] = (event, dict(payload))
+        if guard is not None:
+            emission = _PromptEmission(
+                event=event,
+                sid=sid,
+                payload=payload,
+                transport=transport,
+                guard=guard,
+                lease=lease,
+            )
+            _pending_prompt_emissions[rid] = emission
+
+    if emission is not None:
+        emission.start()
+        # Cancellation can win after registration but before the emitter owns
+        # its thread. Revalidation converts that race into a released broker;
+        # the sequencer either skips the request or follows it with dismissal.
+        if not guard.lease_is_active(lease):
+            _cancel_pending_prompt(rid)
     else:
-        _register_and_emit()
+        _emit(event, sid, payload)
     try:
         ev.wait(timeout=timeout)
     finally:
         with _prompt_lock:
             _pending.pop(rid, None)
             _pending_prompt_payloads.pop(rid, None)
-    with _prompt_lock:
-        return _answers.pop(rid, "")
+            leftover_emission = _pending_prompt_emissions.pop(rid, None)
+            answered = rid in _answers
+            answer = _answers.pop(rid, "")
+        if not answered and leftover_emission is not None:
+            leftover_emission.cancel()
+    return answer
 
 
 def _clear_pending(sid: str | None = None, *, contexts=None) -> None:
@@ -1942,13 +2078,19 @@ def _clear_pending(sid: str | None = None, *, contexts=None) -> None:
         contexts = _take_plugin_invocations(sid)
     for context in contexts:
         context.revoke()
+    emissions = []
     with _prompt_lock:
         for rid, (owner_sid, ev) in list(_pending.items()):
             if sid is None or owner_sid == sid:
                 _answers[rid] = ""
                 _pending.pop(rid, None)
                 _pending_prompt_payloads.pop(rid, None)
+                emission = _pending_prompt_emissions.pop(rid, None)
+                if emission is not None:
+                    emissions.append(emission)
                 ev.set()
+    for emission in emissions:
+        emission.cancel()
     for context in contexts:
         if not context.invocation.wait_for_bound_task(_PLUGIN_INVOCATION_JOIN_TIMEOUT_S):
             logger.warning(

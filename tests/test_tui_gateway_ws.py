@@ -1,6 +1,9 @@
 import asyncio
+import json
 import threading
 import time
+
+import pytest
 
 from hermes_cli import mcp_startup
 from tui_gateway import server
@@ -145,6 +148,7 @@ def test_ws_disconnect_cancels_interactive_invocations_for_close_and_detach(monk
     server._sessions.clear()
     server._pending.clear()
     server._pending_prompt_payloads.clear()
+    server._pending_prompt_emissions.clear()
     server._answers.clear()
     server._plugin_invocations.clear()
     try:
@@ -174,14 +178,114 @@ def test_ws_disconnect_cancels_interactive_invocations_for_close_and_detach(monk
         assert all(event.is_set() for event in events.values())
         assert not server._pending
         assert not server._pending_prompt_payloads
+        assert not server._pending_prompt_emissions
         assert not server._plugin_invocations
     finally:
         server._clear_pending()
         server._sessions.clear()
         server._pending.clear()
         server._pending_prompt_payloads.clear()
+        server._pending_prompt_emissions.clear()
         server._answers.clear()
         server._plugin_invocations.clear()
+
+
+@pytest.mark.parametrize(
+    ("close_on_disconnect", "expected_cleanup"),
+    [(False, (0, 1)), (True, (1, 0))],
+)
+def test_ws_disconnect_does_not_wait_for_inflight_plugin_prompt_send(
+    monkeypatch, close_on_disconnect, expected_cleanup
+):
+    """Lifecycle cleanup must not inherit the WebSocket transport timeout."""
+    monkeypatch.setattr(server, "_WS_ORPHAN_REAP_GRACE_S", 0)
+    monkeypatch.setattr(server, "_teardown_session", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(server, "_PLUGIN_INVOCATION_JOIN_TIMEOUT_S", 0.5)
+    monkeypatch.setattr(ws_mod, "_WS_WRITE_TIMEOUT_S", 0.25)
+    send_entered = threading.Event()
+    release_send = threading.Event()
+    sent = []
+
+    class BlockingWS:
+        async def send_text(self, line):
+            sent.append(json.loads(line))
+            send_entered.set()
+            while not release_send.is_set():
+                await asyncio.sleep(0.005)
+
+    loop = asyncio.new_event_loop()
+    loop_thread = threading.Thread(target=loop.run_forever, daemon=True)
+    loop_thread.start()
+    server._sessions.clear()
+    server._pending.clear()
+    server._pending_prompt_payloads.clear()
+    server._pending_prompt_emissions.clear()
+    server._answers.clear()
+    server._plugin_invocations.clear()
+    try:
+        transport = ws_mod.WSTransport(BlockingWS(), loop, peer="prompt-race")
+        sid = "inflight-prompt"
+        server._sessions[sid] = {
+            "transport": transport,
+            "close_on_disconnect": close_on_disconnect,
+            "session_key": sid,
+        }
+        context = _context_for(sid)
+        assert server._register_plugin_invocation(sid, context) is True
+        broker = threading.Thread(
+            target=lambda: server._block(
+                "secret.request",
+                sid,
+                {"prompt": "Token", "env_var": "PLUGIN_SECRET"},
+                timeout=1,
+                guard=context.invocation,
+            )
+        )
+        broker.start()
+        assert send_entered.wait(1), "real WSTransport send never entered"
+
+        cleanup_result = []
+        cleanup = threading.Thread(
+            target=lambda: cleanup_result.append(server._close_sessions_for_transport(transport))
+        )
+        cleanup.start()
+        cleanup.join(0.05)
+        returned_before_send_release = not cleanup.is_alive()
+        release_send.set()
+        cleanup.join(1)
+        broker.join(1)
+        deadline = time.time() + 1
+        while len(sent) < 2 and time.time() < deadline:
+            time.sleep(0.01)
+
+        assert returned_before_send_release
+        assert cleanup_result == [expected_cleanup]
+        assert context.invocation.cancelled
+        assert sid not in server._plugin_invocations
+        assert not server._pending
+        assert not server._pending_prompt_payloads
+        assert not server._pending_prompt_emissions
+        assert not broker.is_alive()
+        assert [frame["params"]["type"] for frame in sent] == [
+            "secret.request",
+            "prompt.dismiss",
+        ]
+        assert (
+            sent[0]["params"]["payload"]["request_id"]
+            == sent[1]["params"]["payload"]["request_id"]
+        )
+    finally:
+        release_send.set()
+        server._clear_pending()
+        server._sessions.clear()
+        server._pending.clear()
+        server._pending_prompt_payloads.clear()
+        server._pending_prompt_emissions.clear()
+        server._answers.clear()
+        server._plugin_invocations.clear()
+        loop.call_soon_threadsafe(loop.stop)
+        loop_thread.join(timeout=2)
+        loop.close()
 
 
 def test_ws_reconnect_accepts_a_fresh_invocation_without_prompt_replay(monkeypatch):

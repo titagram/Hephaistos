@@ -30,8 +30,10 @@ class PluginCommandInvocation:
     """Thread-safe cooperative lifecycle handle for one command invocation."""
 
     def __init__(self) -> None:
-        self._lock = threading.Lock()
+        self._condition = threading.Condition(threading.Lock())
         self._active = True
+        self._generation = 0
+        self._phase = "unstarted"
         self._task = None
         self._loop = None
         self._loop_thread_id: int | None = None
@@ -39,62 +41,112 @@ class PluginCommandInvocation:
 
     @property
     def cancelled(self) -> bool:
-        with self._lock:
+        with self._condition:
             return not self._active
 
+    def begin_handler(self) -> bool:
+        """Reserve handler entry atomically against lifecycle cancellation."""
+        with self._condition:
+            if not self._active or self._phase != "unstarted":
+                return False
+            self._phase = "handler"
+            return True
+
+    def mark_sync(self) -> None:
+        """Record that this invocation has no asynchronously owned task."""
+        with self._condition:
+            if self._phase == "handler":
+                self._phase = "sync"
+                self._condition.notify_all()
+
+    def begin_task_binding(self, loop=None) -> bool:
+        """Publish async-task ownership before ``create_task`` is called."""
+        with self._condition:
+            if not self._active or self._phase == "finished":
+                return False
+            self._phase = "binding"
+            if loop is not None:
+                self._loop = loop
+                self._loop_thread_id = threading.get_ident()
+            self._condition.notify_all()
+            return True
+
     def bind_task(self, task, loop) -> None:
-        with self._lock:
+        with self._condition:
             self._task, self._loop = task, loop
             self._loop_thread_id = threading.get_ident()
+            self._phase = "bound"
             cancelled = not self._active
+            self._condition.notify_all()
         if cancelled:
-            loop.call_soon_threadsafe(task.cancel)
+            # bind_task is called on the task's owner loop before the resolver
+            # yields. Cancelling directly here beats the task's already-queued
+            # first step; call_soon_threadsafe would be ordered behind it.
+            task.cancel()
 
     @property
     def has_bound_task(self) -> bool:
-        with self._lock:
+        with self._condition:
             return self._task is not None
 
-    def run_if_active(self, operation: Callable[[], None]) -> bool:
-        """Run one capability operation atomically against cancellation.
-
-        Prompt registration and emission use this guard so teardown either
-        wins before both operations or waits until both have completed.
-        """
-        with self._lock:
+    def reserve(self) -> int | None:
+        """Return a generation lease for a short capability operation."""
+        with self._condition:
             if not self._active:
-                return False
-            operation()
-            return True
+                return None
+            return self._generation
+
+    def lease_is_active(self, generation: int) -> bool:
+        """Revalidate a capability lease without running caller I/O."""
+        with self._condition:
+            return self._active and self._generation == generation
 
     def cancel(self) -> None:
-        with self._lock:
+        with self._condition:
             if not self._active:
                 return
             self._active = False
+            self._generation += 1
             task, loop = self._task, self._loop
+            same_thread = self._loop_thread_id == threading.get_ident()
+            self._condition.notify_all()
         if task is not None and loop is not None:
             try:
-                loop.call_soon_threadsafe(task.cancel)
+                if same_thread:
+                    task.cancel()
+                else:
+                    loop.call_soon_threadsafe(task.cancel)
             except RuntimeError:
                 # The owner can finish between the lock snapshot and enqueue.
                 pass
 
     def finish(self) -> None:
-        self.done.set()
+        with self._condition:
+            self._phase = "finished"
+            self.done.set()
+            self._condition.notify_all()
 
     def wait_for_bound_task(self, timeout: float) -> bool:
         """Join an async invocation after cancellation.
 
         Synchronous handlers have no safely preemptible task, so their host
-        output is suppressed cooperatively instead of blocking teardown.
+        output is suppressed cooperatively instead of blocking teardown. A
+        binding invocation is different: teardown waits until task publication
+        settles and the invocation's owner reports completion.
         """
-        with self._lock:
-            task_bound = self._task is not None
+        deadline = time.monotonic() + max(0.0, timeout)
+        with self._condition:
             same_thread = self._loop_thread_id == threading.get_ident()
-        if not task_bound or same_thread:
-            return True
-        return self.done.wait(timeout=max(0.0, timeout))
+            if same_thread:
+                return True
+            while self._phase == "binding":
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._condition.wait(remaining)
+            if self._phase != "bound":
+                return True
+        return self.done.wait(timeout=max(0.0, deadline - time.monotonic()))
 
 
 @dataclass(frozen=True, slots=True)

@@ -12,6 +12,7 @@ import {
   clearSecretRequest,
   clearSudoRequest,
   clearTelosApprovalRequest,
+  dismissSecretRequest,
   setApprovalRequest,
   setSecretRequest,
   setSudoRequest,
@@ -109,6 +110,17 @@ describe('secret prompt store', () => {
     expect($secretRequest.get()).not.toBeNull()
 
     clearSecretRequest('s1', 'r1')
+    expect($secretRequest.get()).toBeNull()
+  })
+
+  it('clears a dismissed request and ignores its stale replay', () => {
+    const request = { requestId: 'r1', envVar: 'TOKEN', prompt: 'Paste token', sessionId: 's1' }
+
+    setSecretRequest(request)
+    dismissSecretRequest('s1', 'r1')
+    expect($secretRequest.get()).toBeNull()
+
+    setSecretRequest(request)
     expect($secretRequest.get()).toBeNull()
   })
 })

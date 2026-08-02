@@ -42,6 +42,7 @@ def server():
         mod._sessions.clear()
         mod._pending.clear()
         mod._pending_prompt_payloads.clear()
+        mod._pending_prompt_emissions.clear()
         mod._answers.clear()
         mod._plugin_invocations.clear()
 
@@ -1807,6 +1808,85 @@ def test_plugin_async_dispatch_is_cancelled_and_joined_before_lifecycle_returns(
         assert response["value"]["result"] == {"type": "plugin", "output": expected}
 
 
+@pytest.mark.parametrize("method", ["slash.exec", "command.dispatch"])
+@pytest.mark.parametrize("lifecycle", ["session.close", "session.interrupt"])
+def test_plugin_async_dispatch_cancels_before_first_step_when_lifecycle_wins_pre_bind(
+    server, monkeypatch, tmp_path, method, lifecycle
+):
+    """An invocation being bound is not done, and cancellation wins before step one."""
+    from hermes_cli import plugins
+    from hermes_cli.plugin_command_context import PluginCommandInvocation
+
+    handler_entered = threading.Event()
+    bind_entered = threading.Event()
+    allow_bind = threading.Event()
+    lifecycle_returned = threading.Event()
+
+    async def handler(_arg, _context):
+        handler_entered.set()
+        await asyncio.sleep(0)
+        return "must-not-run"
+
+    real_bind = PluginCommandInvocation.bind_task
+
+    def delayed_bind(self, task, loop):
+        bind_entered.set()
+        assert allow_bind.wait(1)
+        return real_bind(self, task, loop)
+
+    monkeypatch.setattr(PluginCommandInvocation, "bind_task", delayed_bind)
+    monkeypatch.setattr(plugins, "_plugin_manager", _registered_plugin_manager(handler))
+    monkeypatch.setattr(server, "_PLUGIN_INVOCATION_JOIN_TIMEOUT_S", 0.5)
+    sid = f"pre-bind-{method}-{lifecycle}"
+    _plugin_session(server, sid, tmp_path)
+    params = (
+        {"command": "async-cmd wait", "session_id": sid}
+        if method == "slash.exec"
+        else {"name": "async-cmd", "arg": "wait", "session_id": sid}
+    )
+    response = {}
+    dispatch = threading.Thread(
+        target=lambda: response.setdefault(
+            "value",
+            server.handle_request({"id": "plugin", "method": method, "params": params}),
+        )
+    )
+    dispatch.start()
+    assert bind_entered.wait(1), "production resolver never reached the create/bind barrier"
+
+    lifecycle_response = {}
+    teardown = threading.Thread(
+        target=lambda: (
+            lifecycle_response.setdefault(
+                "value",
+                server.handle_request(
+                    {"id": "stop", "method": lifecycle, "params": {"session_id": sid}}
+                ),
+            ),
+            lifecycle_returned.set(),
+        )
+    )
+    teardown.start()
+    returned_before_binding_settled = lifecycle_returned.wait(0.05)
+    handler_started_before_binding_settled = handler_entered.is_set()
+    allow_bind.set()
+    teardown.join(1)
+    dispatch.join(1)
+
+    assert not returned_before_binding_settled
+    assert not handler_started_before_binding_settled
+    assert not handler_entered.is_set()
+    assert not teardown.is_alive()
+    assert not dispatch.is_alive()
+    assert "error" not in lifecycle_response["value"]
+    expected = "Plugin command error: plugin command cancelled"
+    if method == "slash.exec":
+        assert response["value"]["result"] == {"output": expected}
+    else:
+        assert response["value"]["result"] == {"type": "plugin", "output": expected}
+    assert sid not in server._plugin_invocations
+
+
 def test_plugin_registration_rejects_context_after_session_close(
     server, monkeypatch, tmp_path
 ):
@@ -1887,7 +1967,7 @@ def test_multiple_plugin_invocations_unregister_safely_while_session_is_cancelle
 def test_secret_prompt_is_never_emitted_after_lifecycle_cancellation_wins(
     server, monkeypatch, tmp_path
 ):
-    """Prompt insertion and emission must share the invocation cancellation guard."""
+    """Cancellation before the sequencer starts suppresses the request entirely."""
     from hermes_cli.plugin_command_context import create_plugin_command_context
 
     sid = "insert-before-emit"
@@ -1899,17 +1979,25 @@ def test_secret_prompt_is_never_emitted_after_lifecycle_cancellation_wins(
         interactive=True,
     )
     server._register_plugin_invocation(sid, context)
-    emit_entered = threading.Event()
-    allow_emit = threading.Event()
+    start_entered = threading.Event()
+    allow_start = threading.Event()
     teardown_done = threading.Event()
-    emitted_after_teardown = []
+    emitted = []
 
-    def delayed_emit(_event, _sid, _payload=None):
-        emit_entered.set()
-        assert allow_emit.wait(1)
-        emitted_after_teardown.append(teardown_done.is_set())
+    class RecordingTransport:
+        def write(self, frame):
+            emitted.append(frame)
+            return True
 
-    monkeypatch.setattr(server, "_emit", delayed_emit)
+    server._sessions[sid]["transport"] = RecordingTransport()
+    real_start = server._PromptEmission.start
+
+    def delayed_start(self):
+        start_entered.set()
+        assert allow_start.wait(1)
+        return real_start(self)
+
+    monkeypatch.setattr(server._PromptEmission, "start", delayed_start)
     broker = threading.Thread(
         target=lambda: server._block(
             "secret.request",
@@ -1920,20 +2008,90 @@ def test_secret_prompt_is_never_emitted_after_lifecycle_cancellation_wins(
         )
     )
     broker.start()
-    assert emit_entered.wait(1)
+    assert start_entered.wait(1)
 
     teardown = threading.Thread(
         target=lambda: (server._clear_pending(sid), teardown_done.set())
     )
     teardown.start()
-    time.sleep(0.05)
-    allow_emit.set()
+    assert teardown_done.wait(0.1)
+    allow_start.set()
     broker.join(1)
     teardown.join(1)
 
     assert not broker.is_alive()
     assert not teardown.is_alive()
-    assert emitted_after_teardown == [False]
+    assert emitted == []
+
+
+def test_plugin_prompt_teardown_does_not_wait_for_blocked_stdio_flush(
+    server, monkeypatch, tmp_path
+):
+    """A wedged stdio flush cannot delay close or leave a usable secret prompt."""
+    from hermes_cli import plugins
+    from tui_gateway.transport import StdioTransport
+
+    flush_entered = threading.Event()
+    release_flush = threading.Event()
+    frames = []
+
+    class BlockingStream:
+        def write(self, line):
+            frames.append(json.loads(line))
+
+        def flush(self):
+            flush_entered.set()
+            assert release_flush.wait(1)
+
+    def handler(_arg, context):
+        context.request_secret("Token")
+        return "must-not-return"
+
+    monkeypatch.setattr(plugins, "_plugin_manager", _registered_plugin_manager(handler))
+    monkeypatch.setattr(server, "_teardown_session", lambda *_args, **_kwargs: None)
+    transport = StdioTransport(lambda: BlockingStream(), threading.Lock())
+    sid = "blocked-stdio-prompt"
+    _plugin_session(server, sid, tmp_path, transport=transport)
+    response = {}
+    dispatch = threading.Thread(
+        target=lambda: response.setdefault(
+            "value",
+            server.handle_request(
+                {
+                    "id": "plugin",
+                    "method": "slash.exec",
+                    "params": {"command": "async-cmd", "session_id": sid},
+                }
+            ),
+        )
+    )
+    dispatch.start()
+    assert flush_entered.wait(1)
+
+    started = time.monotonic()
+    closed = server.handle_request(
+        {"id": "close", "method": "session.close", "params": {"session_id": sid}}
+    )
+    elapsed = time.monotonic() - started
+    dispatch.join(1)
+    release_flush.set()
+    deadline = time.time() + 1
+    while len(frames) < 2 and time.time() < deadline:
+        time.sleep(0.01)
+
+    assert elapsed < 0.1
+    assert closed["result"] == {"closed": True}
+    assert not dispatch.is_alive()
+    assert response["value"]["result"] == {
+        "output": "Plugin command error: plugin command cancelled"
+    }
+    assert [frame["params"]["type"] for frame in frames] == [
+        "secret.request",
+        "prompt.dismiss",
+    ]
+    assert not server._pending
+    assert not server._pending_prompt_payloads
+    assert not server._pending_prompt_emissions
 
 
 @pytest.mark.parametrize("method", ["slash.exec", "command.dispatch"])

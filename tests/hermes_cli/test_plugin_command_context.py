@@ -7,6 +7,7 @@ letting a secret cross a JSON-RPC session boundary.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 import threading
 import time
@@ -35,11 +36,13 @@ def server():
     module._sessions.clear()
     module._pending.clear()
     module._pending_prompt_payloads.clear()
+    module._pending_prompt_emissions.clear()
     module._answers.clear()
     yield module
     module._sessions.clear()
     module._pending.clear()
     module._pending_prompt_payloads.clear()
+    module._pending_prompt_emissions.clear()
     module._answers.clear()
 
 
@@ -261,6 +264,65 @@ async def test_async_invocation_awaits_and_redacts_final_custom_rendering(monkey
         "context-test", "", _context(tmp_path, secret=lambda _prompt: "async-secret")
     )
     assert result == "set={'[secret]'} bytes=b'[secret]'"
+
+
+def test_async_invocation_cancels_before_first_step_when_revoked_pre_bind(
+    monkeypatch, tmp_path
+):
+    """The async host helper publishes binding intent before task creation."""
+    from hermes_cli.plugin_command_context import PluginCommandInvocation
+
+    handler_entered = threading.Event()
+    bind_entered = threading.Event()
+    allow_bind = threading.Event()
+    lifecycle_returned = threading.Event()
+
+    async def handler(_raw, _context):
+        handler_entered.set()
+        await asyncio.sleep(0)
+        return "must-not-run"
+
+    real_bind = PluginCommandInvocation.bind_task
+
+    def delayed_bind(self, task, loop):
+        bind_entered.set()
+        assert allow_bind.wait(1)
+        return real_bind(self, task, loop)
+
+    monkeypatch.setattr(PluginCommandInvocation, "bind_task", delayed_bind)
+    monkeypatch.setattr("hermes_cli.plugins._plugin_manager", _registered_manager(handler))
+    context = _context(tmp_path)
+    outcome = []
+
+    def invoke():
+        try:
+            asyncio.run(invoke_plugin_command_async("context-test", "", context))
+        except BaseException as exc:
+            outcome.append(exc)
+
+    worker = threading.Thread(target=invoke)
+    worker.start()
+    assert bind_entered.wait(1), "async helper never reached the create/bind barrier"
+    waiter = threading.Thread(
+        target=lambda: (
+            context.revoke(),
+            context.invocation.wait_for_bound_task(0.5),
+            lifecycle_returned.set(),
+        )
+    )
+    waiter.start()
+    returned_before_binding_settled = lifecycle_returned.wait(0.05)
+    allow_bind.set()
+    waiter.join(1)
+    worker.join(1)
+
+    assert not returned_before_binding_settled
+    assert not handler_entered.is_set()
+    assert not waiter.is_alive()
+    assert not worker.is_alive()
+    assert len(outcome) == 1
+    assert isinstance(outcome[0], PluginCommandError)
+    assert str(outcome[0]) == "plugin command cancelled"
 
 
 def test_secret_redacted_exception_uses_host_error(monkeypatch, tmp_path):

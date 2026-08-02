@@ -35,7 +35,14 @@ import { notify } from '@/store/notifications'
 import { requestDesktopOnboarding } from '@/store/onboarding'
 import { flashPetActivity, markPetUnread, setPetActivity } from '@/store/pet'
 import { followActiveSessionCwd } from '@/store/projects'
-import { clearAllPrompts, setApprovalRequest, setSecretRequest, setSudoRequest, setTelosApprovalRequest } from '@/store/prompts'
+import {
+  clearAllPrompts,
+  dismissSecretRequest,
+  setApprovalRequest,
+  setSecretRequest,
+  setSudoRequest,
+  setTelosApprovalRequest
+} from '@/store/prompts'
 import {
   $currentCwd,
   setCurrentBranch,
@@ -1152,6 +1159,12 @@ export function useMessageStream({
             sessionId,
             title: translateNow('notifications.native.inputTitle')
           })
+        }
+      } else if (event.type === 'prompt.dismiss') {
+        const requestId = typeof payload?.request_id === 'string' ? payload.request_id : ''
+
+        if (payload?.request_type === 'secret.request' && requestId) {
+          dismissSecretRequest(sessionId ?? null, requestId)
         }
       } else if (event.type === 'secret.request') {
         // Skill credential capture (tools/skills_tool.py). Blocked on

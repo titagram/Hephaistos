@@ -16,6 +16,7 @@ export type GatewayEventName =
   | 'approval.request'
   | 'sudo.request'
   | 'secret.request'
+  | 'prompt.dismiss'
   | 'background.complete'
   | 'error'
   | 'skin.changed'

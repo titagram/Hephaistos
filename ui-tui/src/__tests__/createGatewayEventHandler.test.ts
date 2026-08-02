@@ -67,6 +67,28 @@ describe('createGatewayEventHandler', () => {
     patchUiState({ showReasoning: true })
   })
 
+  it('clears a dismissed secret overlay and ignores a stale replay', () => {
+    const onEvent = createGatewayEventHandler(buildCtx([]))
+    const request = {
+      payload: { env_var: 'PLUGIN_SECRET', prompt: 'Token', request_id: 'secret-1' },
+      session_id: 'session-a',
+      type: 'secret.request'
+    } as GatewayEvent
+
+    onEvent(request)
+    expect(getOverlayState().secret?.requestId).toBe('secret-1')
+
+    onEvent({
+      payload: { request_id: 'secret-1', request_type: 'secret.request' },
+      session_id: 'session-a',
+      type: 'prompt.dismiss'
+    } as GatewayEvent)
+    expect(getOverlayState().secret).toBeNull()
+
+    onEvent(request)
+    expect(getOverlayState().secret).toBeNull()
+  })
+
   it('archives incomplete todos into transcript flow at end of turn so they scroll up', () => {
     const appended: Msg[] = []
 

@@ -103,6 +103,10 @@ const sudo = keyedPromptStore<SudoRequest>()
 const secret = keyedPromptStore<SecretRequest>()
 const telosApproval = keyedPromptStore<TelosApprovalRequest>()
 const $approvalInlineAnchorCount = atom(0)
+const dismissedSecretRequests = new Set<string>()
+const MAX_DISMISSED_SECRET_REQUESTS = 256
+const secretRequestKey = (sessionId: string | null | undefined, requestId: string) =>
+  `${keyFor(sessionId)}\u0000${requestId}`
 
 export const $approvalRequest = approval.$active
 export const setApprovalRequest = approval.set
@@ -122,8 +126,27 @@ export const setSudoRequest = sudo.set
 export const clearSudoRequest = sudo.clear
 
 export const $secretRequest = secret.$active
-export const setSecretRequest = secret.set
+export function setSecretRequest(request: SecretRequest): void {
+  if (!dismissedSecretRequests.has(secretRequestKey(request.sessionId, request.requestId))) {
+    secret.set(request)
+  }
+}
 export const clearSecretRequest = secret.clear
+
+export function dismissSecretRequest(sessionId: string | null | undefined, requestId: string): void {
+  if (!requestId) {
+    return
+  }
+  dismissedSecretRequests.add(secretRequestKey(sessionId, requestId))
+  while (dismissedSecretRequests.size > MAX_DISMISSED_SECRET_REQUESTS) {
+    const oldest = dismissedSecretRequests.values().next().value
+    if (oldest === undefined) {
+      break
+    }
+    dismissedSecretRequests.delete(oldest)
+  }
+  secret.clear(sessionId, requestId)
+}
 
 export const $telosApprovalRequest = telosApproval.$active
 export const setTelosApprovalRequest = telosApproval.set
@@ -147,6 +170,7 @@ export function clearAllPrompts(sessionId?: string | null): void {
     sudo.reset()
     secret.reset()
     telosApproval.reset()
+    dismissedSecretRequests.clear()
     $approvalInlineAnchorCount.set(0)
 
     return

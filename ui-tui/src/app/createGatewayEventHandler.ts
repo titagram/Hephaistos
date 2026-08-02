@@ -90,6 +90,20 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
   let pendingThinkingStatus = ''
   let thinkingStatusTimer: null | ReturnType<typeof setTimeout> = null
   let startupPromptSubmitted = false
+  const dismissedSecretRequests = new Set<string>()
+
+  const secretRequestKey = (sessionId: string | undefined, requestId: string) =>
+    `${sessionId ?? ''}\u0000${requestId}`
+
+  const rememberDismissedSecret = (key: string) => {
+    dismissedSecretRequests.add(key)
+    if (dismissedSecretRequests.size > 256) {
+      const oldest = dismissedSecretRequests.values().next().value
+      if (oldest !== undefined) {
+        dismissedSecretRequests.delete(oldest)
+      }
+    }
+  }
 
   // Request IDs of clarify prompts we've already flushed to the transcript as
   // an abandoned-prompt record, so the tool.complete and message.complete
@@ -836,7 +850,28 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
 
         return
 
+      case 'prompt.dismiss': {
+        if (ev.payload.request_type !== 'secret.request') {
+          return
+        }
+        const key = secretRequestKey(ev.session_id, ev.payload.request_id)
+        rememberDismissedSecret(key)
+        const current = getOverlayState().secret
+        if (
+          current?.requestId === ev.payload.request_id &&
+          (current.sessionId ?? '') === (ev.session_id ?? '')
+        ) {
+          patchOverlayState({ secret: null })
+          setStatus(statusFromBusy())
+        }
+
+        return
+      }
+
       case 'secret.request':
+        if (dismissedSecretRequests.has(secretRequestKey(ev.session_id, ev.payload.request_id))) {
+          return
+        }
         patchOverlayState({
           secret: {
             envVar: ev.payload.env_var,

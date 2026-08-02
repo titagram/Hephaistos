@@ -2107,7 +2107,7 @@ def invoke_plugin_command(name: str, raw_args: str, context) -> Any:
         return None
     handler = entry["handler"]
     try:
-        if context.invocation.cancelled:
+        if not context.invocation.begin_handler():
             raise PluginCommandError("plugin command cancelled")
         result = handler(raw_args, context) if entry.get("accepts_context", False) else handler(raw_args)
         result = resolve_plugin_command_result(result, context.invocation)
@@ -2141,12 +2141,18 @@ async def invoke_plugin_command_async(name: str, raw_args: str, context) -> Any:
         return None
     handler = entry["handler"]
     try:
-        if context.invocation.cancelled:
+        if not context.invocation.begin_handler():
             raise PluginCommandError("plugin command cancelled")
         result = handler(raw_args, context) if entry.get("accepts_context", False) else handler(raw_args)
         if inspect.isawaitable(result):
+            loop = asyncio.get_running_loop()
+            if not context.invocation.begin_task_binding(loop):
+                close = getattr(result, "close", None)
+                if callable(close):
+                    close()
+                raise asyncio.CancelledError
             task = asyncio.create_task(result)
-            context.invocation.bind_task(task, asyncio.get_running_loop())
+            context.invocation.bind_task(task, loop)
             try:
                 result = await asyncio.wait_for(task, timeout=_PLUGIN_COMMAND_AWAIT_TIMEOUT_SECS)
             except BaseException:
@@ -2157,6 +2163,8 @@ async def invoke_plugin_command_async(name: str, raw_args: str, context) -> Any:
                     except BaseException:
                         pass
                 raise
+        else:
+            context.invocation.mark_sync()
         if context.invocation.cancelled:
             raise PluginCommandError("plugin command cancelled")
         return context.render(result)
@@ -2188,7 +2196,15 @@ def resolve_plugin_command_result(result: Any, invocation=None) -> Any:
     timeout. Async hosts must use ``invoke_plugin_command_async`` directly.
     """
     if not inspect.isawaitable(result):
+        if invocation is not None:
+            invocation.mark_sync()
         return result
+
+    if invocation is not None and not invocation.begin_task_binding():
+        close = getattr(result, "close", None)
+        if callable(close):
+            close()
+        raise asyncio.CancelledError
 
     try:
         asyncio.get_running_loop()
