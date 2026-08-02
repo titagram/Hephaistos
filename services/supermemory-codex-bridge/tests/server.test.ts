@@ -432,7 +432,7 @@ test("error responses and logs never expose request or upstream secrets", async 
   }
 });
 
-test("chat completion logs expose only sorted bounded top-level field types", async (t) => {
+test("chat completion logs expose only sorted allowlisted top-level field types", async (t) => {
   const runner = new FakeRunner();
   const logs: string[] = [];
   t.mock.method(console, "info", (...values: unknown[]) => logs.push(values.join(" ")));
@@ -440,13 +440,13 @@ test("chat completion logs expose only sorted bounded top-level field types", as
   const promptSecret = "prompt-secret-never-log";
   const toolName = "private-tool-name-never-log";
   const schemaProperty = "private-schema-property-never-log";
-  const longFieldName = `z${"x".repeat(200)}`;
+  const callerControlledFieldSecret = "top-level-caller-secret-never-log";
   try {
     const response = await fetch(`${harness.origin}/v1/chat/completions`, {
       method: "POST",
       headers: authHeaders(),
       body: JSON.stringify({
-        [longFieldName]: "private-long-field-value-never-log",
+        [callerControlledFieldSecret]: "private-field-value-never-log",
         tools: [{ type: "function", function: { name: toolName } }],
         temperature: 0,
         stop: null,
@@ -466,20 +466,25 @@ test("chat completion logs expose only sorted bounded top-level field types", as
     await waitFor(() => logs.length === 1);
 
     const event = JSON.parse(logs[0]!) as {
-      requestShape: Array<{ field: string; type: string }>;
+      requestShape: {
+        knownFields: Array<{ field: string; type: string }>;
+        unknownFieldCount: number;
+        unknownFieldTypes: Array<{ type: string; count: number }>;
+      };
     };
-    assert.deepEqual(event.requestShape.slice(0, 7), [
-      { field: "messages", type: "array" },
-      { field: "model", type: "string" },
-      { field: "response_format", type: "object" },
-      { field: "stop", type: "null" },
-      { field: "stream", type: "boolean" },
-      { field: "temperature", type: "number" },
-      { field: "tools", type: "array" },
-    ]);
-    assert.equal(event.requestShape.length, 8);
-    assert.equal(event.requestShape[7]!.field.length <= 65, true);
-    assert.equal(event.requestShape[7]!.type, "string");
+    assert.deepEqual(event.requestShape, {
+      knownFields: [
+        { field: "messages", type: "array" },
+        { field: "model", type: "string" },
+        { field: "response_format", type: "object" },
+        { field: "stop", type: "null" },
+        { field: "stream", type: "boolean" },
+        { field: "temperature", type: "number" },
+        { field: "tools", type: "array" },
+      ],
+      unknownFieldCount: 1,
+      unknownFieldTypes: [{ type: "string", count: 1 }],
+    });
 
     const serialized = logs.join("\n");
     for (const secret of [
@@ -487,8 +492,8 @@ test("chat completion logs expose only sorted bounded top-level field types", as
       toolName,
       schemaProperty,
       "private-schema-name-never-log",
-      "private-long-field-value-never-log",
-      longFieldName,
+      "private-field-value-never-log",
+      callerControlledFieldSecret,
       config.apiKey,
     ]) {
       assert.doesNotMatch(serialized, new RegExp(secret));
@@ -498,29 +503,46 @@ test("chat completion logs expose only sorted bounded top-level field types", as
   }
 });
 
-test("chat completion request shape is capped at thirty-two sorted fields", async (t) => {
+test("unknown top-level fields are summarized without logging caller-controlled names", async (t) => {
   const runner = new FakeRunner();
   const logs: string[] = [];
   t.mock.method(console, "info", (...values: unknown[]) => logs.push(values.join(" ")));
   const harness = await listen(runner);
-  const fields = Object.fromEntries(
-    Array.from({ length: 40 }, (_, index) => [`f${index.toString().padStart(2, "0")}`, null]),
-  );
+  const secretFieldName = "short-top-level-secret";
   try {
     const response = await fetch(`${harness.origin}/v1/chat/completions`, {
       method: "POST",
       headers: authHeaders(),
-      body: JSON.stringify({ ...fields, model: config.publicModel, messages: [] }),
+      body: JSON.stringify({
+        model: config.publicModel,
+        messages: [],
+        [secretFieldName]: true,
+        another_unknown_field: 42,
+      }),
     });
     assert.equal(response.status, 400);
     await waitFor(() => logs.length === 1);
 
     const event = JSON.parse(logs[0]!) as {
-      requestShape: Array<{ field: string; type: string }>;
+      requestShape: {
+        knownFields: Array<{ field: string; type: string }>;
+        unknownFieldCount: number;
+        unknownFieldTypes: Array<{ type: string; count: number }>;
+      };
     };
-    assert.equal(event.requestShape.length, 32);
-    assert.deepEqual(event.requestShape[0], { field: "f00", type: "null" });
-    assert.deepEqual(event.requestShape[31], { field: "f31", type: "null" });
+    assert.deepEqual(event.requestShape, {
+      knownFields: [
+        { field: "messages", type: "array" },
+        { field: "model", type: "string" },
+      ],
+      unknownFieldCount: 2,
+      unknownFieldTypes: [
+        { type: "number", count: 1 },
+        { type: "boolean", count: 1 },
+      ],
+    });
+    assert.doesNotMatch(logs.join("\n"), new RegExp(secretFieldName));
+    assert.doesNotMatch(logs.join("\n"), /another_unknown_field/);
   } finally {
     await harness.close();
   }

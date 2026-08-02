@@ -35,8 +35,61 @@ interface RequestShapeField {
   readonly type: RequestValueType;
 }
 
-const MAX_REQUEST_SHAPE_FIELDS = 32;
-const MAX_REQUEST_SHAPE_FIELD_CODE_UNITS = 64;
+interface RequestShape {
+  readonly knownFields: RequestShapeField[];
+  readonly unknownFieldCount: number;
+  readonly unknownFieldTypes: Array<{
+    readonly type: RequestValueType;
+    readonly count: number;
+  }>;
+}
+
+const requestValueTypes: readonly RequestValueType[] = [
+  "null",
+  "array",
+  "object",
+  "string",
+  "number",
+  "boolean",
+  "undefined/other",
+];
+
+const knownChatCompletionRequestFields = new Set([
+  "audio",
+  "frequency_penalty",
+  "function_call",
+  "functions",
+  "logit_bias",
+  "logprobs",
+  "max_completion_tokens",
+  "max_tokens",
+  "messages",
+  "metadata",
+  "modalities",
+  "model",
+  "n",
+  "parallel_tool_calls",
+  "prediction",
+  "presence_penalty",
+  "prompt_cache_key",
+  "reasoning_effort",
+  "response_format",
+  "safety_identifier",
+  "seed",
+  "service_tier",
+  "stop",
+  "store",
+  "stream",
+  "stream_options",
+  "temperature",
+  "tool_choice",
+  "tools",
+  "top_logprobs",
+  "top_p",
+  "user",
+  "verbosity",
+  "web_search_options",
+]);
 
 const startupByServer = new WeakMap<http.Server, Promise<void>>();
 
@@ -195,7 +248,7 @@ async function handleRequest(
   const logRoute = canonicalRoute(route);
   let status = 500;
   let errorCode: string | undefined;
-  let requestShape: RequestShapeField[] | undefined;
+  let requestShape: RequestShape | undefined;
   let disconnected = false;
   const controller = new AbortController();
   const onDisconnect = () => {
@@ -273,18 +326,31 @@ async function handleRequest(
   }
 }
 
-function describeRequestShape(value: unknown): RequestShapeField[] {
-  if (value === null || Array.isArray(value) || typeof value !== "object") return [];
+function describeRequestShape(value: unknown): RequestShape {
+  const knownFields: RequestShapeField[] = [];
+  const unknownCounts = new Map<RequestValueType, number>();
+  let unknownFieldCount = 0;
 
-  return Object.keys(value)
-    .sort()
-    .slice(0, MAX_REQUEST_SHAPE_FIELDS)
-    .map((field) => ({
-      field: field.length > MAX_REQUEST_SHAPE_FIELD_CODE_UNITS
-        ? `${field.slice(0, MAX_REQUEST_SHAPE_FIELD_CODE_UNITS)}…`
-        : field,
-      type: requestValueType((value as Record<string, unknown>)[field]),
-    }));
+  if (value !== null && !Array.isArray(value) && typeof value === "object") {
+    for (const field of Object.keys(value).sort()) {
+      const type = requestValueType((value as Record<string, unknown>)[field]);
+      if (knownChatCompletionRequestFields.has(field)) {
+        knownFields.push({ field, type });
+      } else {
+        unknownFieldCount += 1;
+        unknownCounts.set(type, (unknownCounts.get(type) ?? 0) + 1);
+      }
+    }
+  }
+
+  return {
+    knownFields,
+    unknownFieldCount,
+    unknownFieldTypes: requestValueTypes.flatMap((type) => {
+      const count = unknownCounts.get(type);
+      return count === undefined ? [] : [{ type, count }];
+    }),
+  };
 }
 
 function requestValueType(value: unknown): RequestValueType {
