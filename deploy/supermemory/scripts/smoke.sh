@@ -9,6 +9,7 @@ DEBUG_SAFE=false
 TEMP_DIR=''
 SUPERMEMORY_API_KEY=''
 basic_auth_password=''
+PUBLIC_API_URL='https://persephone.cc/v3/settings'
 
 cleanup() {
   unset SUPERMEMORY_API_KEY basic_auth_password curl_password
@@ -182,7 +183,7 @@ case "$MODE" in
     docs_challenge="$(header_value www-authenticate "$HEADER_FILE" || true)"
     [[ "$docs_challenge" == "$root_challenge" ]] || request_failure 'reference docs Basic challenge' "$HTTP_STATUS"
 
-    plain_request 'unauthenticated API' 'https://persephone.cc/v4/memories'
+    plain_request 'unauthenticated API' "$PUBLIC_API_URL"
     [[ "$HTTP_STATUS" == 401 || "$HTTP_STATUS" == 403 ]] || request_failure 'unauthenticated API' "$HTTP_STATUS"
     api_challenge="$(header_value www-authenticate "$HEADER_FILE" || true)"
     [[ "${api_challenge,,}" != basic* ]] || request_failure 'API challenge isolation' "$HTTP_STATUS"
@@ -194,7 +195,7 @@ case "$MODE" in
     [[ "$HTTP_STATUS" == 200 ]] || request_failure 'authenticated UI' "$HTTP_STATUS"
     grep -Fq 'supermemory · local' "$BODY_FILE" || request_failure 'authenticated UI marker' "$HTTP_STATUS"
 
-    bearer_request 'authenticated API' 'https://persephone.cc/v4/memories'
+    bearer_request 'authenticated API' "$PUBLIC_API_URL"
     [[ "$HTTP_STATUS" =~ ^2[0-9][0-9]$ ]] || request_failure 'authenticated API' "$HTTP_STATUS"
     unset SUPERMEMORY_API_KEY
 
