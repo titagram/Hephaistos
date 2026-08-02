@@ -6,10 +6,12 @@ import test from "node:test";
 import {
   CodexAppServer,
   CodexUpstreamError,
+  type CodexAppServerOptions,
   type CodexProcess,
   type CodexProcessFactory,
 } from "../src/codex-app-server.js";
 import type { BridgeConfig } from "../src/config.js";
+import { JsonRpcClient } from "../src/json-rpc.js";
 import type { CodexInvocation, CodexResult } from "../src/openai.js";
 
 interface RpcMessage {
@@ -29,13 +31,14 @@ class FakeCodexProcess extends EventEmitter implements CodexProcess {
   exitCode: number | null = null;
   signalCode: NodeJS.Signals | null = null;
   exitOnTerminate = true;
+  exitOnKill = true;
 
   kill(signal: NodeJS.Signals = "SIGTERM"): boolean {
     this.signals.push(signal);
     if (signal === "SIGTERM" && this.exitOnTerminate) {
       queueMicrotask(() => this.exit(0, signal));
     }
-    if (signal === "SIGKILL") {
+    if (signal === "SIGKILL" && this.exitOnKill) {
       queueMicrotask(() => this.exit(null, signal));
     }
     return true;
@@ -114,16 +117,22 @@ const config: BridgeConfig = {
   maxConcurrency: 2,
 };
 
-function createHarness(options: { shutdownTimeoutMs?: number; log?: (event: Record<string, unknown>) => void } = {}) {
+interface HarnessOptions extends CodexAppServerOptions {
+  configureProcess?: (process: FakeCodexProcess, index: number) => void;
+}
+
+function createHarness(options: HarnessOptions = {}) {
   const processes: FakeCodexProcess[] = [];
   const calls: Array<{ command: string; args: readonly string[]; options: Record<string, unknown> }> = [];
+  const { configureProcess, ...serverOptions } = options;
   const factory: CodexProcessFactory = (command, args, spawnOptions) => {
     calls.push({ command, args, options: spawnOptions });
     const process = new FakeCodexProcess();
     processes.push(process);
+    configureProcess?.(process, processes.length - 1);
     return process;
   };
-  const server = new CodexAppServer(config, { processFactory: factory, ...options });
+  const server = new CodexAppServer(config, { processFactory: factory, ...serverOptions });
   return { server, processes, calls };
 }
 
@@ -235,6 +244,20 @@ async function expectKind(promise: Promise<unknown>, kind: CodexUpstreamError["k
     return error;
   }
   assert.fail(`expected ${kind} rejection`);
+}
+
+async function within<T>(promise: Promise<T>, timeoutMs = 100): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error("timed out waiting for terminal result")), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 test("starts one dedicated app-server and uses a fresh ephemeral thread for every successful run", async () => {
@@ -549,6 +572,294 @@ test("close during initialization sends SIGTERM only once", async () => {
 
   assert.deepEqual(processes[0]!.signals, ["SIGTERM"]);
   await rejected;
+});
+
+test("reaps a child after initialize failure before allowing one replacement", async () => {
+  const { server, processes } = createHarness({
+    shutdownTimeoutMs: 5,
+    configureProcess: (process, index) => {
+      if (index === 0) process.exitOnTerminate = false;
+    },
+  });
+  const first = server.run({ prompt: "Initialization will fail." });
+  const firstPeer = new FakeRpcPeer(processes[0]!);
+  const initializeRequest = await firstPeer.next();
+  firstPeer.respondError(initializeRequest.id!, -32000, "initialization failed");
+
+  await within(expectKind(first, "unavailable"));
+  assert.deepEqual(processes[0]!.signals, ["SIGTERM", "SIGKILL"]);
+  assert.notEqual(processes[0]!.signalCode, null);
+
+  const secondInvocation = { prompt: "Replacement after failed initialization." };
+  const second = server.run(secondInvocation);
+  assert.equal(processes.length, 2);
+  const secondPeer = new FakeRpcPeer(processes[1]!);
+  await initialize(secondPeer);
+  await acceptRun(secondPeer, "thread-init-replacement", "turn-init-replacement", secondInvocation);
+  completeRun(secondPeer, "thread-init-replacement", "turn-init-replacement", "recovered");
+  assert.equal((await second).text, "recovered");
+  await server.close();
+});
+
+test("does not start a replacement until a signaled child actually exits", async () => {
+  const { server, processes } = createHarness({
+    shutdownTimeoutMs: 5,
+    configureProcess: (process, index) => {
+      if (index === 0) {
+        process.exitOnTerminate = false;
+        process.exitOnKill = false;
+      }
+    },
+  });
+  const first = server.run({ prompt: "Unreaped initialization failure." });
+  const firstPeer = new FakeRpcPeer(processes[0]!);
+  const initializeRequest = await firstPeer.next();
+  firstPeer.respondError(initializeRequest.id!, -32000, "initialization failed");
+
+  await within(expectKind(first, "unavailable"));
+  assert.deepEqual(processes[0]!.signals, ["SIGTERM", "SIGKILL"]);
+  await within(expectKind(server.run({ prompt: "Must not replace yet." }), "unavailable"));
+  assert.equal(processes.length, 1);
+
+  processes[0]!.exit(null, "SIGKILL");
+  const replacementInvocation = { prompt: "Replace only after exit." };
+  const replacement = server.run(replacementInvocation);
+  assert.equal(processes.length, 2);
+  const replacementPeer = new FakeRpcPeer(processes[1]!);
+  await initialize(replacementPeer);
+  await acceptRun(replacementPeer, "thread-after-reap", "turn-after-reap", replacementInvocation);
+  completeRun(replacementPeer, "thread-after-reap", "turn-after-reap", "replaced safely");
+  assert.equal((await replacement).text, "replaced safely");
+  await server.close();
+});
+
+test("reaps a child when rpc construction throws before allowing one replacement", async () => {
+  let rpcFactoryCalls = 0;
+  const { server, processes } = createHarness({
+    shutdownTimeoutMs: 5,
+    configureProcess: (process, index) => {
+      if (index === 0) process.exitOnTerminate = false;
+    },
+    rpcFactory: (stdout, stdin) => {
+      rpcFactoryCalls += 1;
+      if (rpcFactoryCalls === 1) throw new Error("rpc construction failed");
+      return new JsonRpcClient(stdout, stdin);
+    },
+  });
+
+  await within(expectKind(server.run({ prompt: "RPC construction fails." }), "unavailable"));
+  assert.deepEqual(processes[0]!.signals, ["SIGTERM", "SIGKILL"]);
+  assert.notEqual(processes[0]!.signalCode, null);
+
+  const replacementInvocation = { prompt: "RPC replacement." };
+  const replacement = server.run(replacementInvocation);
+  assert.equal(processes.length, 2);
+  const replacementPeer = new FakeRpcPeer(processes[1]!);
+  await initialize(replacementPeer);
+  await acceptRun(replacementPeer, "thread-rpc-replacement", "turn-rpc-replacement", replacementInvocation);
+  completeRun(replacementPeer, "thread-rpc-replacement", "turn-rpc-replacement", "rpc recovered");
+  assert.equal((await replacement).text, "rpc recovered");
+  await server.close();
+});
+
+test("fails closed when two active runs receive the same thread id", async () => {
+  const { server, processes } = createHarness();
+  const first = server.run({ prompt: "First duplicate thread." });
+  const peer = new FakeRpcPeer(processes[0]!);
+  await initialize(peer);
+  const firstThreadStart = await peer.next();
+  peer.respond(firstThreadStart.id!, { thread: { id: "thread-duplicate" } });
+  const firstTurnStart = await peer.next();
+  peer.respond(firstTurnStart.id!, {
+    turn: { id: "turn-first", status: "inProgress", items: [], error: null },
+  });
+
+  const second = server.run({ prompt: "Second duplicate thread." });
+  const firstRejected = within(expectKind(first, "upstream"));
+  const secondRejected = within(expectKind(second, "upstream"));
+  const secondThreadStart = await peer.next();
+  peer.respond(secondThreadStart.id!, { thread: { id: "thread-duplicate" } });
+
+  const interrupt = await peer.next();
+  assert.equal(interrupt.method, "turn/interrupt");
+  assert.deepEqual(interrupt.params, { threadId: "thread-duplicate", turnId: "turn-first" });
+  await Promise.all([firstRejected, secondRejected]);
+  peer.respond(interrupt.id!, {});
+  await server.close();
+});
+
+test("fails and interrupts both runs when turn ids collide", async () => {
+  const { server, processes } = createHarness();
+  const first = server.run({ prompt: "First duplicate turn." });
+  const second = server.run({ prompt: "Second duplicate turn." });
+  const peer = new FakeRpcPeer(processes[0]!);
+  await initialize(peer);
+  const threadStarts = [await peer.next(), await peer.next()];
+  peer.respond(threadStarts[0]!.id!, { thread: { id: "thread-turn-a" } });
+  peer.respond(threadStarts[1]!.id!, { thread: { id: "thread-turn-b" } });
+  const turnStarts = [await peer.next(), await peer.next()];
+  const byThread = new Map(turnStarts.map((request) => [(request.params as { threadId: string }).threadId, request]));
+  peer.respond(byThread.get("thread-turn-a")!.id!, {
+    turn: { id: "turn-duplicate", status: "inProgress", items: [], error: null },
+  });
+  peer.respond(byThread.get("thread-turn-b")!.id!, {
+    turn: { id: "turn-duplicate", status: "inProgress", items: [], error: null },
+  });
+
+  await Promise.all([
+    within(expectKind(first, "upstream")),
+    within(expectKind(second, "upstream")),
+  ]);
+  const interrupts = [await peer.next(), await peer.next()];
+  assert.deepEqual(
+    interrupts.map((message) => message.params).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))),
+    [
+      { threadId: "thread-turn-a", turnId: "turn-duplicate" },
+      { threadId: "thread-turn-b", turnId: "turn-duplicate" },
+    ],
+  );
+  for (const interrupt of interrupts) peer.respond(interrupt.id!, {});
+  await server.close();
+});
+
+test("fails closed and interrupts both candidate ids when early and returned turn ids conflict", async () => {
+  const { server, processes } = createHarness();
+  const result = server.run({ prompt: "Conflicting early turn id." });
+  const peer = new FakeRpcPeer(processes[0]!);
+  await initialize(peer);
+  const threadStart = await peer.next();
+  peer.respond(threadStart.id!, { thread: { id: "thread-early-conflict" } });
+  const turnStart = await peer.next();
+  peer.notify("turn/started", {
+    threadId: "thread-early-conflict",
+    turn: { id: "turn-early", status: "inProgress", items: [], error: null },
+  });
+  peer.respond(turnStart.id!, {
+    turn: { id: "turn-returned", status: "inProgress", items: [], error: null },
+  });
+
+  await within(expectKind(result, "upstream"));
+  const interrupts = [await peer.next(), await peer.next()];
+  assert.deepEqual(
+    interrupts.map((message) => (message.params as { turnId: string }).turnId).sort(),
+    ["turn-early", "turn-returned"],
+  );
+  for (const interrupt of interrupts) peer.respond(interrupt.id!, {});
+  await server.close();
+});
+
+for (const approval of [
+  { name: "unroutable", params: {} },
+  { name: "conflicting", params: { threadId: "thread-approval-a", turnId: "turn-approval-b" } },
+] as const) {
+  test(`fails and interrupts every active run for an ${approval.name} approval request`, async () => {
+    const { server, processes } = createHarness();
+    const firstInvocation = { prompt: "Approval A." };
+    const secondInvocation = { prompt: "Approval B." };
+    const first = server.run(firstInvocation);
+    const second = server.run(secondInvocation);
+    const peer = new FakeRpcPeer(processes[0]!);
+    await initialize(peer);
+    const threadStarts = [await peer.next(), await peer.next()];
+    peer.respond(threadStarts[0]!.id!, { thread: { id: "thread-approval-a" } });
+    peer.respond(threadStarts[1]!.id!, { thread: { id: "thread-approval-b" } });
+    const turnStarts = [await peer.next(), await peer.next()];
+    const byThread = new Map(turnStarts.map((request) => [(request.params as { threadId: string }).threadId, request]));
+    peer.respond(byThread.get("thread-approval-a")!.id!, {
+      turn: { id: "turn-approval-a", status: "inProgress", items: [], error: null },
+    });
+    peer.respond(byThread.get("thread-approval-b")!.id!, {
+      turn: { id: "turn-approval-b", status: "inProgress", items: [], error: null },
+    });
+
+    peer.request("approval-unroutable", "item/commandExecution/requestApproval", approval.params);
+    assert.deepEqual(await peer.next(), {
+      jsonrpc: "2.0",
+      id: "approval-unroutable",
+      error: { code: -32601, message: "Interactive requests are disabled" },
+    });
+    await Promise.all([
+      within(expectKind(first, "forbidden_tool")),
+      within(expectKind(second, "forbidden_tool")),
+    ]);
+    const interrupts = [await peer.next(), await peer.next()];
+    assert.deepEqual(
+      interrupts.map((message) => message.params).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))),
+      [
+        { threadId: "thread-approval-a", turnId: "turn-approval-a" },
+        { threadId: "thread-approval-b", turnId: "turn-approval-b" },
+      ],
+    );
+    for (const interrupt of interrupts) peer.respond(interrupt.id!, {});
+    await server.close();
+  });
+}
+
+test("rejects a successful completion snapshot containing a forbidden item", async () => {
+  const { server, processes } = createHarness();
+  const invocation = { prompt: "Snapshot policy." };
+  const result = server.run(invocation);
+  const peer = new FakeRpcPeer(processes[0]!);
+  await initialize(peer);
+  await acceptRun(peer, "thread-snapshot", "turn-snapshot", invocation);
+
+  peer.notify("turn/completed", {
+    threadId: "thread-snapshot",
+    turn: {
+      id: "turn-snapshot",
+      status: "completed",
+      error: null,
+      items: [
+        { id: "forbidden-snapshot", type: "commandExecution", command: "whoami" },
+        { id: "message-snapshot", type: "agentMessage", text: "must not resolve" },
+      ],
+    },
+  });
+
+  await within(expectKind(result, "forbidden_tool"));
+  const interrupt = await peer.next();
+  assert.equal(interrupt.method, "turn/interrupt");
+  assert.deepEqual(interrupt.params, { threadId: "thread-snapshot", turnId: "turn-snapshot" });
+  peer.respond(interrupt.id!, {});
+  await server.close();
+});
+
+test("passes only allowlisted runtime environment variables to Codex", async () => {
+  const ambient: NodeJS.ProcessEnv = {
+    PATH: "/safe/bin",
+    HOME: "/safe/home",
+    TMPDIR: "/safe/tmp",
+    LANG: "C.UTF-8",
+    SSL_CERT_FILE: "/safe/certs.pem",
+    AWS_ACCESS_KEY_ID: "aws-key",
+    AWS_SECRET_ACCESS_KEY: "aws-secret",
+    ANTHROPIC_API_KEY: "anthropic-secret",
+    AZURE_OPENAI_API_KEY: "azure-secret",
+    GOOGLE_API_KEY: "google-secret",
+    OPENAI_API_KEY: "openai-secret",
+    GITHUB_TOKEN: "github-secret",
+    DATABASE_URL: "postgres://secret",
+    NODE_OPTIONS: "--require=/secret/inject.js",
+    SOME_PROVIDER_CREDENTIAL: "provider-secret",
+  };
+  const { server, processes, calls } = createHarness({ environment: ambient });
+  const result = server.run({ prompt: "Inspect environment." });
+  const peer = new FakeRpcPeer(processes[0]!);
+  const env = calls[0]!.options.env as NodeJS.ProcessEnv;
+
+  assert.deepEqual(env, {
+    PATH: "/safe/bin",
+    HOME: "/safe/home",
+    TMPDIR: "/safe/tmp",
+    LANG: "C.UTF-8",
+    SSL_CERT_FILE: "/safe/certs.pem",
+    CODEX_HOME: config.codexHome,
+  });
+
+  const rejected = expectKind(result, "unavailable");
+  await server.close();
+  await rejected;
+  assert.equal(peer.process.signals.includes("SIGTERM"), true);
 });
 
 test("stderr logging records categories and exit status without raw sensitive text", async () => {

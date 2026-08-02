@@ -58,6 +58,7 @@ export interface CodexAppServerOptions {
   rpcFactory?: (stdout: Readable, stdin: Writable) => JsonRpcClient;
   log?: (event: CodexDiagnosticEvent) => void;
   shutdownTimeoutMs?: number;
+  environment?: NodeJS.ProcessEnv;
 }
 
 interface ThreadStartResponse {
@@ -74,7 +75,7 @@ interface TurnState {
   finalText?: string;
   usage?: CodexResult["usage"];
   finished: boolean;
-  interruptSent: boolean;
+  readonly interruptedTurnIds: Set<string>;
   resolve: (result: CodexResult) => void;
   reject: (error: CodexUpstreamError) => void;
   readonly result: Promise<CodexResult>;
@@ -95,6 +96,30 @@ const FORBIDDEN_ITEM_TYPES = new Set([
   "webSearch",
 ]);
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 5_000;
+const SAFE_ENVIRONMENT_KEYS = [
+  "PATH",
+  "Path",
+  "PATHEXT",
+  "HOME",
+  "USER",
+  "LOGNAME",
+  "SHELL",
+  "TMPDIR",
+  "TMP",
+  "TEMP",
+  "LANG",
+  "LC_ALL",
+  "LC_CTYPE",
+  "TZ",
+  "SYSTEMROOT",
+  "SystemRoot",
+  "WINDIR",
+  "COMSPEC",
+  "ComSpec",
+  "SSL_CERT_FILE",
+  "SSL_CERT_DIR",
+  "NODE_EXTRA_CA_CERTS",
+] as const;
 
 const defaultProcessFactory: CodexProcessFactory = (command, args, options) =>
   spawn(command, [...args], {
@@ -107,9 +132,11 @@ export class CodexAppServer implements CodexRunner {
   private readonly rpcFactory: (stdout: Readable, stdin: Writable) => JsonRpcClient;
   private readonly log?: (event: CodexDiagnosticEvent) => void;
   private readonly shutdownTimeoutMs: number;
+  private readonly environment: NodeJS.ProcessEnv;
   private readonly turnsByThread = new Map<string, TurnState>();
   private readonly turnsById = new Map<string, TurnState>();
   private readonly deadProcesses = new WeakSet<object>();
+  private readonly terminationPromises = new WeakMap<object, Promise<boolean>>();
   private process: CodexProcess | undefined;
   private rpc: JsonRpcClient | undefined;
   private startPromise: Promise<JsonRpcClient> | undefined;
@@ -121,6 +148,7 @@ export class CodexAppServer implements CodexRunner {
     this.rpcFactory = options.rpcFactory ?? ((stdout, stdin) => new JsonRpcClient(stdout, stdin));
     this.log = options.log;
     this.shutdownTimeoutMs = options.shutdownTimeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS;
+    this.environment = options.environment ?? process.env;
   }
 
   async run(invocation: CodexInvocation, signal?: AbortSignal): Promise<CodexResult> {
@@ -158,6 +186,13 @@ export class CodexAppServer implements CodexRunner {
       throw new CodexUpstreamError("upstream");
     }
 
+    const existing = this.turnsByThread.get(threadId);
+    if (existing && !existing.finished) {
+      const error = new CodexUpstreamError("upstream");
+      this.failTurn(existing, error, rpc, true);
+      throw error;
+    }
+
     const state = createTurnState(threadId);
     this.turnsByThread.set(threadId, state);
     this.watchAbort(state, signal);
@@ -172,10 +207,7 @@ export class CodexAppServer implements CodexRunner {
         this.failTurn(state, new CodexUpstreamError("upstream"));
         return;
       }
-      this.bindTurnId(state, turnId);
-      if (state.finished) {
-        this.interruptTurn(state, rpc);
-      }
+      this.bindTurnId(state, turnId, rpc);
     }, (error: unknown) => {
       this.failTurn(state, mapUpstreamError(error));
     });
@@ -201,10 +233,13 @@ export class CodexAppServer implements CodexRunner {
     if (this.rpc && this.process) {
       return this.rpc;
     }
+    if (this.process) {
+      throw new CodexUpstreamError("unavailable");
+    }
     const startup = this.startProcess();
     this.startPromise = startup;
     void startup.catch(() => {
-      if (this.startPromise === startup) this.startPromise = undefined;
+      if (this.startPromise === startup && !this.process) this.startPromise = undefined;
     });
     return this.startPromise;
   }
@@ -212,19 +247,20 @@ export class CodexAppServer implements CodexRunner {
   private async startProcess(): Promise<JsonRpcClient> {
     const process = this.processFactory("codex", ["app-server", "--listen", "stdio://"], {
       stdio: ["pipe", "pipe", "pipe"],
-      env: codexEnvironment(this.config.codexHome),
+      env: codexEnvironment(this.config.codexHome, this.environment),
     });
-    const rpc = this.rpcFactory(process.stdout, process.stdin);
     this.process = process;
-    this.rpc = rpc;
 
     process.once("exit", (code, signal) => this.handleProcessDeath(process, code, signal));
     process.once("error", () => this.handleProcessDeath(process, null, null));
     this.drainSanitizedStderr(process.stderr);
-    rpc.onNotification((method, params) => this.handleNotification(rpc, method, params));
-    rpc.onRequest((id, method, params) => this.handleServerRequest(rpc, id, method, params));
 
+    let rpc: JsonRpcClient | undefined;
     try {
+      rpc = this.rpcFactory(process.stdout, process.stdin);
+      this.rpc = rpc;
+      rpc.onNotification((method, params) => this.handleNotification(rpc!, method, params));
+      rpc.onRequest((id, method, params) => this.handleServerRequest(rpc!, id, method, params));
       await rpc.request("initialize", {
         clientInfo: CLIENT_INFO,
         capabilities: { experimentalApi: false },
@@ -235,13 +271,11 @@ export class CodexAppServer implements CodexRunner {
       rpc.notify("initialized");
       return rpc;
     } catch (error) {
-      if (this.process === process) {
+      rpc?.close();
+      const reaped = await this.terminateAndReap(process);
+      if (this.rpc === rpc) this.rpc = undefined;
+      if (reaped && this.process === process) {
         this.process = undefined;
-        this.rpc = undefined;
-      }
-      rpc.close();
-      if (!this.closed && process.exitCode === null && process.signalCode === null) {
-        process.kill("SIGTERM");
       }
       throw mapUpstreamError(error, "unavailable");
     }
@@ -255,7 +289,7 @@ export class CodexAppServer implements CodexRunner {
 
     const turn = asRecord(record.turn);
     const notificationTurnId = readId(record.turnId) ?? readId(turn?.id);
-    if (notificationTurnId) this.bindTurnId(state, notificationTurnId);
+    if (notificationTurnId && !this.bindTurnId(state, notificationTurnId, rpc)) return;
 
     if (method === "item/started" || method === "item/completed") {
       const item = asRecord(record.item);
@@ -281,6 +315,10 @@ export class CodexAppServer implements CodexRunner {
     }
 
     if (method !== "turn/completed" || !turn) return;
+    if (containsForbiddenItem(turn.items)) {
+      this.failTurn(state, new CodexUpstreamError("forbidden_tool"), rpc, true);
+      return;
+    }
     state.usage = readUsage(record.tokenUsage) ?? readUsage(record.usage) ?? readUsage(turn.usage) ?? state.usage;
     if (state.finalText === undefined) {
       state.finalText = latestAgentText(turn.items);
@@ -307,12 +345,31 @@ export class CodexAppServer implements CodexRunner {
   ): void {
     rpc.respondError(id, -32601, "Interactive requests are disabled");
     if (!method.includes("requestApproval")) return;
+    this.failApproval(rpc, params);
+  }
+
+  private failApproval(rpc: JsonRpcClient, params: unknown): void {
     const record = asRecord(params);
-    if (!record) return;
+    const active = [...this.turnsByThread.values()];
+    if (!record) {
+      this.failTurns(active, new CodexUpstreamError("forbidden_tool"), rpc);
+      return;
+    }
     const state = this.findTurn(record);
-    if (!state) return;
-    const turnId = readId(record.turnId);
-    if (turnId) this.bindTurnId(state, turnId);
+    if (!state) {
+      this.failTurns(active, new CodexUpstreamError("forbidden_tool"), rpc);
+      return;
+    }
+    const turn = asRecord(record.turn);
+    const turnId = readId(record.turnId) ?? readId(turn?.id);
+    if (turnId && !state.turnId) {
+      this.failTurns(active, new CodexUpstreamError("forbidden_tool"), rpc);
+      return;
+    }
+    if (turnId && !this.bindTurnId(state, turnId, rpc)) {
+      this.failTurns(active, new CodexUpstreamError("forbidden_tool"), rpc);
+      return;
+    }
     this.failTurn(state, new CodexUpstreamError("forbidden_tool"), rpc, true);
   }
 
@@ -327,10 +384,36 @@ export class CodexAppServer implements CodexRunner {
     return byThread;
   }
 
-  private bindTurnId(state: TurnState, turnId: string): void {
-    if (state.turnId && state.turnId !== turnId) return;
+  private bindTurnId(state: TurnState, turnId: string, rpc: JsonRpcClient): boolean {
+    if (state.finished) {
+      if (state.turnId && state.turnId !== turnId) {
+        this.interruptTurn(state, rpc, state.turnId);
+        if (!this.turnsById.has(turnId)) this.interruptTurn(state, rpc, turnId);
+      } else if (!state.turnId && !this.turnsById.has(turnId)) {
+        state.turnId = turnId;
+        this.interruptTurn(state, rpc, turnId);
+      }
+      return false;
+    }
+    if (state.turnId && state.turnId !== turnId) {
+      const existingTurnId = state.turnId;
+      this.failTurn(state, new CodexUpstreamError("upstream"));
+      this.interruptTurn(state, rpc, existingTurnId);
+      this.interruptTurn(state, rpc, turnId);
+      return false;
+    }
+    const owner = this.turnsById.get(turnId);
+    if (owner && owner !== state) {
+      const error = new CodexUpstreamError("upstream");
+      this.failTurn(owner, error);
+      this.failTurn(state, error);
+      this.interruptTurn(owner, rpc, turnId);
+      this.interruptTurn(state, rpc, turnId);
+      return false;
+    }
     state.turnId = turnId;
-    if (!state.finished) this.turnsById.set(turnId, state);
+    this.turnsById.set(turnId, state);
+    return true;
   }
 
   private watchAbort(state: TurnState, signal: AbortSignal | undefined): void {
@@ -347,12 +430,12 @@ export class CodexAppServer implements CodexRunner {
     }
   }
 
-  private interruptTurn(state: TurnState, rpc: JsonRpcClient): void {
-    if (state.interruptSent || !state.turnId) return;
-    state.interruptSent = true;
+  private interruptTurn(state: TurnState, rpc: JsonRpcClient, turnId = state.turnId): void {
+    if (!turnId || state.interruptedTurnIds.has(turnId)) return;
+    state.interruptedTurnIds.add(turnId);
     void rpc.request("turn/interrupt", {
       threadId: state.threadId,
-      turnId: state.turnId,
+      turnId,
     }).catch(() => {
       // Interruption is best effort after the caller-visible result is terminal.
     });
@@ -376,6 +459,10 @@ export class CodexAppServer implements CodexRunner {
     this.removeTurn(state);
     state.reject(error);
     if (interrupt && rpc) this.interruptTurn(state, rpc);
+  }
+
+  private failTurns(states: readonly TurnState[], error: CodexUpstreamError, rpc: JsonRpcClient): void {
+    for (const state of states) this.failTurn(state, error, rpc, true);
   }
 
   private removeTurn(state: TurnState): void {
@@ -445,16 +532,31 @@ export class CodexAppServer implements CodexRunner {
 
     rpc?.close();
     this.rpc = undefined;
-    this.process = undefined;
     this.startPromise = undefined;
-    if (!process || process.exitCode !== null || process.signalCode !== null) return;
-
-    const exited = waitForExit(process, this.shutdownTimeoutMs);
-    process.kill("SIGTERM");
-    if (await exited) return;
-    if (process.exitCode === null && process.signalCode === null) {
-      process.kill("SIGKILL");
+    if (!process) return;
+    const reaped = await this.terminateAndReap(process);
+    if (reaped && this.process === process) {
+      this.process = undefined;
     }
+  }
+
+  private terminateAndReap(process: CodexProcess): Promise<boolean> {
+    const existing = this.terminationPromises.get(process as object);
+    if (existing) return existing;
+    const termination = this.terminateAndReapOnce(process);
+    this.terminationPromises.set(process as object, termination);
+    return termination;
+  }
+
+  private async terminateAndReapOnce(process: CodexProcess): Promise<boolean> {
+    if (process.exitCode !== null || process.signalCode !== null) return true;
+    const terminated = waitForExit(process, this.shutdownTimeoutMs);
+    process.kill("SIGTERM");
+    if (await terminated) return true;
+    if (process.exitCode !== null || process.signalCode !== null) return true;
+    const killed = waitForExit(process, this.shutdownTimeoutMs);
+    process.kill("SIGKILL");
+    return killed;
   }
 }
 
@@ -468,18 +570,19 @@ function createTurnState(threadId: string): TurnState {
   return {
     threadId,
     finished: false,
-    interruptSent: false,
+    interruptedTurnIds: new Set(),
     resolve,
     reject,
     result,
   };
 }
 
-function codexEnvironment(codexHome: string): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env, CODEX_HOME: codexHome };
-  delete env.BRIDGE_API_KEY;
-  delete env.CODEX_API_KEY;
-  delete env.OPENAI_API_KEY;
+function codexEnvironment(codexHome: string, source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const key of SAFE_ENVIRONMENT_KEYS) {
+    if (source[key] !== undefined) env[key] = source[key];
+  }
+  env.CODEX_HOME = codexHome;
   return env;
 }
 
@@ -501,6 +604,14 @@ function latestAgentText(items: unknown): string | undefined {
     if (item?.type === "agentMessage" && typeof item.text === "string") text = item.text;
   }
   return text;
+}
+
+function containsForbiddenItem(items: unknown): boolean {
+  if (!Array.isArray(items)) return false;
+  return items.some((value) => {
+    const item = asRecord(value);
+    return typeof item?.type === "string" && FORBIDDEN_ITEM_TYPES.has(item.type);
+  });
 }
 
 function readUsage(value: unknown): CodexResult["usage"] | undefined {
