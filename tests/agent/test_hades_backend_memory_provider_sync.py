@@ -4,6 +4,8 @@ import json
 import copy
 from types import SimpleNamespace
 
+import pytest
+
 
 def test_legacy_hades_backend_provider_never_syncs_after_normal_turn(
     monkeypatch, tmp_path
@@ -207,6 +209,131 @@ def test_hades_backend_memory_provider_initializes_current_owned_binding_over_hi
     assert provider._binding.project_id == "project_current"
     assert provider._binding.agent_id == "agent_current"
     assert provider._binding.backend_workspace_binding_id == "binding_current"
+
+
+@pytest.mark.parametrize("recall_path", ["prefetch", "search_tool"])
+def test_hades_backend_memory_provider_refreshes_rebound_workspace_before_recall(
+    monkeypatch, tmp_path, recall_path
+):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+
+    from hermes_cli import hades_backend_db as db
+    import hermes_cli.hades_backend_runtime as runtime
+    import plugins.memory.hades_backend as provider_mod
+
+    clock = iter(range(2_000_000_000, 2_000_000_100))
+    monkeypatch.setattr(db, "_now", lambda: next(clock))
+
+    with db.connect_closing() as conn:
+        db.save_agent(
+            conn,
+            agent_id="agent_a",
+            project_id="project_a",
+            base_url="https://backend.example",
+            label="a",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_A",
+            capabilities={"memory": True},
+        )
+        binding_a = db.upsert_workspace_binding(
+            conn,
+            project_id="project_a",
+            agent_id="agent_a",
+            local_project_id="local_a",
+            workspace_fingerprint="fingerprint_a",
+            display_path="~/repo",
+            repo_root=str(workspace),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="",
+            backend_workspace_binding_id="binding_a",
+        )
+
+    provider = provider_mod.HadesBackendMemoryProvider()
+    provider.initialize("session_1", hermes_home=str(tmp_path / "home"), platform="cli")
+    assert provider._binding == binding_a
+
+    with db.connect_closing() as conn:
+        db.save_agent(
+            conn,
+            agent_id="agent_b",
+            project_id="project_b",
+            base_url="https://backend.example",
+            label="b",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_B",
+            capabilities={"memory": True},
+        )
+        db.upsert_workspace_binding(
+            conn,
+            project_id="project_b",
+            agent_id="agent_b",
+            local_project_id="local_b",
+            workspace_fingerprint="fingerprint_b",
+            display_path="~/repo",
+            repo_root=str(workspace),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="",
+            backend_workspace_binding_id="binding_b",
+        )
+
+    search_requests = []
+    sync_calls = []
+
+    class FakeClient:
+        def memory_search(self, **payload):
+            search_requests.append(payload)
+            return {
+                "project_id": payload["project_id"],
+                "workspace_binding_id": payload["workspace_binding_id"],
+                "items": [
+                    {
+                        "id": "memory_b",
+                        "domain": "project_memory",
+                        "summary": "Project B fact",
+                    }
+                ],
+            }
+
+        def close(self):
+            pass
+
+    def fail_backend_sync(*args, **kwargs):
+        sync_calls.append((args, kwargs))
+        raise AssertionError("binding refresh attempted Backend sync")
+
+    monkeypatch.setattr(runtime, "client_from_config", lambda **kwargs: FakeClient())
+    monkeypatch.setattr(
+        provider_mod,
+        "run_backend_sync",
+        fail_backend_sync,
+        raising=False,
+    )
+
+    if recall_path == "prefetch":
+        assert "Project B fact" in provider.prefetch("project fact")
+    else:
+        result = json.loads(
+            provider.handle_tool_call(
+                provider_mod.SEARCH_TOOL_NAME,
+                {"query": "project fact"},
+            )
+        )
+        assert result["items"][0]["summary"] == "Project B fact"
+
+    assert search_requests == [
+        {
+            "project_id": "project_b",
+            "workspace_binding_id": "binding_b",
+            "query": "project fact",
+            "domain": "all",
+            "limit": 8,
+            "include_raw_chunks": False,
+        }
+    ]
+    assert sync_calls == []
 
 
 def test_graph_v2_local_artifact_selection_requires_exact_active_identity():

@@ -660,7 +660,7 @@ class HadesBackendMemoryProvider(MemoryProvider):
         return bool(agent and agent.capabilities.get("memory", True))
 
     def initialize(self, session_id: str, **kwargs) -> None:
-        self._binding = self._current_owned_binding(Path(os.getcwd()))
+        self._refresh_binding()
 
     def system_prompt_block(self) -> str:
         if self._binding is None:
@@ -682,6 +682,7 @@ class HadesBackendMemoryProvider(MemoryProvider):
         )
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
+        self._refresh_binding()
         if self._binding is None:
             return ""
         document_first = _prefers_document_recall(query)
@@ -771,6 +772,7 @@ class HadesBackendMemoryProvider(MemoryProvider):
         ]
 
     def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
+        self._refresh_binding()
         if tool_name == EVIDENCE_PACK_CREATE_TOOL_NAME:
             return self._handle_evidence_pack_create(args)
         if tool_name == EVIDENCE_PACK_SEARCH_TOOL_NAME:
@@ -1704,6 +1706,9 @@ class HadesBackendMemoryProvider(MemoryProvider):
     def _current_owned_binding(self, cwd: Path) -> db.WorkspaceBinding | None:
         scoped = runtime.current_workspace_agent_binding(cwd)
         return scoped[1] if scoped is not None else None
+
+    def _refresh_binding(self) -> None:
+        self._binding = self._current_owned_binding(Path(os.getcwd()))
 
     def _backend_memory_search(
         self,
