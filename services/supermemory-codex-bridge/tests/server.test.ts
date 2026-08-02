@@ -14,7 +14,7 @@ const config: BridgeConfig = {
   port: 0,
   apiKey: "bridge-test-key",
   publicModel: "supermemory-codex",
-  codexModel: "gpt-5.3-codex",
+  codexModel: "gpt-5.6-sol",
   codexHome: "/tmp/codex-home",
   codexCwd: "/workspace",
   timeoutMs: 100,

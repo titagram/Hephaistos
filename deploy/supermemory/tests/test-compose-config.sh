@@ -10,7 +10,6 @@ trap cleanup EXIT
 
 umask 077
 cat >"$env_file" <<'ENV'
-CODEX_MODEL=gpt-test-codex
 SUPERMEMORY_BASIC_AUTH_USERS=test-user:test-hash
 SUPERMEMORY_API_KEY=supermemory-test-key
 SUPERMEMORY_BRIDGE_API_KEY=bridge-test-key
@@ -84,7 +83,7 @@ for (const name of ["OPENAI_MODEL", "OPENAI_FAST_MODEL", "OPENAI_TEXT_MODEL"]) {
 }
 assert.equal(server.environment.SUPERMEMORY_SKIP_EMBEDDING_PREWARM, "true");
 assert.equal(bridge.environment.BRIDGE_API_KEY, "bridge-test-key");
-assert.equal(bridge.environment.CODEX_MODEL, "gpt-test-codex");
+assert.equal(bridge.environment.CODEX_MODEL, "gpt-5.6-sol");
 assert.ok(!Object.hasOwn(bridge.environment, "OPENAI_API_KEY"), "bridge must not receive OPENAI_API_KEY");
 
 const bridgeLabels = bridge.labels ?? {};

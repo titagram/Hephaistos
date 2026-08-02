@@ -5,7 +5,7 @@ import { loadConfig } from "../src/config.js";
 
 const validEnv: NodeJS.ProcessEnv = {
   BRIDGE_API_KEY: "bridge-secret",
-  CODEX_MODEL: "gpt-5.3-codex",
+  CODEX_MODEL: "gpt-5.6-sol",
   CODEX_HOME: "/var/lib/codex",
 };
 
@@ -15,7 +15,7 @@ test("loads safe defaults", () => {
     port: 8646,
     apiKey: "bridge-secret",
     publicModel: "supermemory-codex",
-    codexModel: "gpt-5.3-codex",
+    codexModel: "gpt-5.6-sol",
     codexHome: "/var/lib/codex",
     codexCwd: "/workspace",
     timeoutMs: 120_000,

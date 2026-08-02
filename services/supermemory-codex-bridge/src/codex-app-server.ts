@@ -178,7 +178,7 @@ export class CodexAppServer implements CodexRunner {
         model: this.config.codexModel,
         cwd: this.config.codexCwd,
         approvalPolicy: "never",
-        sandbox: "readOnly",
+        sandbox: "read-only",
         personality: "none",
         ephemeral: true,
         selectedCapabilityRoots: [],
@@ -274,7 +274,7 @@ export class CodexAppServer implements CodexRunner {
       rpc.onRequest((id, method, params) => this.handleServerRequest(rpc!, id, method, params));
       await rpc.request("initialize", {
         clientInfo: CLIENT_INFO,
-        capabilities: { experimentalApi: false },
+        capabilities: { experimentalApi: true },
       });
       if (this.process !== process || this.rpc !== rpc || this.closed) {
         throw new CodexUpstreamError("unavailable");

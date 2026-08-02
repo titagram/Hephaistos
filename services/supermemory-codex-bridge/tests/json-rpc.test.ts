@@ -60,6 +60,31 @@ test("serializes requests and resolves matching results", async () => {
   client.close();
 });
 
+test("accepts Codex responses without a jsonrpc member", async () => {
+  const { client, stdin, stdout } = createTransport();
+  const request = client.request<{ userAgent: string }>("initialize");
+  await nextLine(stdin);
+
+  stdout.write('{"id":1,"result":{"userAgent":"codex_cli_rs/0.146.0"}}\n');
+
+  assert.deepEqual(await request, { userAgent: "codex_cli_rs/0.146.0" });
+  client.close();
+});
+
+test("dispatches Codex notifications without a jsonrpc member", () => {
+  const { client, stdout } = createTransport();
+  const notifications: Array<{ method: string; params: unknown }> = [];
+  client.onNotification((method, params) => notifications.push({ method, params }));
+
+  stdout.write('{"method":"configWarning","params":{"message":"configuration warning"}}\n');
+
+  assert.deepEqual(notifications, [{
+    method: "configWarning",
+    params: { message: "configuration warning" },
+  }]);
+  client.close();
+});
+
 test("buffers a JSON-RPC line split across stdout chunks", async () => {
   const { client, stdin, stdout } = createTransport();
   const request = client.request<string>("thread/read");
@@ -199,6 +224,18 @@ test("rejects malformed JSON-RPC error responses as protocol failures", async ()
 
   await expectRejection(request, "protocol");
 });
+
+for (const jsonrpc of ["1.0", null, 2] as const) {
+  test(`rejects an explicit invalid jsonrpc version (${String(jsonrpc)})`, async () => {
+    const { client, stdin, stdout } = createTransport();
+    const request = client.request("initialize");
+    await nextLine(stdin);
+
+    stdout.write(`${JSON.stringify({ jsonrpc, id: 1, result: { userAgent: "codex_cli_rs/0.146.0" } })}\n`);
+
+    await expectRejection(request, "protocol");
+  });
+}
 
 test("rejects malformed errors for unknown response ids", async () => {
   const { client, stdin, stdout } = createTransport();

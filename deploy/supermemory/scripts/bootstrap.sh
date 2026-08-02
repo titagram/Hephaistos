@@ -216,7 +216,7 @@ if [[ "$RUNTIME_STATE" != pending ]]; then
   RUNTIME_TEMP="$(mktemp "$DEPLOY_DIR/.env.runtime.tmp.XXXXXX")"
   chmod 600 "$RUNTIME_TEMP"
   {
-    printf '%s\n' 'CODEX_MODEL=gpt-5.3-codex'
+    printf '%s\n' 'CODEX_MODEL=gpt-5.6-sol'
     printf 'SUPERMEMORY_BASIC_AUTH_USERS=%s\n' "$escaped_basic_auth_entry"
     printf '%s\n' 'SUPERMEMORY_API_KEY=sm_bootstrap_pending'
     printf 'SUPERMEMORY_BRIDGE_API_KEY=%s\n' "$bridge_api_key"

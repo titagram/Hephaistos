@@ -272,10 +272,12 @@ export class JsonRpcClient {
 }
 
 function isJsonRpcMessage(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object"
-    && value !== null
-    && !Array.isArray(value)
-    && (value as Record<string, unknown>).jsonrpc === "2.0";
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+
+  const message = value as Record<string, unknown>;
+  return !Object.hasOwn(message, "jsonrpc") || message.jsonrpc === "2.0";
 }
 
 function isJsonRpcId(value: unknown): value is JsonRpcId {

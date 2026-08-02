@@ -121,7 +121,7 @@ const config: BridgeConfig = {
   port: 8646,
   apiKey: "bridge-secret-must-not-reach-codex",
   publicModel: "supermemory-codex",
-  codexModel: "gpt-5.3-codex",
+  codexModel: "gpt-5.6-sol",
   codexHome: "/var/lib/supermemory-codex",
   codexCwd: "/workspace",
   timeoutMs: 120_000,
@@ -160,7 +160,7 @@ async function initialize(peer: FakeRpcPeer): Promise<void> {
         title: "Supermemory Codex Bridge",
         version: "0.1.0",
       },
-      capabilities: { experimentalApi: false },
+      capabilities: { experimentalApi: true },
     },
   });
   peer.respond(1, { userAgent: "fake-codex" });
@@ -182,7 +182,7 @@ async function acceptRun(
       model: config.codexModel,
       cwd: config.codexCwd,
       approvalPolicy: "never",
-      sandbox: "readOnly",
+      sandbox: "read-only",
       personality: "none",
       ephemeral: true,
       selectedCapabilityRoots: [],
