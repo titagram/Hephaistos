@@ -1053,6 +1053,45 @@ test("rejects a successful completion snapshot containing a forbidden item", asy
   await server.close();
 });
 
+test("rejects a completed turn without an agent message", async () => {
+  const { server, processes } = createHarness();
+  const invocation = { prompt: "Require an answer." };
+  const result = server.run(invocation);
+  const peer = new FakeRpcPeer(processes[0]!);
+  await initialize(peer);
+  await acceptRun(peer, "thread-no-answer", "turn-no-answer", invocation);
+
+  peer.notify("turn/completed", {
+    threadId: "thread-no-answer",
+    turn: { id: "turn-no-answer", status: "completed", items: [], error: null },
+  });
+
+  await expectKind(result, "upstream");
+  await server.close();
+});
+
+test("accepts an explicit empty agent message", async () => {
+  const { server, processes } = createHarness();
+  const invocation = { prompt: "An empty answer is valid." };
+  const result = server.run(invocation);
+  const peer = new FakeRpcPeer(processes[0]!);
+  await initialize(peer);
+  await acceptRun(peer, "thread-empty-answer", "turn-empty-answer", invocation);
+
+  peer.notify("turn/completed", {
+    threadId: "thread-empty-answer",
+    turn: {
+      id: "turn-empty-answer",
+      status: "completed",
+      items: [{ id: "empty-message", type: "agentMessage", text: "" }],
+      error: null,
+    },
+  });
+
+  assert.deepEqual(await result, { text: "" });
+  await server.close();
+});
+
 test("passes only allowlisted runtime environment variables to Codex", async () => {
   const ambient: NodeJS.ProcessEnv = {
     PATH: "/safe/bin",

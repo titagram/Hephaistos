@@ -359,7 +359,11 @@ export class CodexAppServer implements CodexRunner {
     }
 
     if (turn.status === "completed") {
-      this.resolveTurn(state, { text: state.finalText ?? "", ...(state.usage ? { usage: state.usage } : {}) });
+      if (state.finalText === undefined) {
+        this.failTurn(state, new CodexUpstreamError("upstream"));
+        return;
+      }
+      this.resolveTurn(state, { text: state.finalText, ...(state.usage ? { usage: state.usage } : {}) });
       return;
     }
     if (turn.status === "failed") {
