@@ -165,6 +165,7 @@ infographic/
 # Supermemory deployment credentials are generated at runtime.
 deploy/supermemory/.env.runtime
 deploy/supermemory/.env.runtime.tmp.*
+services/supermemory-codex-bridge/dist/
 
 # Isolated feature worktrees managed by Superpowers skills.
 .worktrees/

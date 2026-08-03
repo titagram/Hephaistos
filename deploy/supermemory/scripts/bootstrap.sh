@@ -184,6 +184,8 @@ if [[ "$resume" == true ]]; then
   if [[ "$RUNTIME_STATE" == complete ]]; then
     require_codex_authentication
     compose up -d --build
+    wait_for_health codex-bridge
+    wait_for_health supermemory-server
     verify_basic_auth_label
     printf 'Resume complete. Run: %s --local\n' "$DEPLOY_DIR/scripts/smoke.sh"
     exit 0
@@ -232,6 +234,8 @@ printf '%s\n' 'Running image and Compose configuration tests...'
   cd "$REPO_ROOT"
   bash deploy/supermemory/tests/test-server-image.sh
   bash deploy/supermemory/tests/test-compose-config.sh
+  bash deploy/supermemory/tests/test-bootstrap-resume.sh
+  bash deploy/supermemory/tests/test-smoke-public.sh
 )
 
 printf '%s\n' 'Building deployment images...'
