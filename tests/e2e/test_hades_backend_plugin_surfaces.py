@@ -353,6 +353,109 @@ def test_fake_model_turn_routes_title_after_an_ordinary_surface_conversation(
     )
 
 
+def test_classic_fake_model_turn_and_resume_keep_one_runtime_and_title(
+    monkeypatch,
+) -> None:
+    """The actual classic ``HermesCLI.chat`` route preserves its fake-model transcript."""
+    import cli
+
+    calls: list[dict[str, Any]] = []
+
+    class FakeModelAgent:
+        session_id = "classic-session"
+        max_iterations = 90
+
+        def run_conversation(self, **kwargs: Any) -> dict[str, Any]:
+            calls.append(kwargs)
+            text = str(kwargs["user_message"])
+            return {
+                "final_response": f"answer: {text}",
+                "messages": list(kwargs["conversation_history"])
+                + [
+                    {"role": "user", "content": text},
+                    {"role": "assistant", "content": f"answer: {text}"},
+                ],
+                "completed": True,
+                "api_calls": 1,
+            }
+
+        def drain_autopoiesis_notices(self) -> None:
+            return None
+
+    class QuietConsole:
+        width = 80
+
+        def print(self, *_args: Any, **_kwargs: Any) -> None:
+            return None
+
+    classic = cli.HermesCLI.__new__(cli.HermesCLI)
+    classic.agent = FakeModelAgent()
+    classic.api_mode = "chat_completions"
+    classic.api_key = "fake-key"
+    classic.base_url = "http://fake.invalid/v1"
+    classic.bell_on_complete = False
+    classic.conversation_history = []
+    classic.console = QuietConsole()
+    classic.final_response_markdown = False
+    classic.model = "deepseek-v4-flash"
+    classic.provider = "opencode-go"
+    classic.session_id = "classic-session"
+    classic.show_reasoning = False
+    classic._active_agent_route_signature = "fixed-route"
+    classic._clarify_freetext = False
+    classic._clarify_state = None
+    classic._interrupt_queue = __import__("queue").Queue()
+    classic._last_turn_interrupted = False
+    classic._pending_model_switch_note = None
+    classic._pending_skills_reload_note = None
+    classic._pending_moa_config = None
+    classic._prompt_start_time = None
+    classic._session_db = None
+    classic._stream_box_opened = False
+    classic._stream_started = False
+    classic._voice_continuous = False
+    classic._voice_mode = False
+    classic._voice_tts = False
+    classic._ensure_runtime_credentials = lambda: True
+    classic._flush_credit_notices = lambda: None
+    classic._flush_stream = lambda: None
+    classic._invalidate = lambda **_kwargs: None
+    classic._reset_stream_state = lambda: None
+    classic._resolve_turn_agent_config = lambda _message: {
+        "signature": "fixed-route",
+        "model": "deepseek-v4-flash",
+        "runtime": {"provider": "opencode-go"},
+    }
+    classic._scrollback_box_width = lambda: 80
+    classic._secret_capture_callback = lambda *_args: None
+    classic._sudo_password_callback = lambda *_args: None
+    classic._approval_callback = lambda *_args: None
+    classic._transfer_session_yolo = lambda *_args: None
+
+    monkeypatch.setattr(cli, "ChatConsole", QuietConsole)
+    monkeypatch.setattr(cli, "Panel", lambda value, **_kwargs: value)
+    monkeypatch.setattr(cli, "_cprint", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli.time, "sleep", lambda _seconds: None)
+    with patch("agent.title_generator.maybe_auto_title") as title:
+        assert classic.chat("first question") == "answer: first question"
+        assert classic.chat("resume question") == "answer: resume question"
+
+    assert [call["task_id"] for call in calls] == ["classic-session", "classic-session"]
+    assert calls[0]["conversation_history"] == []
+    assert calls[1]["conversation_history"] == [
+        {"role": "user", "content": "first question"},
+        {"role": "assistant", "content": "answer: first question"},
+    ]
+    assert title.call_count == 2
+    assert all(call.kwargs["main_runtime"] == {
+        "model": "deepseek-v4-flash",
+        "provider": "opencode-go",
+        "base_url": "http://fake.invalid/v1",
+        "api_key": "fake-key",
+        "api_mode": "chat_completions",
+    } for call in title.call_args_list)
+
+
 @pytest.mark.live_system_guard_bypass
 def test_spawned_serve_runs_the_real_desktop_websocket_transport_hermetically(
     tmp_path: Path,
@@ -767,10 +870,156 @@ def test_external_plugin_real_pairing_service_and_profile_routes_are_scoped(
     assert len(issued) == 3
 
 
-def test_external_plugin_is_discovered_by_real_manager_before_contextual_dispatch(
-    monkeypatch, gateway_server, tmp_path: Path
+def test_external_plugin_sync_is_one_scoped_project_transaction_only(
+    tmp_path: Path,
 ) -> None:
-    """The actual plugin handler reaches the shared Desktop/TUI dispatcher after discovery."""
+    """An actual plugin sync may touch only its exact project-knowledge protocol."""
+    entrypoint = _load_external_entrypoint(_external_plugin_root_or_skip())
+    package = f"{entrypoint.__name__}.hades_backend_plugin"
+    contracts = importlib.import_module(f"{package}.contracts")
+    state = importlib.import_module(f"{package}.state")
+    sync = importlib.import_module(f"{package}.sync")
+    workspace = tmp_path / "project"
+    (workspace / "src").mkdir(parents=True)
+    (workspace / "src" / "app.py").write_text("def run(): return 1\n", encoding="utf-8")
+    (workspace / "docs").mkdir()
+    (workspace / "docs" / "runbook.md").write_text("# Runbook\n", encoding="utf-8")
+    (workspace / ".env").write_text("TOKEN=SYNC_CANARY\n", encoding="utf-8")
+    binding = state.WorkspaceBinding(
+        "fingerprint",
+        "project-a",
+        "agent-a",
+        "local-a",
+        "binding-a",
+        str(workspace),
+        str(workspace),
+        "",
+        "",
+        "",
+        "linked",
+    )
+    forbidden = {
+        "memory_snapshot",
+        "submit_memory_proposal",
+        "pull_jobs",
+        "list_inbox",
+        "append_logbook",
+        "persephone_poll",
+    }
+
+    class StrictFakeClient:
+        def __init__(self) -> None:
+            self.calls: set[str] = set()
+            self.uploads: list[dict[str, Any]] = []
+            self.closed = 0
+
+        def __getattr__(self, name: str) -> Any:
+            if name in forbidden:
+                raise AssertionError(f"forbidden sync call: {name}")
+            raise AttributeError(name)
+
+        def bind_workspace(self, **_payload: Any) -> dict[str, str]:
+            self.calls.add("bind_workspace")
+            return {"workspace_binding_id": "binding-a"}
+
+        def artifact_lookup(self, **_payload: Any) -> dict[str, bool]:
+            self.calls.add("artifact_lookup")
+            return {"exists": False}
+
+        def upload_artifact(self, **payload: Any) -> dict[str, bool]:
+            self.calls.add("upload_artifact")
+            self.uploads.append(payload)
+            return {"ok": True}
+
+        def close(self) -> None:
+            self.closed += 1
+
+    client = StrictFakeClient()
+    summaries: list[dict[str, Any]] = []
+    result = sync.sync_project_knowledge(
+        sync.ProjectSyncRequest(workspace=workspace, domain="source_index"),
+        resolver=lambda _workspace: contracts.WorkspaceResolution(workspace, binding=binding),
+        client_factory=lambda _binding: client,
+        summary_writer=summaries.append,
+    )
+
+    assert result["status"] == "ok"
+    assert client.calls == {"bind_workspace", "artifact_lookup", "upload_artifact"}
+    assert client.closed == 1
+    assert len(client.uploads) == 1
+    assert client.uploads[0]["schema"] == "hades.symbols.v1"
+    assert not (forbidden & client.calls)
+    assert summaries == [result]
+    assert "SYNC_CANARY" not in repr(client.uploads)
+
+
+def test_external_pairing_cannot_mutate_a_live_agent_prompt_or_tool_schema(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Pairing is stateful, but one already-live conversation stays byte-identical."""
+    entrypoint = _load_external_entrypoint(_external_plugin_root_or_skip())
+    package = f"{entrypoint.__name__}.hades_backend_plugin"
+    pairing = importlib.import_module(f"{package}.pairing")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "agent-profile"))
+    from model_tools import get_tool_definitions
+    from run_agent import AIAgent
+
+    agent = AIAgent(
+        model="deepseek-v4-flash",
+        provider="opencode-go",
+        base_url="http://fake.invalid/v1",
+        api_key="fake-key",
+        quiet_mode=True,
+        session_id="task13-stable-conversation",
+        skip_context_files=True,
+        skip_memory=True,
+    )
+    prompt_before = agent._build_system_prompt().encode()
+    schema_before = json.dumps(
+        get_tool_definitions(quiet_mode=True), sort_keys=True, separators=(",", ":")
+    ).encode()
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+
+    class PairingClient:
+        def verify_token(self, **_kwargs: Any) -> dict[str, Any]:
+            return {"project_id": "project-a", "valid": True}
+
+        def register_agent(self, **_kwargs: Any) -> dict[str, Any]:
+            return {
+                "agent_id": "agent-a",
+                "agent_token": "DERIVED_STABLE",
+                "capabilities": dict.fromkeys(pairing.PROJECT_KNOWLEDGE_CAPABILITIES, True),
+            }
+
+        def bind_workspace(self, **_kwargs: Any) -> dict[str, Any]:
+            return {"workspace_binding_id": "binding-a"}
+
+        def close(self) -> None:
+            return None
+
+    pairing.pair_project(
+        base_url="https://fake.invalid",
+        project_id="project-a",
+        bootstrap_token="BOOTSTRAP_STABLE_CANARY",
+        workspace=workspace,
+        profile_home=tmp_path / "paired-profile",
+        client_factory=lambda _url, _token: PairingClient(),
+    )
+
+    assert agent._build_system_prompt().encode() == prompt_before
+    schema_after = json.dumps(
+        get_tool_definitions(quiet_mode=True), sort_keys=True, separators=(",", ":")
+    ).encode()
+    assert schema_after == schema_before
+    assert b"BOOTSTRAP_STABLE_CANARY" not in prompt_before + schema_before + schema_after
+
+
+@pytest.mark.parametrize("surface", ["tui", "desktop"])
+def test_external_plugin_is_discovered_by_real_manager_before_contextual_dispatch(
+    monkeypatch, gateway_server, tmp_path: Path, surface: str
+) -> None:
+    """The actual plugin handler reaches both shared TUI/Desktop dispatchers."""
     root = _external_plugin_root_or_skip()
     from hermes_cli.plugins import PluginContext, PluginManifest
 
@@ -784,13 +1033,13 @@ def test_external_plugin_is_discovered_by_real_manager_before_contextual_dispatc
     received: list[dict[str, Any]] = []
     monkeypatch.setattr(cli, "pair_project", lambda **kwargs: received.append(kwargs))
     monkeypatch.setattr("hermes_cli.plugins._plugin_manager", manager)
-    session_id = "actual-plugin-desktop"
+    session_id = f"actual-plugin-{surface}"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     gateway_server._sessions[session_id] = {
         "session_key": session_id,
         "cwd": str(workspace),
-        "source": "desktop",
+        "source": surface,
         "agent": None,
     }
     response: dict[str, Any] = {}
