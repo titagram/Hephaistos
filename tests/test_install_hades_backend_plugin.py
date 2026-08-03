@@ -42,6 +42,13 @@ def test_website_backend_setup_does_not_document_retired_bootstrap_tokens():
 
     assert "hades plugins install titagram/hades-backend-plugin --enable" in source
     assert "not yet published" in source
+    assert "not a memory provider" in source
+    assert "Holographic, Supermemory" in source
+    assert "There is no default Backend project" in source
+    assert "Sync is an explicit, workspace-scoped operation" in source
+    assert "never paste the token into a command, slash command, or\nchat message" in source
+    assert "`hades update` changes Hades core only" in source
+    assert "`hades serve` is the local JSON-RPC/WebSocket transport" in source
     for forbidden in ("backend bootstrap", "--project-token", "bootstrap token"):
         assert forbidden not in source.lower()
 

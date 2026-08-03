@@ -42,8 +42,9 @@ hades backend logbook write \
 The command persists the request locally before contacting the backend. A
 queued/retry or dead-letter result is degraded state, not success: preserve its
 output and use the stated recovery action. A capability denial requires an
-administrator to grant `write_project_logbook` and a re-registration with
-`hades backend setup`; never claim that the entry was recorded remotely until
+administrator to grant `write_project_logbook` and a re-pairing from the
+project root with `hades backend set-token --url URL --project-id ID` using its
+masked token prompt; never claim that the entry was recorded remotely until
 the command reports `sent`. After a dead-letter capability failure, obtain the
 grant and re-register, then re-run exactly the original write command (same
 idempotency key and payload) to requeue it; `hades backend sync` alone does not

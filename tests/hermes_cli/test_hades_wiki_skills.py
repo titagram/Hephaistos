@@ -127,7 +127,7 @@ def test_wiki_verify_skill_requires_manual_verification_capability_grant() -> No
         "`verify_project_wiki`",
         "project administrator",
         "new project-scoped bootstrap token",
-        "`hades backend setup`",
+        "`hades backend set-token --url URL --project-id ID`",
         "Never try to upgrade an existing token automatically",
     ):
         assert contract in text

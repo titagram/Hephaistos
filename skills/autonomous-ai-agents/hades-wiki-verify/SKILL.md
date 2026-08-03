@@ -16,7 +16,7 @@ Use this skill to review Hades wiki pages whose current revision is `needs_verif
 - Run from the local workspace linked to the intended Hades backend project.
 - Use the `terminal` tool to run the `hades` CLI and inspect local code. Use `read_file` and `search_files` when they are the safer way to inspect a complete file or locate symbols.
 - Treat invocation as permission to verify only fully supported current revisions. Do not edit, draft, or delete wiki content.
-- The registered agent token must have `verify_project_wiki`. If the backend denies that capability, stop: ask a project administrator to grant it and issue a new project-scoped bootstrap token, then run `hades backend setup` to re-register. Never try to upgrade an existing token automatically.
+- The registered agent token must have `verify_project_wiki`. If the backend denies that capability, stop: ask a project administrator to grant it and issue a new project-scoped bootstrap token. From that project's root, run `hades backend set-token --url URL --project-id ID` and enter the token only in its masked prompt; never put it in a command or chat message. Never try to upgrade an existing token automatically.
 
 ## How to Run
 

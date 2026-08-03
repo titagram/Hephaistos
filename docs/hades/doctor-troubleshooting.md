@@ -72,8 +72,9 @@ hades logs --level WARNING --session latest
 
 Expected local evidence: `sync.last_error` or `sync.background.status=failed`
 and a `sync.error` or `sync.client_error` warning in local logs. Re-run
-`hades backend setup` only after confirming the backend URL and derived agent
-token are wrong or revoked.
+`hades backend set-token --url URL --project-id ID` only after confirming the
+Backend URL or derived credential is wrong or revoked. Run it from the linked
+project root and enter the replacement token only through its masked prompt.
 
 ### Stuck Waiting Job
 

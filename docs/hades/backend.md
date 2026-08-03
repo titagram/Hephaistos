@@ -1,4 +1,11 @@
-# Hades Backend Setup
+# Historical Backend Design Notes (retired)
+
+> **Historical only — do not use these instructions for a current install.**
+> Hades Backend is now an optional, standalone, workspace-scoped
+> project-knowledge plugin. It is not a memory provider, never runs automatic
+> sync, and is paired only with `hades backend set-token --url URL --project-id
+> ID` using the masked token prompt from the project root. See
+> `website/docs/getting-started/hades-backend.md` for current instructions.
 
 ## Gnothi Seauton: local organism awareness
 
@@ -90,8 +97,9 @@ It sends a redacted display path, workspace fingerprint, git remote display,
 remote hash, and HEAD commit. The backend returns the stable
 `workspace_binding_id`.
 
-`hades project unlink <project>` notifies the backend, then disables the local
-binding without deleting shared memory or job history.
+`hades project unlink <project>` is a retired command from this design; current
+workspace links are managed by the standalone plugin without a shared-memory
+lifecycle.
 
 ## Shared Memory
 
@@ -595,8 +603,8 @@ sha256. A positive lookup means the backend already has the same artifact for
 that binding, so the client records a skip instead of uploading the payload.
 The artifact POST endpoint also deduplicates repeated hashes server-side.
 
-`read_source_slice` is the bounded source-content path for diagnosis: it is not
-auto-executed by piggyback sync, stores only a selected redacted line window as
+`read_source_slice` is the bounded source-content path for this historical
+design: it was not auto-executed by piggyback sync, stored only a selected redacted line window as
 `source_slice`, and keeps that content out of automatic project-memory recall.
 
 `hades backend backfill-note <path>` is a local note-quality preview for old raw

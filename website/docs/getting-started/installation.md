@@ -71,8 +71,11 @@ hades config set     # Set individual config values
 hades setup          # Or run the full setup wizard to configure everything at once
 ```
 
-If you are joining a shared Hades backend project, use the project dashboard
-one-liner or follow [Backend Setup](./hades-backend.md) after the base install.
+If you need optional Backend project knowledge, install and pair its standalone
+plugin after the base install. The reusable Hades/plugin installation steps are
+token-free; create and copy a project token separately, then enter it only in
+the masked `set-token` prompt from that project's root. See
+[Backend Plugin Setup](./hades-backend.md).
 
 :::tip Fastest path: Nous Portal
 One subscription covers 300+ models plus the [Tool Gateway](/user-guide/features/tool-gateway) (web search, image generation, TTS, cloud browser). Skip the per-tool key juggling:

@@ -45,8 +45,14 @@ hades backend set-token --url https://backend.example.test --project-id project-
 
 The standalone plugin is not yet published from this checkout, so the command
 above documents the release identity rather than claiming that it is currently
-available. `set-token` prompts for the credential; do not put credentials on
-the command line or in installer arguments.
+available. Copy a project token separately from the Backend dashboard and run
+`set-token` from the project's root; it prompts for the token masked. Do not
+put it in a command, chat message, installer argument, or shell history.
+
+Each profile can link multiple project roots with distinct derived credentials;
+there is no default/global Backend project. Backend is optional project
+knowledge, not a memory provider: `memory.provider` remains Holographic,
+Supermemory, or another real memory provider.
 
 Updates remain explicit too:
 
@@ -55,7 +61,9 @@ hades update
 hades plugins update hades-backend
 ```
 
-The first command updates Hades core only. The second updates the installed
-plugin when the user requests it. Disabling or removing the plugin changes
-only active plugin discovery; it does not erase existing project settings,
-sessions, credentials, or local project state.
+The first command updates Hades core only; it never updates or reconfigures
+Backend. The second updates the installed plugin when the user requests it.
+Restart the affected Hades CLI, TUI, Desktop, or gateway after a plugin
+lifecycle change. Disabling or removing the plugin changes only active plugin
+discovery; it does not erase existing project settings, sessions, credentials,
+or local project state.

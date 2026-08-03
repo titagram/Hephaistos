@@ -140,8 +140,9 @@ Recovery state is visible and actionable:
   request with bounded backoff.
 - `dead_letter` is a permanent rejection or exhausted retry budget. Inspect
   the error and preserve the idempotency key. For a capability denial, ask a
-  project administrator to grant `write_project_logbook`, then **re-register**
-  with `hades backend setup`; this re-registration is required before the
+  project administrator to grant `write_project_logbook`, then **re-pair** the
+  workspace with `hades backend set-token --url URL --project-id ID`; this is
+  required before the
   derived token can receive the capability. Then re-run exactly the original
   write command with the same key and payload: this explicit action requeues
   the row with a fresh bounded retry budget. `hades backend sync` alone never
@@ -158,11 +159,10 @@ transition cannot record its event after the domain mutation, the typed
 post-commit recording obligation must remain visible until it succeeds or an
 authorized human records a decision explaining the exception.
 
-Normal agent turns start a lightweight piggyback sync when a profile has a
-linked backend workspace and the per-profile backoff window is due. The
-piggyback run is asynchronous, quiet, and fail-open: chat continues even if the
-backend is offline. Repeated failures are recorded in local sync state and
-surface as a degraded backend action in `hades backend status --json`.
+Normal agent turns never contact Backend. Refresh project knowledge only with
+an explicit `hades backend sync` from one linked workspace; it is not a
+background or lifecycle operation. Any result is reported by the command,
+rather than injected into an ordinary conversation turn.
 The same JSON payload also exposes local `awareness` health per workspace
 binding. Use it as the local readiness view for memory cache, artifact upload,
 source-slice upload, and bug-evidence availability before attempting

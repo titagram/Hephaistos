@@ -32,6 +32,12 @@ When you run `hades update`, the following steps occur:
 6. **Config migration** — detects new config options added since your version and prompts you to set them
 7. **Gateway auto-restart** — running gateways are refreshed after the update completes so the new code takes effect immediately. Service-managed gateways (systemd on Linux, launchd on macOS) are restarted through the service manager. Manual gateways are relaunched automatically when Hades can map the running PID back to a profile.
 
+`hades update` does not update, install, enable, reconfigure, pair, or
+synchronize the optional `hades-backend` project-knowledge plugin. Manage it
+separately with `hades plugins update hades-backend`, `hades plugins disable
+hades-backend`, or `hades plugins remove hades-backend`, then restart the
+affected Hades surface to reload plugin discovery.
+
 ### Updating against a non-default branch: `--branch`
 
 By default `hades update` tracks `origin/main`. Pass `--branch <name>` to update against a different branch — useful for QA channels, feature branches, or release-candidate testing:
