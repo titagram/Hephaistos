@@ -826,7 +826,9 @@ def test_external_plugin_real_pairing_service_and_profile_routes_are_scoped(
         assert env.count(f"DERIVED_{project}") == 1
         assert f"BOOTSTRAP_{project}" not in env
         assert f"BOOTSTRAP_{project}".encode() not in database
-    assert "mcp_servers:" in (profile / "config.yaml").read_text(encoding="utf-8")
+    assert "mcp_servers:\n  hades_backend:" in (profile / "config.yaml").read_text(
+        encoding="utf-8"
+    )
     for name, value in memory_before.items():
         path = profile / ("config.yaml" if name == "config" else name)
         assert value in (
@@ -968,7 +970,8 @@ def test_external_pairing_cannot_mutate_a_live_agent_prompt_or_tool_schema(
     entrypoint = _load_external_entrypoint(_external_plugin_root_or_skip())
     package = f"{entrypoint.__name__}.hades_backend_plugin"
     pairing = importlib.import_module(f"{package}.pairing")
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "agent-profile"))
+    profile = tmp_path / "agent-profile"
+    monkeypatch.setenv("HERMES_HOME", str(profile))
     from model_tools import get_tool_definitions
     from run_agent import AIAgent
 
@@ -1011,7 +1014,7 @@ def test_external_pairing_cannot_mutate_a_live_agent_prompt_or_tool_schema(
         project_id="project-a",
         bootstrap_token="BOOTSTRAP_STABLE_CANARY",
         workspace=workspace,
-        profile_home=tmp_path / "paired-profile",
+        profile_home=profile,
         client_factory=lambda _url, _token: PairingClient(),
     )
 

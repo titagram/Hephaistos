@@ -53,7 +53,7 @@ def _matrix_home(home: Path, *, state: str) -> Path:
     if configured:
         with (home / "config.yaml").open("a", encoding="utf-8") as stream:
             stream.write(
-                "mcp_servers:\n  hades-backend:\n    command: python\n"
+                "mcp_servers:\n  hades_backend:\n    command: python\n"
             )
     bindings: list[str] = []
     if state.endswith("linked-a") or state.endswith("linked-a-and-b"):
@@ -73,7 +73,7 @@ def _matrix_state(home: Path) -> tuple[bool, bool, bool, tuple[str, ...]]:
     config = (home / "config.yaml").read_text(encoding="utf-8")
     installed = (home / "plugins" / "hades-backend" / "plugin.yaml").is_file()
     enabled = "enabled: [hades-backend]" in config
-    configured = "mcp_servers:\n  hades-backend:" in config
+    configured = "mcp_servers:\n  hades_backend:" in config
     bindings = tuple(json.loads(
         (home / "hades-backend-test-bindings.json").read_text(encoding="utf-8")
     )["bindings"])
