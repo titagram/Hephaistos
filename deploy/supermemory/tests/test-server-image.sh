@@ -24,14 +24,15 @@ image_built=true
 test "$(docker image inspect -f '{{.Os}}/{{.Architecture}}' "$image")" = "linux/amd64"
 docker volume create "$volume" >/dev/null
 volume_created=true
-docker run -d --name "$container" -p 127.0.0.1::6767 \
+docker create --name "$container" -p 127.0.0.1::6767 \
   -e SUPERMEMORY_DATA_DIR=/var/lib/supermemory \
   -e SUPERMEMORY_SKIP_EMBEDDING_PREWARM=true \
   -e OPENAI_BASE_URL=http://127.0.0.1:9/v1 \
   -e OPENAI_API_KEY=test-only \
   -e OPENAI_MODEL=supermemory-codex \
-  -v "$volume:/var/lib/supermemory" "$image"
+  -v "$volume:/var/lib/supermemory" "$image" >/dev/null
 container_created=true
+docker start "$container" >/dev/null
 
 host_port="$(docker port "$container" 6767/tcp | sed -n 's/.*://p')"
 test -n "$host_port"
