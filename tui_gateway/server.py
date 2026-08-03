@@ -2168,6 +2168,54 @@ def _unregister_plugin_invocation(sid: str, context) -> None:
                 _plugin_invocations.pop(sid, None)
 
 
+def _invoke_plugin_command_scoped(
+    *,
+    session: dict,
+    sid: str,
+    command: str,
+    arg: str,
+    expected_generation: int | None,
+) -> str:
+    """Invoke a plugin command within its session profile for its full lifetime."""
+    from hermes_cli.plugin_command_context import create_plugin_command_context
+    from hermes_cli.plugins import PluginCommandError, invoke_plugin_command
+
+    home_token = None
+    context = None
+    registered = False
+    try:
+        profile_home = session.get("profile_home")
+        if profile_home:
+            home_token = set_hermes_home_override(profile_home)
+        context = create_plugin_command_context(
+            cwd=_session_cwd(session),
+            session_id=sid,
+            surface=str(session.get("source") or "tui"),
+            interactive=True,
+            request_secret=lambda prompt: _block(
+                "secret.request",
+                sid,
+                {"prompt": prompt, "env_var": "PLUGIN_SECRET"},
+                timeout=120,
+                guard=context.invocation,
+            ),
+        )
+        if not _register_plugin_invocation(
+            sid,
+            context,
+            expected_session=session,
+            expected_generation=expected_generation,
+        ):
+            raise PluginCommandError("plugin command cancelled")
+        registered = True
+        return invoke_plugin_command(command, arg, context) or ""
+    finally:
+        if registered:
+            _unregister_plugin_invocation(sid, context)
+        if home_token is not None:
+            reset_hermes_home_override(home_token)
+
+
 def _take_plugin_invocations_locked(sid: str, session: dict) -> list:
     """Invalidate and detach contexts while the caller holds sessions_lock."""
     session["_plugin_invocation_generation"] = _plugin_invocation_generation(session) + 1
@@ -11755,7 +11803,6 @@ def _(rid, params: dict) -> dict:
     try:
         from hermes_cli.plugins import (
             get_plugin_command_handler,
-            invoke_plugin_command,
             PluginCommandError,
         )
 
@@ -11763,32 +11810,22 @@ def _(rid, params: dict) -> dict:
         if handler:
             if session is None:
                 return _err(rid, 4001, "session not found")
-            from hermes_cli.plugin_command_context import create_plugin_command_context
-
-            context = create_plugin_command_context(
-                    cwd=_session_cwd(session),
-                    session_id=params.get("session_id", ""),
-                    surface=str((session or {}).get("source") or "tui"),
-                    interactive=True,
-                    request_secret=lambda prompt: _block(
-                        "secret.request",
-                        params.get("session_id", ""),
-                        {"prompt": prompt, "env_var": "PLUGIN_SECRET"},
-                        timeout=120,
-                        guard=context.invocation,
-                    ),
-            )
-            if not _register_plugin_invocation(
-                sid,
-                context,
-                expected_session=session,
-                expected_generation=invocation_generation,
-            ):
-                raise PluginCommandError("plugin command cancelled")
             try:
-                result = invoke_plugin_command(name, arg, context)
-            finally:
-                _unregister_plugin_invocation(sid, context)
+                result = _invoke_plugin_command_scoped(
+                    session=session,
+                    sid=sid,
+                    command=name,
+                    arg=arg,
+                    expected_generation=invocation_generation,
+                )
+            except Exception as exc:
+                return _ok(
+                    rid,
+                    {
+                        "type": "plugin",
+                        "output": f"Plugin command error: {exc}",
+                    },
+                )
             return _ok(rid, {"type": "plugin", "output": str(result or "")})
     except PluginCommandError as exc:
         return _ok(
@@ -13087,45 +13124,17 @@ def _(rid, params: dict) -> dict:
             invoke_plugin_command = None
 
     if plugin_handler and invoke_plugin_command:
-        home_token = None
         try:
-            profile_home = session.get("profile_home")
-            if profile_home:
-                home_token = set_hermes_home_override(profile_home)
-            from hermes_cli.plugin_command_context import create_plugin_command_context
-
-            context = create_plugin_command_context(
-                    cwd=_session_cwd(session),
-                    session_id=params.get("session_id", ""),
-                    surface=str(session.get("source") or "tui"),
-                    interactive=True,
-                    request_secret=lambda prompt: _block(
-                        "secret.request",
-                        params.get("session_id", ""),
-                        {"prompt": prompt, "env_var": "PLUGIN_SECRET"},
-                        timeout=120,
-                        guard=context.invocation,
-                    ),
-            )
-            if not _register_plugin_invocation(
-                sid,
-                context,
-                expected_session=session,
+            result = _invoke_plugin_command_scoped(
+                session=session,
+                sid=sid,
+                command=_cmd_base,
+                arg=_cmd_arg,
                 expected_generation=invocation_generation,
-            ):
-                from hermes_cli.plugins import PluginCommandError
-
-                raise PluginCommandError("plugin command cancelled")
-            try:
-                result = invoke_plugin_command(_cmd_base, _cmd_arg, context)
-            finally:
-                _unregister_plugin_invocation(sid, context)
-            return _ok(rid, {"output": str(result or "(no output)")})
+            )
         except Exception as e:
             return _ok(rid, {"output": f"Plugin command error: {e}"})
-        finally:
-            if home_token is not None:
-                reset_hermes_home_override(home_token)
+        return _ok(rid, {"output": str(result or "(no output)")})
 
     worker = session.get("slash_worker")
     if not worker:
