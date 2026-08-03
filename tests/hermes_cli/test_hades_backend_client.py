@@ -830,49 +830,6 @@ CLIENT_ROUTE_CASES = [
         },
     },
     {
-        "method_name": "list_inbox",
-        "http_method": "GET",
-        "openapi_path": "/api/hades/v1/persephone/inbox",
-        "wire_path": "/api/hades/v1/persephone/inbox",
-        "kwargs": {"project_id": "proj_1", "limit": 25},
-        "query": {"project_id": "proj_1", "limit": "25"},
-    },
-    {
-        "method_name": "create_inbox_message",
-        "http_method": "POST",
-        "openapi_path": "/api/hades/v1/persephone/messages",
-        "wire_path": "/api/hades/v1/persephone/messages",
-        "kwargs": {
-            "project_id": "proj_1",
-            "event_type": "proposal.reviewed",
-            "payload": {"message": "done"},
-        },
-        "json_body": {
-            "project_id": "proj_1",
-            "event_type": "proposal.reviewed",
-            "payload": {"message": "done"},
-        },
-    },
-    {
-        "method_name": "iter_persephone_events",
-        "http_method": "GET",
-        "openapi_path": "/api/hades/v1/persephone/events",
-        "wire_path": "/api/hades/v1/persephone/events",
-        "kwargs": {
-            "project_id": "proj_1",
-            "target_agent_id": "agent_1",
-            "cursor": "42",
-            "limit": 25,
-        },
-        "query": {
-            "project_id": "proj_1",
-            "target_agent_id": "agent_1",
-            "cursor": "42",
-            "limit": "25",
-        },
-        "stream": True,
-    },
-    {
         "method_name": "create_graph_import",
         "http_method": "POST",
         "openapi_path": "/api/hades/v1/graph-imports",
@@ -974,7 +931,11 @@ CLIENT_ROUTE_CASES = [
     },
 ]
 
-INTENTIONALLY_UNMAPPED_OPENAPI_ROUTES = {}
+INTENTIONALLY_UNMAPPED_OPENAPI_ROUTES = {
+    ("GET", "/api/hades/v1/persephone/events"),
+    ("GET", "/api/hades/v1/persephone/inbox"),
+    ("POST", "/api/hades/v1/persephone/messages"),
+}
 
 INTENTIONALLY_UNMAPPED_CLIENT_METHODS = {
     "presence_heartbeat",
@@ -2972,7 +2933,7 @@ def test_client_unlinks_workspace_with_route_parameter():
     ]
 
 
-def test_client_posts_doctor_reports_and_persephone_messages():
+def test_client_posts_doctor_reports():
     from hermes_cli.hades_backend_client import HadesBackendClient
 
     seen: list[tuple[str, str, dict]] = []
@@ -2991,23 +2952,11 @@ def test_client_posts_doctor_reports_and_persephone_messages():
     assert client.submit_doctor_report(
         project_id="proj_1", status="warning", payload={"checks": []}
     ) == {"ok": True}
-    assert client.create_inbox_message(
-        project_id="proj_1", event_type="proposal.reviewed", payload={"message": "done"}
-    ) == {"ok": True}
     assert seen == [
         (
             "POST",
             "/api/hades/v1/doctor/reports",
             {"project_id": "proj_1", "status": "warning", "payload": {"checks": []}},
-        ),
-        (
-            "POST",
-            "/api/hades/v1/persephone/messages",
-            {
-                "project_id": "proj_1",
-                "event_type": "proposal.reviewed",
-                "payload": {"message": "done"},
-            },
         ),
     ]
 

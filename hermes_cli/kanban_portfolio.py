@@ -58,13 +58,6 @@ class RemoteMandateReconciliation:
     evidence_valid: bool = True
 
 
-@dataclass(frozen=True)
-class MandateAcceptance:
-    status: str
-    remote_id: str
-    version: str
-    resumed_nodes: tuple[str, ...] = ()
-
 
 def _repair_legacy_review_tasks(
     conn: sqlite3.Connection,
@@ -129,11 +122,6 @@ def _ensure_projection_tables(conn: sqlite3.Connection) -> None:
             node_id TEXT NOT NULL, mandate_version TEXT NOT NULL,
             contract_version INTEGER NOT NULL, contract_hash TEXT NOT NULL,
             contract TEXT NOT NULL, PRIMARY KEY(project_id, anchor_id, node_id)
-        )""",
-        """CREATE TABLE IF NOT EXISTS hades_org_approval_consumptions (
-            approval_message_id TEXT PRIMARY KEY, project_id TEXT NOT NULL,
-            anchor_id TEXT NOT NULL, remote_id TEXT NOT NULL, mandate_version TEXT NOT NULL,
-            actor TEXT NOT NULL, consumed_at INTEGER NOT NULL
         )""",
     )
     for statement in statements:
@@ -388,102 +376,6 @@ def reconcile_remote_mandate(
         tuple(node_ids), False,
     )
 
-
-def accept_remote_mandate_reconciliation(
-    conn: sqlite3.Connection, *, topology: OrgRunCreated, remote_id: str,
-    observed_version: str, approval_conn: sqlite3.Connection,
-    approval_message_id: str, replacement_contracts: dict,
-) -> MandateAcceptance:
-    """Atomically accept a stale mandate only with explicit human evidence."""
-    remote_id = str(remote_id).strip(); observed_version = str(observed_version).strip()
-    approval_row = approval_conn.execute(
-        "SELECT project_id,state,human_decision,human_decided_by,envelope FROM persephone_inbox WHERE message_id=?",
-        (str(approval_message_id).strip(),),
-    ).fetchone()
-    if approval_row is None or approval_row["state"] != "approved" or approval_row["human_decision"] != "approved":
-        raise ValueError("verified approved durable approval row is required")
-    envelope = json.loads(approval_row["envelope"])
-    payload = envelope.get("payload") if isinstance(envelope, dict) else None
-    expected_approval = {"action": "accept_org_run_mandate", "org_run_id": topology.anchor_id,
-                         "remote_id": remote_id, "mandate_version": observed_version}
-    if (approval_row["project_id"] != topology.project_id or not isinstance(payload, dict)
-            or any(payload.get(key) != value for key, value in expected_approval.items())):
-        raise ValueError("durable approval authority does not match reconciliation")
-    approver = str(approval_row["human_decided_by"] or "").strip()
-    if not approver:
-        raise ValueError("durable approval row has no audited actor")
-    from hermes_cli.kanban_swarm import BLACKBOARD_PREFIX
-    _ensure_projection_tables(conn)
-    with kb.write_txn(conn):
-        mandates = _mandates(conn, topology)
-        state = mandates.get(remote_id, {})
-        if state.get("status") != "awaiting_human" or state.get("observed_version") != observed_version:
-            raise ValueError("mandate is not awaiting this human reconciliation")
-        stale = latest_blackboard(conn, topology.anchor_id).get(f"stale_projection:{remote_id}")
-        affected_remote = tuple(stale.get("affected_remote_ids", ())) if isinstance(stale, dict) else (remote_id,)
-        affected_nodes = tuple(stale.get("affected_nodes", ())) if isinstance(stale, dict) else ()
-        projection_blocked = set(stale.get("projection_blocked_nodes", ())) if isinstance(stale, dict) else set()
-        contracts = replacement_contracts
-        if not isinstance(contracts, dict) or set(contracts) != set(affected_nodes):
-            raise ValueError("replacement_contracts must cover every affected node")
-        normalized_contracts: dict[str, dict[str, str | int]] = {}
-        for node_id in affected_nodes:
-            replacement = contracts[node_id]
-            if not isinstance(replacement, dict) or not isinstance(replacement.get("contract"), dict):
-                raise ValueError("each replacement must carry a canonical TaskContract")
-            expected = replacement.get("expected_contract_version")
-            owner = next((candidate for candidate in affected_remote if node_id in {
-                topology.remote_tasks[candidate].execution_id, topology.remote_tasks[candidate].review_id,
-                topology.remote_tasks[candidate].integration_ready_id, topology.remote_tasks[candidate].completion_id,
-            }), remote_id)
-            digest, contract_version, _ = _install_contract_in_txn(
-                conn, topology=topology, remote_id=owner, node_id=node_id,
-                mandate_version=observed_version, contract=replacement["contract"],
-                expected_contract_version=expected, require_changed_hash=True,
-            )
-            normalized_contracts[node_id] = {"contract_hash": digest, "mandate_version": observed_version,
-                                              "contract_version": contract_version,
-                                              "evidence_required": "regenerate"}
-        consumed = conn.execute(
-            "INSERT OR IGNORE INTO hades_org_approval_consumptions VALUES(?,?,?,?,?,?,strftime('%s','now'))",
-            (approval_message_id, topology.project_id, topology.anchor_id, remote_id,
-             observed_version, approver),
-        )
-        if consumed.rowcount != 1:
-            raise ValueError("durable approval was already consumed")
-        resumed: list[str] = []
-        for node_id in affected_nodes:
-            if node_id in projection_blocked:
-                row = conn.execute("SELECT status FROM tasks WHERE id = ?", (node_id,)).fetchone()
-                if row is not None and row["status"] == "blocked":
-                    parents = conn.execute(
-                        "SELECT p.status FROM task_links l JOIN tasks p ON p.id=l.parent_id WHERE l.child_id=?",
-                        (node_id,),
-                    ).fetchall()
-                    status = "ready" if all(p["status"] in {"done", "archived"} for p in parents) else "todo"
-                    conn.execute("UPDATE tasks SET status=?, block_kind=NULL WHERE id=?", (status, node_id))
-                    resumed.append(node_id)
-        mandates[remote_id] = {
-            "version": observed_version, "status": "accepted", "evidence_valid": False,
-            "approval": {"approved_by": approver, "approval_message_id": approval_message_id},
-        }
-        now = int(__import__("time").time())
-        for key, value in (
-            ("remote_mandates", mandates),
-            (f"stale_projection:{remote_id}", {
-                "schema": "hades.remote-projection-stale.v1", "remote_id": remote_id,
-                "status": "accepted", "accepted_version": observed_version,
-                "approval_message_id": approval_message_id, "evidence_valid": False,
-                "requires_evidence_regeneration": True,
-            }),
-            (f"reconciled_contracts:{remote_id}", normalized_contracts),
-        ):
-            body = BLACKBOARD_PREFIX + json.dumps({"key": key, "value": value}, sort_keys=True)
-            conn.execute(
-                "INSERT INTO task_comments(task_id,author,body,created_at) VALUES(?,?,?,?)",
-                (topology.anchor_id, approver, body, now),
-            )
-    return MandateAcceptance("accepted", remote_id, observed_version, tuple(resumed))
 
 
 def _protocol(org_run_id: str, remote_task_id: str, write_scope: tuple[str, ...]) -> str:

@@ -7,7 +7,7 @@ from datetime import datetime
 import hashlib
 import json
 import re
-from typing import Any, BinaryIO, Iterator, Mapping
+from typing import Any, BinaryIO, Mapping
 from urllib.parse import unquote
 
 import httpx
@@ -25,9 +25,6 @@ from hermes_cli.hades_graph_v2.bundle import (
 API_PREFIX = "/api/hades/v1"
 # The envelope permits a 64 KiB payload.  SSE adds bounded metadata around it,
 # but no single line or unfinished event block may grow without limit.
-PERSEPHONE_SSE_MAX_EVENT_BYTES = 65_536 + 16_384
-PERSEPHONE_SSE_MAX_LINE_BYTES = PERSEPHONE_SSE_MAX_EVENT_BYTES
-PERSEPHONE_SSE_MAX_FIELD_BYTES = 4_096
 _SECRET_PATTERNS = (
     re.compile(
         r"(?i)hades_(?:agent|bootstrap)_[0-9A-HJKMNP-TV-Z]{26}\|[A-Za-z0-9]{64}"
@@ -536,63 +533,6 @@ def _query_params(payload: dict[str, Any] | None) -> list[tuple[str, str]] | Non
     return params
 
 
-def _iter_bounded_sse_lines(response: httpx.Response) -> Iterator[str]:
-    """Split SSE lines without allowing an unterminated line to grow forever."""
-    pending = bytearray()
-    swallow_lf = False
-    for chunk in response.iter_bytes():
-        offset = 0
-        if swallow_lf:
-            if chunk.startswith(b"\n"):
-                offset = 1
-            swallow_lf = False
-        while offset < len(chunk):
-            lf = chunk.find(b"\n", offset)
-            cr = chunk.find(b"\r", offset)
-            separators = [position for position in (lf, cr) if position >= 0]
-            if not separators:
-                remaining = memoryview(chunk)[offset:]
-                if len(pending) + len(remaining) > PERSEPHONE_SSE_MAX_LINE_BYTES:
-                    raise HadesBackendError(
-                        "Persephone stream line exceeds the size limit",
-                        code="stream_malformed",
-                    )
-                pending.extend(remaining)
-                break
-            separator = min(separators)
-            segment = memoryview(chunk)[offset:separator]
-            if len(pending) + len(segment) > PERSEPHONE_SSE_MAX_LINE_BYTES:
-                raise HadesBackendError(
-                    "Persephone stream line exceeds the size limit",
-                    code="stream_malformed",
-                )
-            pending.extend(segment)
-            try:
-                yield pending.decode("utf-8")
-            except UnicodeDecodeError:
-                raise HadesBackendError(
-                    "Persephone stream contains invalid UTF-8",
-                    code="stream_malformed",
-                ) from None
-            pending.clear()
-            if chunk[separator] == 13:  # CR optionally consumes one following LF.
-                if separator + 1 < len(chunk) and chunk[separator + 1] == 10:
-                    offset = separator + 2
-                else:
-                    offset = separator + 1
-                    swallow_lf = offset == len(chunk)
-            else:
-                offset = separator + 1
-    if pending:
-        try:
-            yield pending.decode("utf-8")
-        except UnicodeDecodeError:
-            raise HadesBackendError(
-                "Persephone stream contains invalid UTF-8",
-                code="stream_malformed",
-            ) from None
-
-
 class HadesBackendClient:
     """Small synchronous client for the Laravel Hades API."""
 
@@ -1097,194 +1037,6 @@ class HadesBackendClient:
 
     def submit_doctor_report(self, **payload: Any) -> dict[str, Any]:
         return self._request("POST", "doctor/reports", json_body=payload)
-
-    def list_inbox(self, **payload: Any) -> dict[str, Any]:
-        return self._request("GET", "persephone/inbox", params=payload)
-
-    def create_inbox_message(self, **payload: Any) -> dict[str, Any]:
-        return self._request("POST", "persephone/messages", json_body=payload)
-
-    def iter_persephone_events(
-        self,
-        *,
-        project_id: str,
-        target_agent_id: str,
-        target_workspace_binding_id: str | None = None,
-        cursor: str | None = None,
-        limit: int = 100,
-    ) -> Iterator[dict[str, Any]]:
-        """Yield a bounded Persephone SSE response.
-
-        This is the raw streaming primitive.  Callers that need polling
-        fallback should use ``hades_persephone_transport.iter_persephone_events``.
-        Rejected response bodies are deliberately never included in errors.
-        """
-        project = str(project_id or "").strip()
-        target = str(target_agent_id or "").strip()
-        binding = (
-            str(target_workspace_binding_id).strip()
-            if target_workspace_binding_id is not None
-            else None
-        )
-        resume = str(cursor).strip() if cursor is not None else None
-        if isinstance(limit, bool):
-            raise ValueError("limit must be an integer between 1 and 100")
-        bounded_limit = int(limit)
-        if not project or not target:
-            raise ValueError("project_id and target_agent_id are required")
-        if target_workspace_binding_id is not None and not binding:
-            raise ValueError(
-                "target_workspace_binding_id must be non-blank when provided"
-            )
-        if cursor is not None and not resume:
-            raise ValueError("cursor must be non-blank when provided")
-        if not 1 <= bounded_limit <= 100:
-            raise ValueError("limit must be between 1 and 100")
-
-        params = _query_params({
-            "project_id": project,
-            "target_agent_id": target,
-            "target_workspace_binding_id": binding,
-            "cursor": resume,
-            "limit": bounded_limit,
-        })
-        try:
-            with self._client.stream(
-                "GET",
-                self._url("persephone/events"),
-                params=params,
-                headers={"Accept": "text/event-stream"},
-            ) as response:
-                if response.status_code >= 400:
-                    status = response.status_code
-                    if status in {404, 405, 406, 415, 501}:
-                        error_code = "stream_unavailable"
-                    elif status in {408, 425, 429} or status >= 500:
-                        error_code = "stream_transient"
-                    else:
-                        error_code = "stream_rejected"
-                    raise HadesBackendError(
-                        f"Persephone stream failed (HTTP {status})",
-                        status_code=status,
-                        code=error_code,
-                    )
-                content_type = (
-                    response.headers
-                    .get("content-type", "")
-                    .split(";", 1)[0]
-                    .strip()
-                    .lower()
-                )
-                if content_type != "text/event-stream":
-                    raise HadesBackendError(
-                        "Persephone stream has an invalid content type",
-                        code="stream_unavailable",
-                    )
-
-                event_id: str | None = None
-                event_name = "message"
-                data_lines: list[str] = []
-                yielded = 0
-                block_bytes = 0
-
-                def dispatch() -> tuple[dict[str, Any] | None, bool]:
-                    nonlocal event_id, event_name, data_lines
-                    current_id, current_name, current_data = (
-                        event_id,
-                        event_name,
-                        data_lines,
-                    )
-                    event_id, event_name, data_lines = None, "message", []
-                    if (
-                        not current_data
-                        and current_id is None
-                        and current_name == "message"
-                    ):
-                        return None, False
-                    if current_name == "stop":
-                        return None, True
-                    if not current_data:
-                        raise HadesBackendError(
-                            "Persephone stream contains a malformed event",
-                            code="stream_malformed",
-                        )
-                    try:
-                        parsed = json.loads("\n".join(current_data))
-                    except (TypeError, ValueError):
-                        raise HadesBackendError(
-                            "Persephone stream contains malformed JSON",
-                            code="stream_malformed",
-                        ) from None
-                    if not isinstance(parsed, dict):
-                        raise HadesBackendError(
-                            "Persephone stream event must be a JSON object",
-                            code="stream_malformed",
-                        )
-                    if current_id is not None:
-                        if "id" in parsed and str(parsed["id"]) != current_id:
-                            raise HadesBackendError(
-                                "Persephone stream event has conflicting IDs",
-                                code="stream_malformed",
-                            )
-                        parsed.setdefault("id", current_id)
-                    return parsed, False
-
-                for line in _iter_bounded_sse_lines(response):
-                    encoded_size = len(line.encode("utf-8"))
-                    block_bytes += encoded_size + 1
-                    if block_bytes > PERSEPHONE_SSE_MAX_EVENT_BYTES:
-                        raise HadesBackendError(
-                            "Persephone stream event exceeds the size limit",
-                            code="stream_malformed",
-                        )
-                    if line == "":
-                        event, should_stop = dispatch()
-                        block_bytes = 0
-                        if should_stop:
-                            return
-                        if event is not None:
-                            yield event
-                            yielded += 1
-                            if yielded >= bounded_limit:
-                                return
-                        continue
-                    if line.startswith(":"):
-                        continue
-                    field, separator, value = line.partition(":")
-                    if separator and value.startswith(" "):
-                        value = value[1:]
-                    if field == "id":
-                        if len(value.encode("utf-8")) > PERSEPHONE_SSE_MAX_FIELD_BYTES:
-                            raise HadesBackendError(
-                                "Persephone stream ID exceeds the size limit",
-                                code="stream_malformed",
-                            )
-                        if "\x00" in value:
-                            raise HadesBackendError(
-                                "Persephone stream contains a malformed event ID",
-                                code="stream_malformed",
-                            )
-                        event_id = value
-                    elif field == "event":
-                        if len(value.encode("utf-8")) > PERSEPHONE_SSE_MAX_FIELD_BYTES:
-                            raise HadesBackendError(
-                                "Persephone stream event name exceeds the size limit",
-                                code="stream_malformed",
-                            )
-                        event_name = value or "message"
-                    elif field == "data":
-                        data_lines.append(value)
-
-                event, should_stop = dispatch()
-                if not should_stop and event is not None and yielded < bounded_limit:
-                    yield event
-        except HadesBackendError:
-            raise
-        except httpx.HTTPError as exc:
-            raise HadesBackendError(
-                f"Persephone stream transport failed: {redact_secret(str(exc))}",
-                code="stream_unavailable",
-            ) from exc
 
     def presence_heartbeat(self, **payload: Any) -> dict[str, Any]:
         result = self._request("POST", "presence/heartbeat", json_body=payload)

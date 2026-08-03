@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
-from hermes_cli.sqlite_util import add_column_if_missing, write_txn
+from hermes_cli.sqlite_util import write_txn
 from hermes_constants import get_hermes_home
 
 TERMINAL_BACKEND_JOB_STATUSES = (
@@ -217,25 +217,6 @@ CREATE TABLE IF NOT EXISTS inbox_events (
     read_at      INTEGER
 );
 
-CREATE TABLE IF NOT EXISTS persephone_outbox (
-    message_id      TEXT PRIMARY KEY,
-    project_id      TEXT NOT NULL,
-    sender_agent_id TEXT NOT NULL,
-    target_agent_id TEXT NOT NULL,
-    envelope        TEXT NOT NULL,
-    state           TEXT NOT NULL,
-    attempts        INTEGER NOT NULL DEFAULT 0,
-    next_attempt_at INTEGER NOT NULL,
-    last_error      TEXT,
-    created_at      INTEGER NOT NULL,
-    updated_at      INTEGER NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_persephone_outbox_target_state
-    ON persephone_outbox(project_id, target_agent_id, state);
-CREATE INDEX IF NOT EXISTS idx_persephone_outbox_next_attempt
-    ON persephone_outbox(next_attempt_at);
-
 CREATE TABLE IF NOT EXISTS logbook_outbox (
     id                    INTEGER PRIMARY KEY AUTOINCREMENT,
     project_id            TEXT NOT NULL,
@@ -258,70 +239,6 @@ CREATE TABLE IF NOT EXISTS logbook_outbox (
 CREATE INDEX IF NOT EXISTS idx_logbook_outbox_due
     ON logbook_outbox(state, next_attempt_at, created_at, id);
 
-CREATE TABLE IF NOT EXISTS persephone_inbox (
-    message_id       TEXT PRIMARY KEY,
-    project_id       TEXT NOT NULL,
-    target_agent_id  TEXT NOT NULL,
-    envelope         TEXT NOT NULL,
-    message_type     TEXT NOT NULL,
-    effect           TEXT NOT NULL,
-    capability       TEXT NOT NULL,
-    state            TEXT NOT NULL,
-    received_at      INTEGER NOT NULL,
-    updated_at       INTEGER NOT NULL,
-    human_decision   TEXT,
-    human_decided_by TEXT,
-    human_reason     TEXT,
-    human_decided_at INTEGER,
-    response_message_id TEXT,
-    attempts         INTEGER NOT NULL DEFAULT 0,
-    next_attempt_at  INTEGER NOT NULL DEFAULT 0,
-    last_error       TEXT
-);
-
-CREATE INDEX IF NOT EXISTS idx_persephone_inbox_target_state
-    ON persephone_inbox(project_id, target_agent_id, state);
-CREATE INDEX IF NOT EXISTS idx_persephone_inbox_recovery
-    ON persephone_inbox(state, updated_at, message_id);
-
-CREATE TABLE IF NOT EXISTS persephone_cursors (
-    project_id      TEXT NOT NULL,
-    target_agent_id TEXT NOT NULL,
-    cursor          TEXT NOT NULL,
-    updated_at      INTEGER NOT NULL,
-    PRIMARY KEY(project_id, target_agent_id)
-);
-
-CREATE TABLE IF NOT EXISTS persephone_subscription_deliveries (
-    subscription_project_id TEXT NOT NULL,
-    subscription_agent_id TEXT NOT NULL,
-    subscription_workspace_binding_id TEXT NOT NULL DEFAULT '',
-    message_id TEXT NOT NULL,
-    cursor TEXT,
-    disposition TEXT NOT NULL,
-    envelope_project_id TEXT NOT NULL,
-    envelope_target_agent_id TEXT NOT NULL,
-    envelope_target_workspace_binding_id TEXT,
-    received_at INTEGER NOT NULL,
-    PRIMARY KEY(
-        subscription_project_id,
-        subscription_agent_id,
-        subscription_workspace_binding_id,
-        message_id
-    )
-);
-
-CREATE INDEX IF NOT EXISTS idx_persephone_subscription_delivery_message
-    ON persephone_subscription_deliveries(message_id);
-
-CREATE TABLE IF NOT EXISTS persephone_message_identities (
-    message_id TEXT PRIMARY KEY,
-    project_id TEXT NOT NULL,
-    direction  TEXT NOT NULL CHECK(direction IN ('inbox', 'outbox')),
-    envelope   TEXT NOT NULL,
-    claimed_at INTEGER NOT NULL
-);
-
 CREATE TABLE IF NOT EXISTS sync_state (
     key        TEXT PRIMARY KEY,
     value      TEXT NOT NULL,
@@ -331,10 +248,6 @@ CREATE TABLE IF NOT EXISTS sync_state (
 
 
 _INITIALIZED_PATHS: set[str] = set()
-
-
-class PersephoneIdentityMigrationConflict(RuntimeError):
-    """Existing queue rows violate the global agent-message ID invariant."""
 
 
 def _migrate_agent_coordination_schema(conn: sqlite3.Connection) -> None:
@@ -444,177 +357,6 @@ def _migrate_agent_coordination_schema(conn: sqlite3.Connection) -> None:
         """
     )
     conn.commit()
-
-
-def _canonical_envelope_json(value: str, *, message_id: str) -> str:
-    try:
-        decoded = json.loads(value)
-        if not isinstance(decoded, dict):
-            raise ValueError("envelope is not an object")
-        return json.dumps(decoded, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    except (TypeError, ValueError) as exc:
-        raise PersephoneIdentityMigrationConflict(
-            f"invalid stored Persephone envelope for message_id {message_id!r}: {exc}"
-        ) from None
-
-
-def _migrate_persephone_message_identities(conn: sqlite3.Connection) -> None:
-    """Backfill the global ID registry from O2 databases, rejecting ambiguity."""
-    from hermes_cli.hades_persephone_messages import parse_envelope
-
-    with write_txn(conn):
-        add_column_if_missing(
-            conn,
-            "persephone_inbox",
-            "message_type",
-            "message_type TEXT NOT NULL DEFAULT ''",
-        )
-        add_column_if_missing(
-            conn,
-            "persephone_inbox",
-            "effect",
-            "effect TEXT NOT NULL DEFAULT ''",
-        )
-        add_column_if_missing(
-            conn,
-            "persephone_inbox",
-            "capability",
-            "capability TEXT NOT NULL DEFAULT ''",
-        )
-        add_column_if_missing(
-            conn,
-            "persephone_inbox",
-            "response_message_id",
-            "response_message_id TEXT",
-        )
-        add_column_if_missing(
-            conn,
-            "persephone_inbox",
-            "attempts",
-            "attempts INTEGER NOT NULL DEFAULT 0",
-        )
-        add_column_if_missing(
-            conn,
-            "persephone_inbox",
-            "next_attempt_at",
-            "next_attempt_at INTEGER NOT NULL DEFAULT 0",
-        )
-        add_column_if_missing(
-            conn, "persephone_inbox", "last_error", "last_error TEXT"
-        )
-        add_column_if_missing(
-            conn, "persephone_outbox", "sender_agent_id", "sender_agent_id TEXT"
-        )
-        for table, direction in (
-            ("persephone_inbox", "inbox"),
-            ("persephone_outbox", "outbox"),
-        ):
-            rows = conn.execute(f"SELECT * FROM {table} ORDER BY message_id").fetchall()
-            for row in rows:
-                message_id = str(row["message_id"])
-                project_id = str(row["project_id"])
-                envelope = _canonical_envelope_json(row["envelope"], message_id=message_id)
-                decoded = json.loads(envelope)
-                try:
-                    validated = parse_envelope(decoded, now=0)
-                except (TypeError, ValueError) as exc:
-                    raise PersephoneIdentityMigrationConflict(
-                        f"invalid stored envelope for message_id {message_id!r}: {exc}"
-                    ) from None
-                if validated.message_id != message_id:
-                    raise PersephoneIdentityMigrationConflict(
-                        f"row message_id does not match envelope for {message_id!r}"
-                    )
-                if validated.project_id != project_id:
-                    raise PersephoneIdentityMigrationConflict(
-                        f"row project_id does not match envelope for {message_id!r}"
-                    )
-                if str(row["target_agent_id"]) != validated.target_agent_id:
-                    raise PersephoneIdentityMigrationConflict(
-                        f"row target_agent_id does not match envelope for {message_id!r}"
-                    )
-                if table == "persephone_outbox":
-                    stored_sender = str(row["sender_agent_id"] or "").strip()
-                    if stored_sender and stored_sender != validated.sender_agent_id:
-                        raise PersephoneIdentityMigrationConflict(
-                            "denormalized sender_agent_id does not match envelope for "
-                            f"{message_id!r}"
-                        )
-                authority = (
-                    validated.message_type.value,
-                    validated.effect.value,
-                    validated.capability,
-                )
-                if table == "persephone_inbox":
-                    for field, expected in zip(
-                        ("message_type", "effect", "capability"), authority
-                    ):
-                        existing_value = str(row[field] or "").strip()
-                        if existing_value and existing_value != expected:
-                            raise PersephoneIdentityMigrationConflict(
-                                f"denormalized {field} does not match envelope for "
-                                f"{message_id!r}"
-                            )
-                existing = conn.execute(
-                    "SELECT project_id, direction, envelope FROM persephone_message_identities "
-                    "WHERE message_id = ?",
-                    (message_id,),
-                ).fetchone()
-                if existing is not None:
-                    existing_envelope = _canonical_envelope_json(
-                        existing["envelope"], message_id=message_id
-                    )
-                    try:
-                        existing_validated = parse_envelope(
-                            json.loads(existing_envelope), now=0
-                        )
-                    except (TypeError, ValueError) as exc:
-                        raise PersephoneIdentityMigrationConflict(
-                            f"invalid global identity for message_id {message_id!r}: {exc}"
-                        ) from None
-                    if (
-                        existing_validated.message_id != message_id
-                        or existing_validated.project_id != existing["project_id"]
-                        or existing["project_id"] != project_id
-                        or existing["direction"] != direction
-                        or existing_envelope != envelope
-                    ):
-                        raise PersephoneIdentityMigrationConflict(
-                            "conflicting pre-existing Persephone identity for "
-                            f"message_id {message_id!r}"
-                        )
-                conn.execute(
-                    "INSERT OR IGNORE INTO persephone_message_identities "
-                    "(message_id, project_id, direction, envelope, claimed_at) VALUES (?, ?, ?, ?, ?)",
-                    (message_id, project_id, direction, envelope, _now()),
-                )
-                if row["envelope"] != envelope:
-                    conn.execute(
-                        f"UPDATE {table} SET envelope = ? WHERE message_id = ?",
-                        (envelope, message_id),
-                    )
-                if table == "persephone_inbox":
-                    conn.execute(
-                        "UPDATE persephone_inbox SET message_type = ?, effect = ?, "
-                        "capability = ? WHERE message_id = ?",
-                        (*authority, message_id),
-                    )
-                else:
-                    conn.execute(
-                        "UPDATE persephone_outbox SET sender_agent_id = ? "
-                        "WHERE message_id = ?",
-                        (validated.sender_agent_id, message_id),
-                    )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_persephone_inbox_recovery_covering "
-            "ON persephone_inbox(state, message_type, effect, capability, "
-            "updated_at, message_id)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_persephone_outbox_sender_due "
-            "ON persephone_outbox(project_id, sender_agent_id, state, "
-            "next_attempt_at, created_at, message_id)"
-        )
 
 
 def _has_project_scoped_logbook_idempotency(conn: sqlite3.Connection) -> bool:
@@ -786,7 +528,6 @@ def connect(db_path: Path | None = None) -> sqlite3.Connection:
             _migrate_logbook_outbox_actor_identity(conn)
             _migrate_logbook_outbox_idempotency(conn)
             _migrate_logbook_outbox_request_digests(conn)
-            _migrate_persephone_message_identities(conn)
             _INITIALIZED_PATHS.add(resolved)
     except Exception:
         conn.close()

@@ -16,8 +16,8 @@ metadata:
 Use this skill when Hades is linked to a shared backend and work needs local
 subagents, model routing, shared-memory proposals, backend jobs, or artifact
 sync. The backend stores project/workspace truth, jobs, proposals, artifacts,
-doctor reports, and Persephone inbox events. It does not choose or receive local
-provider/model routing decisions.
+and doctor reports. It does not choose or receive local provider/model routing
+decisions.
 
 ## First Checks
 
@@ -38,14 +38,12 @@ provider/model routing decisions.
 - `memory-steward` drafts or reviews project-scoped shared-memory proposals.
 
 The profile names map to local `config.yaml` model profiles such as
-`hades.planner`, `hades.implementer`, and `hades.reviewer`. Do not write the resolved model, provider, API key name, or token into shared memory, backend artifacts, Persephone messages, or doctor reports.
+`hades.planner`, `hades.implementer`, and `hades.reviewer`. Do not write the resolved model, provider, API key name, or token into shared memory, backend artifacts, or doctor reports.
 
 ## Operating Rules
 
 - Keep model/provider choice local-only. The backend should see capabilities,
   job status, artifacts, and proposal summaries, not routing internals.
-- Use Persephone for durable inbox/notification events. Do not use it as the
-  primary job transport.
 - Use backend jobs only through `hades backend sync`; respect
   `waiting_confirmation`, refusals, conflicts, deadlines, and cancelled status.
 - For shared memory, create proposals with provenance and let backend policy
