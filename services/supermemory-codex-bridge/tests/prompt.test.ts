@@ -40,6 +40,22 @@ test("keeps an absent output schema absent from the Codex invocation", () => {
   });
 });
 
+test("does not forward the supported root Draft-07 marker to Codex", () => {
+  const request = parseChatCompletionRequest({
+    model: "supermemory-codex",
+    messages: [],
+    response_format: {
+      type: "json_schema",
+      json_schema: {
+        name: "answer",
+        schema: { $schema: "http://json-schema.org/draft-07/schema#", type: "object" },
+      },
+    },
+  }, "supermemory-codex");
+
+  assert.deepEqual(buildCodexInvocation(request).outputSchema, { type: "object" });
+});
+
 test("builds a symbolic tool prompt and a bounded per-tool output schema", () => {
   const request = parseChatCompletionRequest({
     model: "supermemory-codex",

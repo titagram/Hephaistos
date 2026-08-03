@@ -212,16 +212,10 @@ const genericErrors = {
 
 export function createBridgeServer(config: BridgeConfig, codex: CodexRunner): http.Server {
   const semaphore = new FifoSemaphore(config.maxConcurrency);
-  let ready = false;
   const startup = codex.start();
-  void startup.then(() => {
-    ready = true;
-  }, () => {
-    ready = false;
-  });
 
   const server = http.createServer((request, response) => {
-    void handleRequest(request, response, config, codex, semaphore, () => ready);
+    void handleRequest(request, response, config, codex, semaphore, () => codex.isReady());
   });
   startupByServer.set(server, startup);
   server.requestTimeout = config.timeoutMs + 5_000;
@@ -266,8 +260,9 @@ async function handleRequest(
         response.setHeader("allow", "GET");
         throw mappedApiError(genericErrors.methodNotAllowed);
       }
-      status = isReady() ? 200 : 503;
-      sendJson(response, status, { status: isReady() ? "ok" : "starting" });
+      const ready = isReady();
+      status = ready ? 200 : 503;
+      sendJson(response, status, { status: ready ? "ok" : "starting" });
       return;
     }
 

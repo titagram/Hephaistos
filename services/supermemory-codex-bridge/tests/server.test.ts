@@ -31,14 +31,23 @@ class FakeRunner implements CodexRunner {
   readonly runs: RunCall[] = [];
   startCalls = 0;
   closeCalls = 0;
+  ready = false;
   startImplementation: () => Promise<void> = async () => {};
   runImplementation: (invocation: CodexInvocation, signal: AbortSignal) => Promise<CodexResult> =
     async () => ({ text: "fake answer", usage: { inputTokens: 4, outputTokens: 2 } });
 
-  start(): Promise<void> {
+  async start(): Promise<void> {
     this.startCalls += 1;
-    return this.startImplementation();
+    try {
+      await this.startImplementation();
+      this.ready = true;
+    } catch (error) {
+      this.ready = false;
+      throw error;
+    }
   }
+
+  isReady(): boolean { return this.ready; }
 
   run(invocation: CodexInvocation, signal: AbortSignal): Promise<CodexResult> {
     this.runs.push({ invocation, signal });
@@ -47,6 +56,7 @@ class FakeRunner implements CodexRunner {
 
   async close(): Promise<void> {
     this.closeCalls += 1;
+    this.ready = false;
   }
 }
 
@@ -121,6 +131,58 @@ test("health is unavailable until runner startup succeeds", async () => {
     assert.equal(after.status, 200);
     assert.deepEqual(await after.json(), { status: "ok" });
     assert.equal(runner.startCalls, 1);
+  } finally {
+    await harness.close();
+  }
+});
+
+test("health follows runner death and successful lazy recovery", async () => {
+  const runner = new FakeRunner();
+  const harness = await listen(runner);
+  try {
+    await waitFor(() => runner.ready);
+    assert.equal((await fetch(`${harness.origin}/healthz`)).status, 200);
+
+    runner.ready = false;
+    assert.equal((await fetch(`${harness.origin}/healthz`)).status, 503);
+
+    runner.runImplementation = async () => {
+      runner.ready = true;
+      return { text: "recovered" };
+    };
+    assert.equal((await fetch(`${harness.origin}/v1/chat/completions`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: chatBody("recover"),
+    })).status, 200);
+    assert.equal((await fetch(`${harness.origin}/healthz`)).status, 200);
+  } finally {
+    await harness.close();
+  }
+});
+
+test("structured Draft-07 requests reach Codex without the root dialect marker", async () => {
+  const runner = new FakeRunner();
+  runner.runImplementation = async () => ({ text: "{}" });
+  const harness = await listen(runner);
+  try {
+    const response = await fetch(`${harness.origin}/v1/chat/completions`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({
+        model: config.publicModel,
+        messages: [],
+        response_format: {
+          type: "json_schema",
+          json_schema: {
+            name: "answer",
+            schema: { $schema: "http://json-schema.org/draft-07/schema#", type: "object" },
+          },
+        },
+      }),
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(runner.runs[0]?.invocation.outputSchema, { type: "object" });
   } finally {
     await harness.close();
   }

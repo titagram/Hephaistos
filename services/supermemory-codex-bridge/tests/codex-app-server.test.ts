@@ -340,6 +340,7 @@ test("start surfaces sanitized initialization failures", async () => {
 
   const error = await expectKind(starting, "unavailable");
   assert.doesNotMatch(error.message, /secret|initialization/i);
+  assert.equal(server.isReady(), false);
   await server.close();
 });
 
@@ -428,25 +429,31 @@ test("caller deadline abort interrupts exactly once and maps to timeout", async 
 
 test("process death fails active work and one later run lazily starts one replacement", async () => {
   const { server, processes } = createHarness();
+  assert.equal(server.isReady(), false);
   const firstInvocation = { prompt: "First process." };
   const first = server.run(firstInvocation);
   const firstPeer = new FakeRpcPeer(processes[0]!);
   await initialize(firstPeer);
+  assert.equal(server.isReady(), true);
   await acceptRun(firstPeer, "thread-dead", "turn-dead", firstInvocation);
 
   processes[0]!.exit(70);
   await expectKind(first, "unavailable");
+  assert.equal(server.isReady(), false);
 
   const secondInvocation = { prompt: "Replacement process." };
   const second = server.run(secondInvocation);
   assert.equal(processes.length, 2);
+  assert.equal(server.isReady(), false);
   const secondPeer = new FakeRpcPeer(processes[1]!);
   await initialize(secondPeer);
+  assert.equal(server.isReady(), true);
   await acceptRun(secondPeer, "thread-replacement", "turn-replacement", secondInvocation);
   completeRun(secondPeer, "thread-replacement", "turn-replacement", "recovered");
   assert.equal((await second).text, "recovered");
   assert.equal(processes.length, 2);
   await server.close();
+  assert.equal(server.isReady(), false);
 });
 
 for (const failure of [

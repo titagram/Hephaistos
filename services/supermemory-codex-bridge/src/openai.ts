@@ -73,6 +73,8 @@ export class ApiError extends Error {
   }
 }
 
+const DRAFT_07_SCHEMA_URI = "http://json-schema.org/draft-07/schema#";
+
 const supportedRoles = new Set<ChatRole>(["system", "developer", "user", "assistant", "tool"]);
 const supportedRequestFields = new Set([
   "model",
@@ -271,7 +273,16 @@ function parseOutputSchema(value: unknown): Record<string, unknown> | undefined 
     throw new ApiError(400, "invalid_response_format", "json_schema must include a name and object schema.");
   }
 
-  return jsonSchema.schema;
+  const schema = jsonSchema.schema;
+  if (!Object.hasOwn(schema, "$schema")) return schema;
+  if (typeof schema.$schema !== "string") {
+    throw new ApiError(400, "invalid_response_format", "$schema must be a supported string URI.");
+  }
+  if (schema.$schema !== DRAFT_07_SCHEMA_URI) {
+    throw new ApiError(400, "unsupported_response_format", "The JSON Schema dialect is not supported.");
+  }
+  const { $schema: _draft, ...normalized } = schema;
+  return normalized;
 }
 
 function parseCompatibilityHints(body: Record<string, unknown>): void {

@@ -23,6 +23,7 @@ export class CodexUpstreamError extends Error {
 
 export interface CodexRunner {
   start(): Promise<void>;
+  isReady(): boolean;
   run(invocation: CodexInvocation, signal: AbortSignal): Promise<CodexResult>;
   close(): Promise<void>;
 }
@@ -143,6 +144,7 @@ export class CodexAppServer implements CodexRunner {
   private process: CodexProcess | undefined;
   private rpc: JsonRpcClient | undefined;
   private startPromise: Promise<JsonRpcClient> | undefined;
+  private readyProcess: CodexProcess | undefined;
   private closePromise: Promise<void> | undefined;
   private closed = false;
 
@@ -156,6 +158,16 @@ export class CodexAppServer implements CodexRunner {
 
   async start(): Promise<void> {
     await this.startedClient();
+  }
+
+  isReady(): boolean {
+    const process = this.process;
+    return !this.closed
+      && process !== undefined
+      && this.readyProcess === process
+      && this.rpc !== undefined
+      && process.exitCode === null
+      && process.signalCode === null;
   }
 
   async run(invocation: CodexInvocation, signal: AbortSignal): Promise<CodexResult> {
@@ -255,6 +267,7 @@ export class CodexAppServer implements CodexRunner {
   }
 
   private async startProcess(): Promise<JsonRpcClient> {
+    this.readyProcess = undefined;
     const process = this.processFactory("codex", ["app-server", "--listen", "stdio://"], {
       stdio: ["pipe", "pipe", "pipe"],
       env: codexEnvironment(this.config.codexHome, this.environment),
@@ -280,8 +293,10 @@ export class CodexAppServer implements CodexRunner {
         throw new CodexUpstreamError("unavailable");
       }
       rpc.notify("initialized");
+      this.readyProcess = process;
       return rpc;
     } catch (error) {
+      if (this.readyProcess === process) this.readyProcess = undefined;
       rpc?.close();
       const reaped = await this.terminateAndReap(process);
       if (this.rpc === rpc) this.rpc = undefined;
@@ -523,6 +538,7 @@ export class CodexAppServer implements CodexRunner {
     const rpc = this.rpc;
     this.process = undefined;
     this.rpc = undefined;
+    this.readyProcess = undefined;
     this.startPromise = undefined;
     rpc?.close();
     for (const state of [...this.turnsByThread.values()]) {
@@ -534,6 +550,8 @@ export class CodexAppServer implements CodexRunner {
     if (this.process !== process) return;
     const rpc = this.rpc;
     if (this.rpc === rpc) this.rpc = undefined;
+    this.readyProcess = undefined;
+    this.startPromise = undefined;
     rpc?.close();
     for (const state of [...this.turnsByThread.values()]) {
       this.failTurn(state, new CodexUpstreamError("unavailable"));
@@ -582,6 +600,7 @@ export class CodexAppServer implements CodexRunner {
 
     rpc?.close();
     this.rpc = undefined;
+    this.readyProcess = undefined;
     this.startPromise = undefined;
     if (!process) return;
     const reaped = await this.terminateAndReap(process);

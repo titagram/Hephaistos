@@ -246,6 +246,46 @@ test("rejects unknown response formats and malformed JSON schemas", () => {
   }, alias), 400, "invalid_response_format");
 });
 
+test("strips only the supported root Draft-07 marker without mutating the request", () => {
+  const body = {
+    model: alias,
+    messages: [],
+    response_format: {
+      type: "json_schema",
+      json_schema: {
+        name: "facts",
+        schema: {
+          $schema: "http://json-schema.org/draft-07/schema#",
+          type: "object",
+          properties: {
+            nested: { type: "object", $schema: "nested-marker-must-remain" },
+          },
+        },
+      },
+    },
+  };
+  const original = structuredClone(body);
+
+  assert.deepEqual(parseChatCompletionRequest(body, alias).outputSchema, {
+    type: "object",
+    properties: {
+      nested: { type: "object", $schema: "nested-marker-must-remain" },
+    },
+  });
+  assert.deepEqual(body, original);
+
+  for (const marker of ["https://json-schema.org/draft/2020-12/schema", 7]) {
+    assertApiError(() => parseChatCompletionRequest({
+      model: alias,
+      messages: [],
+      response_format: {
+        type: "json_schema",
+        json_schema: { name: "facts", schema: { $schema: marker, type: "object" } },
+      },
+    }, alias), 400, typeof marker === "string" ? "unsupported_response_format" : "invalid_response_format");
+  }
+});
+
 test("returns an OpenAI chat completion with usage from the Codex result", () => {
   const request = parseChatCompletionRequest({ model: alias, messages: [] }, alias);
   const completion = createChatCompletion(request, {
