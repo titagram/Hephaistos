@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import sqlite3
 import subprocess
 import sys
 
@@ -48,13 +49,13 @@ def _matrix_home(home: Path, *, state: str) -> Path:
     if state != "absent":
         _write_generic_backend_plugin(home)
     configured = state in {
-        "enabled-unlinked", "enabled-linked-a", "enabled-linked-a-and-b"
+        "enabled-unlinked",
+        "enabled-linked-a",
+        "enabled-linked-a-and-b",
     }
     if configured:
         with (home / "config.yaml").open("a", encoding="utf-8") as stream:
-            stream.write(
-                "mcp_servers:\n  hades_backend:\n    command: python\n"
-            )
+            stream.write("mcp_servers:\n  hades_backend:\n    command: python\n")
     bindings: list[str] = []
     if state.endswith("linked-a") or state.endswith("linked-a-and-b"):
         (home / "workspace-a").mkdir()
@@ -62,9 +63,8 @@ def _matrix_home(home: Path, *, state: str) -> Path:
     if state.endswith("linked-a-and-b"):
         (home / "workspace-b").mkdir()
         bindings.append("workspace-b")
-    (home / "hades-backend-test-bindings.json").write_text(
-        json.dumps({"bindings": bindings}), encoding="utf-8"
-    )
+    if bindings:
+        _write_canonical_backend_state(home, bindings)
     return home
 
 
@@ -74,10 +74,79 @@ def _matrix_state(home: Path) -> tuple[bool, bool, bool, tuple[str, ...]]:
     installed = (home / "plugins" / "hades-backend" / "plugin.yaml").is_file()
     enabled = "enabled: [hades-backend]" in config
     configured = "mcp_servers:\n  hades_backend:" in config
-    bindings = tuple(json.loads(
-        (home / "hades-backend-test-bindings.json").read_text(encoding="utf-8")
-    )["bindings"])
+    db_path = home / "hades_backend.db"
+    if not db_path.exists():
+        return installed, enabled, configured, ()
+    with sqlite3.connect(db_path) as connection:
+        bindings = tuple(
+            row[0]
+            for row in connection.execute(
+                "SELECT repo_root FROM workspace_bindings "
+                "WHERE status = 'linked' ORDER BY repo_root"
+            )
+        )
+        tokens = tuple(
+            row[0]
+            for row in connection.execute(
+                "SELECT token_env_key FROM backend_agents ORDER BY token_env_key"
+            )
+        )
+    assert tokens == tuple(
+        f"HADES_BACKEND_TOKEN_{name.upper().replace('-', '_')}" for name in bindings
+    )
     return installed, enabled, configured, bindings
+
+
+def _write_canonical_backend_state(home: Path, bindings: list[str]) -> None:
+    """Create the plugin-compatible profile tables and derived token references."""
+    db_path = home / "hades_backend.db"
+    with sqlite3.connect(db_path) as connection:
+        connection.executescript(
+            "CREATE TABLE backend_agents ("
+            "agent_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, base_url TEXT NOT NULL, "
+            "label TEXT NOT NULL, token_env_key TEXT NOT NULL, capabilities TEXT NOT NULL);"
+            "CREATE TABLE workspace_bindings ("
+            "workspace_fingerprint TEXT PRIMARY KEY, project_id TEXT NOT NULL, agent_id TEXT NOT NULL, "
+            "local_project_id TEXT NOT NULL, backend_workspace_binding_id TEXT NOT NULL, "
+            "display_path TEXT NOT NULL, repo_root TEXT NOT NULL, git_remote_display TEXT, "
+            "git_remote_hash TEXT, head_commit TEXT, status TEXT NOT NULL);"
+        )
+        for name in bindings:
+            token_key = f"HADES_BACKEND_TOKEN_{name.upper().replace('-', '_')}"
+            connection.execute(
+                "INSERT INTO backend_agents VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    f"agent-{name}",
+                    f"project-{name}",
+                    "https://fake.invalid",
+                    name,
+                    token_key,
+                    "{}",
+                ),
+            )
+            connection.execute(
+                "INSERT INTO workspace_bindings VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    f"fingerprint-{name}",
+                    f"project-{name}",
+                    f"agent-{name}",
+                    f"local-{name}",
+                    f"binding-{name}",
+                    name,
+                    name,
+                    "",
+                    "",
+                    "",
+                    "linked",
+                ),
+            )
+    (home / ".env").write_text(
+        "".join(
+            f"HADES_BACKEND_TOKEN_{name.upper().replace('-', '_')}=DERIVED_{name}\n"
+            for name in bindings
+        ),
+        encoding="utf-8",
+    )
 
 
 def _write_generic_backend_plugin(home: Path) -> None:
