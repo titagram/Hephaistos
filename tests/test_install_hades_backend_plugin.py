@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+import subprocess
+from types import SimpleNamespace
 
+import pytest
 import yaml
 
 
@@ -43,8 +46,9 @@ def test_website_backend_setup_does_not_document_retired_bootstrap_tokens():
         assert forbidden not in source.lower()
 
 
-def test_plugin_lifecycle_changes_only_plugin_discovery_state(tmp_path, monkeypatch):
-    """Enable, disable, update, and removal preserve unrelated Hades state."""
+def _write_canary_profile(
+    tmp_path: Path, monkeypatch
+) -> tuple[Path, Path, dict[Path, str]]:
     hermes_home = tmp_path / ".hermes"
     hermes_home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
@@ -74,41 +78,30 @@ custom_future_section:
     (hermes_home / "hades_backend.db").write_bytes(b"sqlite-canary")
     (hermes_home / "MEMORY.md").write_text("memory canary\n", encoding="utf-8")
     (hermes_home / "USER.md").write_text("user canary\n", encoding="utf-8")
-    (hermes_home / "holographic.db").write_bytes(b"holographic-canary")
-    plugin_dir = hermes_home / "plugins" / "hades_backend"
-    plugin_dir.mkdir(parents=True)
-    (plugin_dir / ".git").mkdir()
-    (plugin_dir / "plugin.yaml").write_text("name: hades_backend\n", encoding="utf-8")
-    (plugin_dir / "payload.txt").write_text("plugin canary\n", encoding="utf-8")
+    (hermes_home / "memory_store.db").write_bytes(b"holographic-canary")
 
     external_paths = [
         hermes_home / ".env",
         hermes_home / "hades_backend.db",
         hermes_home / "MEMORY.md",
         hermes_home / "USER.md",
-        hermes_home / "holographic.db",
+        hermes_home / "memory_store.db",
     ]
-    external_before = {
-        path: hashlib.sha256(path.read_bytes()).hexdigest() for path in external_paths
-    }
-
-    from hermes_cli import plugins_cmd
-
-    monkeypatch.setattr(
-        plugins_cmd, "_resolve_plugin_key", lambda name: "hades_backend"
-    )
-    monkeypatch.setattr(
-        plugins_cmd, "_git_pull_plugin_dir", lambda path: (True, "Already up to date")
+    return (
+        hermes_home,
+        config_path,
+        {
+            path: hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in external_paths
+        },
     )
 
-    plugins_cmd.cmd_enable("hades_backend")
-    plugins_cmd.cmd_update("hades_backend")
-    plugins_cmd.cmd_disable("hades_backend")
-    plugins_cmd.cmd_remove("hades_backend")
 
+def _assert_canary_unchanged(
+    config_path: Path,
+    external_before: dict[Path, str],
+) -> None:
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    assert config["plugins"]["enabled"] == []
-    assert config["plugins"]["disabled"] == ["hades_backend"]
     assert config["memory"] == {
         "provider": "holographic",
         "memory_enabled": False,
@@ -119,7 +112,233 @@ custom_future_section:
     assert config["backend"] == {"legacy_unknown": "keep"}
     assert config["mcp_servers"]["hades_backend"] == {"future_unknown": "keep"}
     assert config["custom_future_section"] == {"preserve": True}
-    assert not plugin_dir.exists()
     assert {
-        path: hashlib.sha256(path.read_bytes()).hexdigest() for path in external_paths
+        path: hashlib.sha256(path.read_bytes()).hexdigest() for path in external_before
     } == external_before
+
+
+def _commit_plugin_version(repo: Path, payload: str) -> None:
+    (repo / "plugin.yaml").write_text(
+        "name: hades-backend\nmanifest_version: 1\n", encoding="utf-8"
+    )
+    (repo / "payload.txt").write_text(payload, encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.email=task12@example.test",
+            "-c",
+            "user.name=Task 12",
+            "commit",
+            "-m",
+            f"plugin {payload.strip()}",
+        ],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+
+
+def _local_plugin_repo(tmp_path: Path) -> Path:
+    repo = tmp_path / "plugin-source"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    _commit_plugin_version(repo, "version one\n")
+    return repo
+
+
+def test_real_plugin_install_and_update_preserve_canary_state(tmp_path, monkeypatch):
+    """A local Git install/update never performs Backend work or rewrites profile state."""
+    hermes_home, config_path, external_before = _write_canary_profile(
+        tmp_path, monkeypatch
+    )
+    source = _local_plugin_repo(tmp_path)
+
+    from hermes_cli import plugins_cmd
+
+    plugin_ref = f"file://{source}"
+    plugins_cmd.cmd_install(plugin_ref, enable=True)
+    target = hermes_home / "plugins" / "hades-backend"
+    assert (target / "payload.txt").read_text(encoding="utf-8") == "version one\n"
+    assert yaml.safe_load(config_path.read_text(encoding="utf-8"))["plugins"][
+        "enabled"
+    ] == ["hades-backend"]
+    _assert_canary_unchanged(config_path, external_before)
+
+    _commit_plugin_version(source, "version two\n")
+    plugins_cmd.cmd_update("hades-backend")
+    plugins_cmd.cmd_update("hades-backend")
+    assert (target / "payload.txt").read_text(encoding="utf-8") == "version two\n"
+    _assert_canary_unchanged(config_path, external_before)
+
+    _commit_plugin_version(source, "version three\n")
+    plugins_cmd.cmd_install(plugin_ref, force=True, enable=False)
+    assert (target / "payload.txt").read_text(encoding="utf-8") == "version three\n"
+    assert yaml.safe_load(config_path.read_text(encoding="utf-8"))["plugins"][
+        "enabled"
+    ] == ["hades-backend"]
+    _assert_canary_unchanged(config_path, external_before)
+
+
+def test_direct_remove_disarms_reinstall_without_erasing_legacy_state(
+    tmp_path, monkeypatch
+):
+    hermes_home, config_path, external_before = _write_canary_profile(
+        tmp_path, monkeypatch
+    )
+    source = _local_plugin_repo(tmp_path)
+
+    from hermes_cli import plugins_cmd
+
+    plugin_ref = f"file://{source}"
+    plugins_cmd.cmd_install(plugin_ref, enable=True)
+    plugins_cmd.cmd_remove("hades-backend")
+
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert "hades-backend" not in config["plugins"].get("enabled", [])
+    assert "hades_backend" not in config["plugins"].get("enabled", [])
+    assert config["plugins"]["disabled"] == ["hades-backend"]
+    assert not (hermes_home / "plugins" / "hades-backend").exists()
+
+    plugins_cmd.cmd_install(plugin_ref, enable=False)
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert "hades-backend" not in config["plugins"].get("enabled", [])
+    assert config["plugins"]["disabled"] == ["hades-backend"]
+    _assert_canary_unchanged(config_path, external_before)
+
+
+def test_force_reinstall_clone_move_failure_retains_existing_plugin(
+    tmp_path, monkeypatch
+):
+    hermes_home, config_path, external_before = _write_canary_profile(
+        tmp_path, monkeypatch
+    )
+    source = _local_plugin_repo(tmp_path)
+
+    from hermes_cli import plugins_cmd
+
+    plugin_ref = f"file://{source}"
+    plugins_cmd.cmd_install(plugin_ref, enable=True)
+    target = hermes_home / "plugins" / "hades-backend"
+    before = (target / "payload.txt").read_bytes()
+    config_before = config_path.read_bytes()
+
+    monkeypatch.setattr(
+        plugins_cmd.shutil,
+        "move",
+        lambda *_args: (_ for _ in ()).throw(OSError("injected move failure")),
+    )
+
+    with pytest.raises(OSError, match="injected move failure"):
+        plugins_cmd.cmd_install(plugin_ref, force=True, enable=False)
+
+    assert target.exists()
+    assert (target / "payload.txt").read_bytes() == before
+    assert config_path.read_bytes() == config_before
+    _assert_canary_unchanged(config_path, external_before)
+
+
+def test_force_reinstall_replace_failure_restores_existing_plugin(
+    tmp_path, monkeypatch
+):
+    hermes_home, config_path, external_before = _write_canary_profile(
+        tmp_path, monkeypatch
+    )
+    source = _local_plugin_repo(tmp_path)
+
+    from hermes_cli import plugins_cmd
+
+    plugin_ref = f"file://{source}"
+    plugins_cmd.cmd_install(plugin_ref, enable=True)
+    target = hermes_home / "plugins" / "hades-backend"
+    before = (target / "payload.txt").read_bytes()
+    real_replace = plugins_cmd.os.replace
+
+    def fail_staged_swap(source_path, destination_path):
+        if Path(source_path).name.startswith(".hades-backend.staging-"):
+            raise OSError("injected swap failure")
+        return real_replace(source_path, destination_path)
+
+    monkeypatch.setattr(plugins_cmd.os, "replace", fail_staged_swap)
+
+    with pytest.raises(OSError, match="injected swap failure"):
+        plugins_cmd.cmd_install(plugin_ref, force=True, enable=False)
+
+    assert (target / "payload.txt").read_bytes() == before
+    _assert_canary_unchanged(config_path, external_before)
+
+
+def test_plugin_update_failure_is_retry_safe(tmp_path, monkeypatch):
+    hermes_home, config_path, external_before = _write_canary_profile(
+        tmp_path, monkeypatch
+    )
+    source = _local_plugin_repo(tmp_path)
+
+    from hermes_cli import plugins_cmd
+
+    plugin_ref = f"file://{source}"
+    plugins_cmd.cmd_install(plugin_ref, enable=True)
+    target = hermes_home / "plugins" / "hades-backend"
+    _commit_plugin_version(source, "version two\n")
+    (target / "payload.txt").write_text("local interruption\n", encoding="utf-8")
+
+    with pytest.raises(SystemExit):
+        plugins_cmd.cmd_update("hades-backend")
+
+    assert (target / "payload.txt").read_text(
+        encoding="utf-8"
+    ) == "local interruption\n"
+    _assert_canary_unchanged(config_path, external_before)
+
+    subprocess.run(["git", "checkout", "--", "payload.txt"], cwd=target, check=True)
+    plugins_cmd.cmd_update("hades-backend")
+    plugins_cmd.cmd_update("hades-backend")
+    assert (target / "payload.txt").read_text(encoding="utf-8") == "version two\n"
+    _assert_canary_unchanged(config_path, external_before)
+
+
+def test_core_update_noop_preserves_plugin_and_profile_canaries(tmp_path, monkeypatch):
+    """The real core-update orchestration never invokes plugin lifecycle work."""
+    hermes_home, config_path, external_before = _write_canary_profile(
+        tmp_path, monkeypatch
+    )
+    source = _local_plugin_repo(tmp_path)
+
+    from hermes_cli import main as hm
+    from hermes_cli import plugins_cmd
+
+    def unexpected_backend_operation(*_args, **_kwargs):
+        raise AssertionError("core update must not invoke plugin lifecycle work")
+
+    plugins_cmd.cmd_install(f"file://{source}", enable=True)
+    target = hermes_home / "plugins" / "hades-backend"
+    plugin_before = hashlib.sha256((target / "payload.txt").read_bytes()).hexdigest()
+    core_root = tmp_path / "core"
+    (core_root / ".git").mkdir(parents=True)
+
+    def fake_run(command, **_kwargs):
+        joined = " ".join(str(part) for part in command)
+        if "rev-parse --abbrev-ref HEAD" in joined:
+            return subprocess.CompletedProcess(command, 0, stdout="main\n", stderr="")
+        if "rev-list" in joined:
+            return subprocess.CompletedProcess(command, 0, stdout="0\n", stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(hm, "PROJECT_ROOT", core_root)
+    monkeypatch.setattr(hm.subprocess, "run", fake_run)
+    monkeypatch.setattr(hm, "_run_pre_update_backup", lambda _args: None)
+    monkeypatch.setattr(hm, "_install_hangup_protection", lambda **_kwargs: None)
+    monkeypatch.setattr(hm, "_finalize_update_output", lambda _state: None)
+    monkeypatch.setattr(hm, "_get_origin_url", lambda *_args: None)
+    monkeypatch.setattr(hm, "_discard_lockfile_churn", lambda *_args: None)
+    monkeypatch.setattr(plugins_cmd, "cmd_install", unexpected_backend_operation)
+    monkeypatch.setattr(plugins_cmd, "cmd_update", unexpected_backend_operation)
+
+    hm.cmd_update(SimpleNamespace(check=False, gateway=True, branch=None, force=False))
+
+    assert (
+        hashlib.sha256((target / "payload.txt").read_bytes()).hexdigest()
+        == plugin_before
+    )
+    _assert_canary_unchanged(config_path, external_before)

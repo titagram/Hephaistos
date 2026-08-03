@@ -16,6 +16,7 @@ import os
 import shutil
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 from typing import Any, Optional
 
@@ -521,15 +522,23 @@ def _install_plugin_core(identifier: str, *, force: bool) -> tuple[Path, dict, s
                     f"Run {recommended_update_command()} to update Hermes.",
                 ) from None
 
-        if target.exists():
-            if not force:
-                raise PluginOperationError(
-                    f"Plugin '{plugin_name}' already exists. Use force reinstall "
-                    f"or run `hermes plugins update {plugin_name}`.",
-                )
-            shutil.rmtree(target)
+        if target.exists() and not force:
+            raise PluginOperationError(
+                f"Plugin '{plugin_name}' already exists. Use force reinstall "
+                f"or run `hermes plugins update {plugin_name}`.",
+            )
 
-        shutil.move(str(tmp_target), str(target))
+        staging = plugins_dir / f".{plugin_name}.staging-{uuid.uuid4().hex}"
+        try:
+            # Prepare the clone on the target filesystem before touching an
+            # existing installation. A failed copy/move therefore leaves the
+            # live plugin fully intact.
+            shutil.move(str(tmp_target), str(staging))
+            _replace_plugin_directory(staging, target)
+        except Exception:
+            if staging.exists():
+                shutil.rmtree(staging, ignore_errors=True)
+            raise
 
     has_yaml = (target / "plugin.yaml").exists() or (target / "plugin.yml").exists()
     if not has_yaml and not (target / "__init__.py").exists():
@@ -544,6 +553,27 @@ def _install_plugin_core(identifier: str, *, force: bool) -> tuple[Path, dict, s
     installed_manifest = _read_manifest(target)
     installed_name = installed_manifest.get("name") or target.name
     return target, installed_manifest, installed_name
+
+
+def _replace_plugin_directory(staging: Path, target: Path) -> None:
+    """Atomically replace *target* with prepared *staging*, restoring on failure."""
+    backup = target.parent / f".{target.name}.backup-{uuid.uuid4().hex}"
+    moved_existing = False
+    replacement_succeeded = False
+    try:
+        if target.exists():
+            os.replace(target, backup)
+            moved_existing = True
+        try:
+            os.replace(staging, target)
+            replacement_succeeded = True
+        except Exception:
+            if moved_existing and backup.exists():
+                os.replace(backup, target)
+            raise
+    finally:
+        if replacement_succeeded and backup.exists():
+            shutil.rmtree(backup, ignore_errors=True)
 
 
 def cmd_install(
@@ -685,8 +715,34 @@ def cmd_remove(name: str) -> None:
         console.print(f"[red]Error:[/red] {e}")
         sys.exit(1)
 
+    _disable_removed_plugin_discovery(name)
     shutil.rmtree(target)
     _display_removed(name, plugins_dir)
+
+
+def _disable_removed_plugin_discovery(name: str) -> None:
+    """Prevent a removed plugin from silently becoming active when reinstalled."""
+    key = _resolve_plugin_key(name) or name
+    aliases = {name, key, name.split("/")[-1], key.split("/")[-1]}
+    aliases.update({alias.replace("-", "_") for alias in tuple(aliases)})
+    aliases.update({alias.replace("_", "-") for alias in tuple(aliases)})
+
+    enabled = _get_enabled_set()
+    disabled = _get_disabled_set()
+    enabled.difference_update(aliases)
+    disabled.difference_update(aliases)
+    disabled.add(key)
+
+    from hermes_cli.config import load_config, save_config
+
+    config = load_config()
+    plugins_config = config.setdefault("plugins", {})
+    if not isinstance(plugins_config, dict):
+        plugins_config = {}
+        config["plugins"] = plugins_config
+    plugins_config["enabled"] = sorted(enabled)
+    plugins_config["disabled"] = sorted(disabled)
+    save_config(config)
 
 
 def _get_disabled_set() -> set:
