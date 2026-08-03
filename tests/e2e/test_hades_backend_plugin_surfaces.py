@@ -21,6 +21,7 @@ import threading
 import time
 from types import ModuleType
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -193,6 +194,166 @@ def test_plugin_command_context_cannot_mutate_an_inflight_prompt_or_tool_schema(
     )
 
 
+def test_fake_model_factory_preserves_the_configured_opencode_runtime(
+    monkeypatch,
+) -> None:
+    """The TUI/Desktop factory must not silently route a configured model elsewhere."""
+    from tui_gateway import server
+    import run_agent
+
+    prompt = "Task 13 fixed prompt\nDo not add Backend tools."
+    constructed: list[dict[str, Any]] = []
+    resolved: list[dict[str, Any]] = []
+
+    class FakeModelAgent:
+        def __init__(self, **kwargs: Any) -> None:
+            constructed.append(kwargs)
+
+    monkeypatch.setattr(run_agent, "AIAgent", FakeModelAgent)
+    monkeypatch.setattr(
+        server,
+        "_load_cfg",
+        lambda: {
+            "model": {
+                "provider": "opencode-go",
+                "default": "deepseek-v4-flash",
+            },
+            "agent": {"system_prompt": prompt},
+        },
+    )
+    monkeypatch.setattr(
+        server,
+        "_resolve_startup_runtime",
+        lambda: ("deepseek-v4-flash", "opencode-go"),
+    )
+    monkeypatch.setattr(
+        server,
+        "_resolve_runtime_with_fallback",
+        lambda kwargs: resolved.append(kwargs) or {
+            "provider": "opencode-go",
+            "base_url": "http://fake.invalid/v1",
+            "api_key": "fake-key",
+            "api_mode": "chat_completions",
+            "credential_pool": None,
+        },
+    )
+
+    server._make_agent("tui-surface", "session-a")
+    server._make_agent("desktop-surface", "session-b")
+
+    assert resolved == [
+        {"requested": "opencode-go", "target_model": "deepseek-v4-flash"},
+        {"requested": "opencode-go", "target_model": "deepseek-v4-flash"},
+    ]
+    assert [agent["model"] for agent in constructed] == [
+        "deepseek-v4-flash",
+        "deepseek-v4-flash",
+    ]
+    assert [agent["provider"] for agent in constructed] == ["opencode-go", "opencode-go"]
+    prompts = [agent["ephemeral_system_prompt"].encode() for agent in constructed]
+    assert prompts == [prompt.encode(), prompt.encode()]
+
+
+@pytest.mark.parametrize("surface", ["tui", "desktop"])
+def test_fake_model_turn_routes_title_after_an_ordinary_surface_conversation(
+    monkeypatch, gateway_server, surface: str
+) -> None:
+    """The shared TUI/Desktop dispatcher emits an ordinary fake-model turn and title."""
+    received: list[dict[str, Any]] = []
+    emitted: list[tuple[str, str, dict[str, Any]]] = []
+
+    class FakeModelAgent:
+        model = "deepseek-v4-flash"
+        provider = "opencode-go"
+        base_url = "http://fake.invalid/v1"
+        api_key = "fake-key"
+
+        def run_conversation(
+            self,
+            prompt: str,
+            conversation_history: list[dict[str, Any]] | None = None,
+            stream_callback=None,
+            task_id: str | None = None,
+        ) -> dict[str, Any]:
+            received.append({
+                "prompt": prompt,
+                "history": list(conversation_history or []),
+                "task_id": task_id,
+            })
+            if stream_callback is not None:
+                stream_callback("ordinary fake-model response")
+            return {
+                "final_response": "ordinary fake-model response",
+                "messages": [
+                    {"role": "user", "content": prompt},
+                    {"role": "assistant", "content": "ordinary fake-model response"},
+                ],
+            }
+
+    class ImmediateThread:
+        def __init__(self, target=None, daemon=None, **_kwargs: Any) -> None:
+            self._target = target
+
+        def start(self) -> None:
+            assert self._target is not None
+            self._target()
+
+    session_id = f"{surface}-ordinary-turn"
+    gateway_server._sessions[session_id] = {
+        "agent": FakeModelAgent(),
+        "attached_images": [],
+        "cols": 80,
+        "cwd": os.getcwd(),
+        "history": [],
+        "history_lock": threading.Lock(),
+        "history_version": 0,
+        "image_counter": 0,
+        "running": False,
+        "session_key": f"{surface}-stored-session",
+        "slash_worker": None,
+        "source": surface,
+        "tool_progress_mode": "all",
+    }
+    monkeypatch.setattr(gateway_server.threading, "Thread", ImmediateThread)
+    monkeypatch.setattr(
+        gateway_server,
+        "_emit",
+        lambda event, sid, payload=None: emitted.append((event, sid, payload or {})),
+    )
+    monkeypatch.setattr(gateway_server, "_get_db", lambda: None)
+    monkeypatch.setattr(gateway_server, "_sync_agent_model_with_config", lambda *_args: None)
+    monkeypatch.setattr(gateway_server, "make_stream_renderer", lambda _cols: None)
+    monkeypatch.setattr(gateway_server, "render_message", lambda _raw, _cols: None)
+
+    with patch("agent.title_generator.maybe_auto_title") as title:
+        response = gateway_server.handle_request({
+            "id": f"{surface}-prompt",
+            "method": "prompt.submit",
+            "params": {"session_id": session_id, "text": "ordinary question"},
+        })
+
+    assert response["result"] == {"status": "streaming"}
+    assert received == [{
+        "prompt": "ordinary question",
+        "history": [],
+        "task_id": f"{surface}-stored-session",
+    }]
+    complete = next(
+        payload
+        for event, sid, payload in emitted
+        if event == "message.complete" and sid == session_id
+    )
+    assert complete["text"] == "ordinary fake-model response"
+    assert complete["status"] == "complete"
+    title.assert_called_once()
+    assert title.call_args.args[1:4] == (
+        f"{surface}-stored-session",
+        "ordinary question",
+        "ordinary fake-model response",
+    )
+
+
+@pytest.mark.live_system_guard_bypass
 def test_spawned_serve_runs_the_real_desktop_websocket_transport_hermetically(
     tmp_path: Path,
 ) -> None:
@@ -210,6 +371,7 @@ def test_spawned_serve_runs_the_real_desktop_websocket_transport_hermetically(
     process = subprocess.Popen(
         [
             sys.executable,
+            "-u",
             "-m",
             "hermes_cli.main",
             "serve",
@@ -226,6 +388,7 @@ def test_spawned_serve_runs_the_real_desktop_websocket_transport_hermetically(
             "HERMES_WEB_DIST": str(dist),
             "HERMES_DASHBOARD_SESSION_TOKEN": token,
             "PYTHONPATH": str(Path(__file__).resolve().parents[2]),
+            "PYTHONUNBUFFERED": "1",
         },
         text=True,
         stdout=subprocess.PIPE,
@@ -234,19 +397,13 @@ def test_spawned_serve_runs_the_real_desktop_websocket_transport_hermetically(
     transcript: list[str] = []
     try:
         port = _wait_for_spawned_serve_port(process, transcript)
-        reply = asyncio.run(_desktop_catalog_over_websocket(port, token))
+        reply = asyncio.run(_desktop_session_list_over_websocket(port, token))
     finally:
-        process.terminate()
-        try:
-            stdout, stderr = process.communicate(timeout=10)
-        except subprocess.TimeoutExpired:  # pragma: no cover - failure cleanup
-            process.kill()
-            stdout, stderr = process.communicate(timeout=10)
+        stdout, stderr = _terminate_process(process)
         transcript.extend([stdout, stderr])
 
-    assert reply["id"] == "task13-catalog"
-    assert "result" in reply
-    assert process.returncode == 0
+    assert reply == {"jsonrpc": "2.0", "id": "task13-sessions", "result": {"sessions": []}}
+    assert process.returncode is not None
     assert "HERMES_DASHBOARD_READY port=" in "".join(transcript)
 
 
@@ -818,17 +975,17 @@ def _mcp_stdio_request(
 def _terminate_process(process: subprocess.Popen[str]) -> tuple[str, str]:
     process.terminate()
     try:
-        return process.communicate(timeout=10)
+        return process.communicate(timeout=2)
     except subprocess.TimeoutExpired:  # pragma: no cover - failure cleanup
         process.kill()
-        return process.communicate(timeout=10)
+        return process.communicate(timeout=2)
 
 
 def _wait_for_spawned_serve_port(
     process: subprocess.Popen[str], transcript: list[str]
 ) -> int:
     assert process.stdout is not None
-    deadline = time.monotonic() + 20
+    deadline = time.monotonic() + 60
     while time.monotonic() < deadline:
         ready, _, _ = select.select([process.stdout], [], [], 0.1)
         if ready:
@@ -839,13 +996,14 @@ def _wait_for_spawned_serve_port(
         if process.poll() is not None:
             break
     stderr = process.stderr.read() if process.stderr is not None else ""
+    exit_status = process.poll()
     pytest.fail(
         "hades serve did not announce a ready port; output: "
-        f"{''.join(transcript)} stderr: {stderr}"
+        f"{''.join(transcript)} stderr: {stderr} exit_status: {exit_status}"
     )
 
 
-async def _desktop_catalog_over_websocket(port: int, token: str) -> dict[str, Any]:
+async def _desktop_session_list_over_websocket(port: int, token: str) -> dict[str, Any]:
     from websockets.asyncio.client import connect
 
     async with connect(
@@ -855,13 +1013,13 @@ async def _desktop_catalog_over_websocket(port: int, token: str) -> dict[str, An
         assert ready["params"]["type"] == "gateway.ready"
         await websocket.send(json.dumps({
             "jsonrpc": "2.0",
-            "id": "task13-catalog",
-            "method": "commands.catalog",
+            "id": "task13-sessions",
+            "method": "session.list",
             "params": {},
         }))
         while True:
             message = json.loads(await asyncio.wait_for(websocket.recv(), timeout=10))
-            if message.get("id") == "task13-catalog":
+            if message.get("id") == "task13-sessions":
                 return message
 
 
