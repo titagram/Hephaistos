@@ -23,14 +23,18 @@ set -euo pipefail
 body_file=''
 header_file=''
 url=''
-authenticated=false
+auth_kind=none
 
 while (($#)); do
   case "$1" in
     --config)
       [[ "${2:-}" == - ]] || exit 90
-      IFS= read -r _config_line || true
-      authenticated=true
+      IFS= read -r config_line || true
+      case "$config_line" in
+        user\ =*) auth_kind=basic ;;
+        header\ =*) auth_kind=bearer ;;
+        *) exit 93 ;;
+      esac
       shift 2
       ;;
     --output) body_file="$2"; shift 2 ;;
@@ -46,25 +50,25 @@ printf '%s\n' "$url" >>"$SMOKE_URL_LOG"
 : >"$body_file"
 : >"$header_file"
 
-case "$url:$authenticated" in
-  http://persephone.cc/:false)
+case "$url:$auth_kind" in
+  http://persephone.cc/:none)
     printf 'HTTP/1.1 301 Moved Permanently\r\nLocation: https://persephone.cc/\r\n\r\n' >"$header_file"
     printf 301
     ;;
-  https://persephone.cc/:false|https://persephone.cc/v4/reference:false)
+  https://persephone.cc/:none|https://persephone.cc/v4/reference:none)
     printf 'HTTP/2 401\r\nWWW-Authenticate: Basic realm="supermemory"\r\n\r\n' >"$header_file"
     printf 401
     ;;
-  https://persephone.cc/v3/settings:false)
+  https://persephone.cc/v3/settings:none|https://persephone.cc/v3/settings:basic)
     printf 'HTTP/2 401\r\n\r\n' >"$header_file"
     printf 401
     ;;
-  https://persephone.cc/:true)
+  https://persephone.cc/:basic)
     printf 'HTTP/2 200\r\n\r\n' >"$header_file"
     printf '%s\n' 'supermemory · local' >"$body_file"
     printf 200
     ;;
-  https://persephone.cc/v3/settings:true)
+  https://persephone.cc/v3/settings:bearer)
     printf 'HTTP/2 200\r\n\r\n' >"$header_file"
     printf '%s\n' '{}' >"$body_file"
     printf 200
@@ -105,6 +109,7 @@ https://persephone.cc/
 https://persephone.cc/v4/reference
 https://persephone.cc/v3/settings
 https://persephone.cc/
+https://persephone.cc/v3/settings
 https://persephone.cc/v3/settings
 URLS
 cmp "$expected_urls" "$url_log"

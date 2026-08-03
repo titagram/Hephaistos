@@ -17,6 +17,7 @@ ENV
 chmod 600 "$env_file"
 
 cd "$repo_root"
+git check-ignore -q deploy/supermemory/.env.runtime.tmp.crash-test
 docker compose --env-file "$env_file" \
   -f deploy/supermemory/compose.yaml config --format json >"$config_file"
 
@@ -30,6 +31,7 @@ const server = config.services["supermemory-server"];
 
 assert.ok(bridge, "codex-bridge service must exist");
 assert.ok(server, "supermemory-server service must exist");
+assert.equal(bridge.stop_grace_period, "45s", "bridge must have time to drain HTTP and reap Codex");
 
 const networkNames = (service) => Object.keys(service.networks ?? {}).sort();
 assert.ok(!bridge.ports || bridge.ports.length === 0, "bridge must not publish host ports");
@@ -101,6 +103,7 @@ assert.equal(labels["traefik.http.routers.sm-http.rule"], "Host(`persephone.cc`)
 assert.equal(labels["traefik.http.routers.sm-http.entrypoints"], "web");
 assert.equal(labels["traefik.http.routers.sm-http.middlewares"], "sm-https-redirect");
 assert.equal(labels["traefik.http.middlewares.sm-https-redirect.redirectscheme.scheme"], "https");
+assert.equal(labels["traefik.http.middlewares.sm-https-redirect.redirectscheme.permanent"], "true");
 
 const httpsRouters = {
   "sm-web": {
