@@ -2242,7 +2242,70 @@ def test_backend_status_reports_cached_task_work_readiness(monkeypatch, tmp_path
     assert any("Repair backend task work missing shared memory context" in action for action in payload["actions"])
 
 
-def test_backend_status_prefers_remote_awareness_over_last_sync_summary(monkeypatch, tmp_path):
+def test_backend_status_with_linked_binding_is_local_only_by_default(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    from hermes_cli import hades_backend_db as hdb
+    import hermes_cli.hades_backend_runtime as runtime
+    from hermes_cli.hades_backend_status import load_backend_status_payload
+
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn,
+            agent_id="agent_local",
+            project_id="project_local",
+            base_url="https://backend.example",
+            label="local",
+            token_env_key="TOKEN_LOCAL",
+            capabilities={"sync_git_tree": True},
+        )
+        hdb.upsert_workspace_binding(
+            conn,
+            project_id="project_local",
+            agent_id="agent_local",
+            local_project_id="local_project",
+            workspace_fingerprint="fingerprint_local",
+            display_path=str(workspace),
+            repo_root=str(workspace),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="abc123",
+            backend_workspace_binding_id="binding_local",
+        )
+        hdb.record_sync_state(
+            conn,
+            "last_sync_summary",
+            {
+                "artifacts_uploaded": 2,
+                "artifacts_skipped": 1,
+                "artifact_errors": 0,
+                "source_slice_candidates": 4,
+            },
+        )
+
+    client_constructions = []
+
+    def fail_if_client_is_constructed(**kwargs):
+        client_constructions.append(kwargs)
+        raise AssertionError("ordinary status must not construct a Backend client")
+
+    monkeypatch.setattr(runtime, "client_from_config", fail_if_client_is_constructed)
+    payload = load_backend_status_payload(cwd=workspace)
+
+    assert client_constructions == []
+    assert payload["configured"] is True
+    assert payload["bindings"][0]["workspace_binding_id"] == "binding_local"
+    assert payload["sync"]["last_summary"] == {
+        "artifacts_uploaded": 2,
+        "artifacts_skipped": 1,
+        "artifact_errors": 0,
+        "source_slice_candidates": 4,
+    }
+
+
+def test_backend_status_live_prefers_remote_awareness_over_last_sync_summary(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
 
     from hermes_cli import hades_backend_db as hdb
@@ -2347,7 +2410,7 @@ def test_backend_status_prefers_remote_awareness_over_last_sync_summary(monkeypa
     fake_client = FakeClient()
     monkeypatch.setattr(runtime, "client_from_config", lambda **kwargs: fake_client)
     monkeypatch.chdir(workspace)
-    payload = load_backend_status_payload()
+    payload = load_backend_status_payload(live=True)
     binding_awareness = payload["bindings"][0]["awareness"]
 
     assert fake_client.calls == [{"project_id": "proj_1", "workspace_binding_id": "wb_1"}]

@@ -107,3 +107,79 @@ def test_backend_status_reports_agent_and_bindings(monkeypatch, tmp_path):
         "Inspect last backend sync error and rerun `hades backend sync`.",
     }
     assert expected_actions.issubset(result["actions"])
+
+
+def test_backend_status_rpc_requires_explicit_live_intent(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    from hermes_cli import hades_backend_db as db
+    import hermes_cli.hades_backend_runtime as runtime
+
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    with db.connect_closing() as conn:
+        db.save_agent(
+            conn,
+            agent_id="agent_local",
+            project_id="project_local",
+            base_url="https://backend.example",
+            label="local",
+            token_env_key="TOKEN_LOCAL",
+            capabilities={"sync_git_tree": True},
+        )
+        db.upsert_workspace_binding(
+            conn,
+            project_id="project_local",
+            agent_id="agent_local",
+            local_project_id="local_project",
+            workspace_fingerprint="fingerprint_local",
+            display_path=str(workspace),
+            repo_root=str(workspace),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="abc123",
+            backend_workspace_binding_id="binding_local",
+        )
+
+    client_constructions = []
+
+    def fail_if_client_is_constructed(**kwargs):
+        client_constructions.append(kwargs)
+        raise AssertionError("ordinary backend.status must stay local")
+
+    monkeypatch.setattr(runtime, "client_from_config", fail_if_client_is_constructed)
+    result = _call("backend.status")
+    string_live_result = _call("backend.status", {"live": "true"})
+
+    assert client_constructions == []
+    assert result["configured"] is True
+    assert string_live_result["configured"] is True
+    assert result["bindings"][0]["workspace_binding_id"] == "binding_local"
+
+    class FakeClient:
+        def __init__(self):
+            self.calls = []
+            self.closed = False
+
+        def project_awareness_status(self, **payload):
+            self.calls.append(payload)
+            return {"overall_status": "partial", "coverage": {}}
+
+        def close(self):
+            self.closed = True
+
+    fake_client = FakeClient()
+
+    def construct_live_client(**kwargs):
+        client_constructions.append(kwargs)
+        return fake_client
+
+    monkeypatch.setattr(runtime, "client_from_config", construct_live_client)
+    live_result = _call("backend.status", {"live": True})
+
+    assert live_result["configured"] is True
+    assert client_constructions == [{"timeout": 5.0}]
+    assert fake_client.calls == [
+        {"project_id": "project_local", "workspace_binding_id": "binding_local"}
+    ]
+    assert fake_client.closed is True

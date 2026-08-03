@@ -34,9 +34,9 @@ def background_sync_state_key(workspace_binding_id: str) -> str:
 
 
 def load_backend_status_payload(
-    *, cwd: str | Path | None = None,
+    *, cwd: str | Path | None = None, live: bool = False,
 ) -> dict[str, Any]:
-    """Return the canonical local Hades backend status payload."""
+    """Return status from local state, optionally refreshing live awareness."""
     config = load_config()
     memory_config = config.get("memory") if isinstance(config.get("memory"), dict) else {}
     backend_config = config.get("backend") if isinstance(config.get("backend"), dict) else {}
@@ -144,7 +144,7 @@ def load_backend_status_payload(
             last_quality_report_updated_at = None
             quality_report_history_updated_at = None
 
-    remote_awarenesses = _load_remote_awarenesses(agent, bindings)
+    remote_awarenesses = _load_remote_awarenesses(agent, bindings) if live else {}
     return backend_status_payload(
         agent=agent,
         bindings=bindings,

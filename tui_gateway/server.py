@@ -10800,7 +10800,7 @@ def _(rid, params) -> dict:
     try:
         from hermes_cli.hades_backend_status import load_backend_status_payload
 
-        payload = load_backend_status_payload()
+        payload = load_backend_status_payload(live=params.get("live") is True)
     except Exception as exc:
         return _err(rid, -32090, f"backend status failed: {exc}")
 

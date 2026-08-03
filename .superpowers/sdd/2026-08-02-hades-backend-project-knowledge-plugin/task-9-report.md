@@ -58,3 +58,27 @@ Static verification also passed:
 - Generic memory: external provider tests remain green and the user's existing `memory` configuration is left byte-for-byte unchanged by explicit project sync.
 
 Commit subject: `refactor(hades): detach Backend from memory lifecycle`
+
+## Round 2: local-only ordinary status
+
+Independent review found a remaining automatic network path: Desktop mounted the composer status stack, requested `backend.status` immediately and every 15 seconds, and the status loader unconditionally constructed a Backend client to fetch live project awareness.
+
+The status contract now has an explicit intent boundary:
+
+- `load_backend_status_payload()` is local-only by default and builds its payload from config, bindings, caches, and persisted summaries.
+- `load_backend_status_payload(live=True)` retains the previous live awareness behavior.
+- The `backend.status` RPC enables live awareness only for the exact boolean payload `{ "live": true }`; omitted and string-valued flags remain local.
+- CLI status, TUI collectors, dashboard status, support reports, bug intake, and Desktop interval polling all omit live intent and therefore cannot construct a Backend client.
+- The existing live helper still constructs the client with a five-second timeout, closes it, and fails closed to the local payload without surfacing remote error text.
+
+TDD reproduced the defect before implementation: ordinary loader and RPC calls each constructed a client once, while the requested `live=True` loader API did not exist. After the minimal split, those tests passed. The obsolete MVP smoke test, which still asserted the removed Task 9 memory/job/inbox piggyback behavior, was inverted into a cross-surface local-status/no-client smoke contract.
+
+Round-2 verification:
+
+- Focused Python cutover/status/RPC suite: `360 passed, 1 deselected`.
+- Proportional web status, local smoke, Gnothi collector, gateway startup/shutdown suite: `52 passed, 1 deselected` (excluding the previously documented macOS/systemd exit-code mismatch).
+- Desktop status-stack Vitest: `2 files passed`, `7 tests passed`; fake timers covered mount plus 30,001 ms of idle polling and observed only `backend.status` with `{}`.
+- Desktop TypeScript typecheck passed against the worktree sources using the repository-root dependency installation.
+- Ruff, ESLint, compileall, diff checks, and static caller audits passed.
+
+Round-2 commit subject: `fix(hades): keep ordinary backend status local`
