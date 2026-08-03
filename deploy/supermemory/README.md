@@ -212,3 +212,25 @@ The auxiliary container-description structured-output call still returned a
 sanitized upstream schema error in this run. Supermemory treats that operation
 as optional; document finalization, memory creation, retrieval, restart
 persistence, and Codex authentication all completed successfully.
+
+### 2026-08-03 — current HEAD redeploy
+
+| Check | Status | Non-secret evidence |
+| --- | --- | --- |
+| Local quality gates | PASS | 109/109 bridge tests; TypeScript build; bridge/server image tests; Compose, bootstrap-resume, public-route, syntax, and diff gates |
+| Server release image/tag/checksum | PASS | `server-v0.0.6`; binary SHA-256 `bb1b7cee393818236873b8e2518a435e10d9195e27ea5608a3af48a733ef8ee8` |
+| Deployment container image IDs | PASS | bridge `sha256:e25e6814da816d18287edd6ba388d2382fdaf9095fd8e6463ff140212fd9d6c0`; server `sha256:52786f59f56ae8bdc92585d362de152fda4cd2e27e83d6d7242e28ac2afe7d43` |
+| DNS and TLS | PASS | `persephone.cc` resolved to `162.19.229.31`; Let's Encrypt YR2 valid through 2026-10-31; hostname check passed |
+| HTTPS and authentication boundary | PASS | permanent HTTP 301 to HTTPS; unauthenticated UI 401 with `Basic realm="traefik"`; unauthenticated API 401 without a Basic challenge; native Bearer API returned 200 |
+| Built-in UI and bridge isolation | PASS | local UI marker passed; both services healthy with no host-published ports; bridge remained off Traefik |
+| Draft-07 structured output | PASS | live request with the root Draft-07 marker returned a validated 200 response through the deployed bridge |
+| Document and symbolic extraction | PASS | document `QrKM6uZxDRD1bRtZW6CPEJ` reached `done`; marker SHA-256 prefix `29339344f0dbeda4`; three symbolic tool turns returned 200 |
+| Search retrieval | PASS | filtered hybrid search returned one result containing the exact marker |
+| Restart persistence and Codex auth | PASS | both services returned healthy; the same document remained `done`; the same exact marker was retrieved; `Logged in using ChatGPT` |
+| Hermes/Hades untouched | PASS | final branch review found no Hermes/Hades core, plugin, gateway, or agent-test changes |
+
+The optional container-description requests made during this ingestion still
+returned sanitized `codex_upstream_error` responses before Supermemory
+continued with its symbolic extraction flow. The separately exercised
+Draft-07 structured-output path passed live, and document finalization,
+retrieval, restart persistence, and authentication were unaffected.
