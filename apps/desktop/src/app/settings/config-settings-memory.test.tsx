@@ -7,20 +7,28 @@ const getElevenLabsVoices = vi.fn()
 const getHermesConfigDefaults = vi.fn()
 const getHermesConfigRecord = vi.fn()
 const getHermesConfigSchema = vi.fn()
+const getMemoryProviderConfig = vi.fn()
+const getMemoryProviderOAuthStatus = vi.fn()
 const getMemoryStatus = vi.fn()
 const saveHermesConfig = vi.fn()
+const saveMemoryProviderConfig = vi.fn()
+const startMemoryProviderOAuth = vi.fn()
 
 vi.mock('@/hermes', () => ({
   getElevenLabsVoices: () => getElevenLabsVoices(),
   getHermesConfigDefaults: () => getHermesConfigDefaults(),
   getHermesConfigRecord: () => getHermesConfigRecord(),
   getHermesConfigSchema: () => getHermesConfigSchema(),
+  getMemoryProviderConfig: (provider: string) => getMemoryProviderConfig(provider),
+  getMemoryProviderOAuthStatus: (provider: string) => getMemoryProviderOAuthStatus(provider),
   getMemoryStatus: () => getMemoryStatus(),
   saveHermesConfig: (config: unknown) => {
     savedProfiles.push($activeGatewayProfile.get())
 
     return saveHermesConfig(config)
-  }
+  },
+  saveMemoryProviderConfig: (provider: string, values: unknown) => saveMemoryProviderConfig(provider, values),
+  startMemoryProviderOAuth: (provider: string) => startMemoryProviderOAuth(provider)
 }))
 
 vi.mock('@/store/profile', async () => {
@@ -35,14 +43,6 @@ vi.mock('@/store/profile', async () => {
 vi.mock('@/store/notifications', () => ({
   notify: vi.fn(),
   notifyError: vi.fn()
-}))
-
-vi.mock('./memory/connect', () => ({
-  MemoryConnect: () => null
-}))
-
-vi.mock('./provider-config-panel', () => ({
-  ProviderConfigPanel: () => null
 }))
 
 const { $activeGatewayProfile } = await import('@/store/profile')
@@ -68,6 +68,8 @@ beforeEach(() => {
       }
     }
   })
+  getMemoryProviderConfig.mockResolvedValue({ name: 'honcho', label: 'Honcho', fields: [] })
+  getMemoryProviderOAuthStatus.mockRejectedValue(new Error('Provider does not support OAuth'))
   getMemoryStatus.mockResolvedValue({
     active: 'honcho',
     providers: [
@@ -81,6 +83,8 @@ beforeEach(() => {
     builtin_files: { memory: 0, user: 0 }
   })
   saveHermesConfig.mockResolvedValue({ ok: true })
+  saveMemoryProviderConfig.mockResolvedValue({ ok: true })
+  startMemoryProviderOAuth.mockResolvedValue({ ok: true })
 })
 
 afterEach(() => {
@@ -229,6 +233,51 @@ describe('ConfigSettings memory provider discovery', () => {
     expect(selector.textContent).toContain('Hades Backend')
     expect(screen.getByText(/retired.*inactive/i)).toBeTruthy()
     expect(screen.queryByRole('option', { name: /Hades Backend/ })).toBeNull()
+  })
+
+  it('restores valid provider connection and config surfaces immediately after leaving a retired selection', async () => {
+    getHermesConfigRecord.mockResolvedValueOnce({ memory: { provider: 'hades_backend' } })
+    getMemoryStatus.mockResolvedValueOnce({
+      active: 'hades_backend',
+      configured: 'hades_backend',
+      effective: '',
+      retired: true,
+      message: 'This retired memory selection is inactive. Run interactive `hades memory setup` to choose a provider.',
+      providers: [{ name: 'honcho', description: 'Honcho memory.', configured: true, available: true }],
+      builtin_files: { memory: 0, user: 0 }
+    })
+    getMemoryProviderOAuthStatus.mockResolvedValueOnce({
+      auth: null,
+      connected: false,
+      detail: '',
+      state: 'idle'
+    })
+    getMemoryProviderConfig.mockResolvedValueOnce({
+      name: 'honcho',
+      label: 'Honcho',
+      fields: [
+        {
+          key: 'api_key',
+          label: 'API key',
+          kind: 'secret',
+          value: '',
+          description: 'Used to connect Honcho.',
+          placeholder: 'Enter Honcho API key',
+          is_set: false,
+          options: []
+        }
+      ]
+    })
+
+    await renderMemorySettings()
+    await openProviderSelector()
+    expect(screen.queryByRole('option', { name: /Hades Backend/ })).toBeNull()
+    fireEvent.click(await screen.findByRole('option', { name: /Honcho/ }))
+
+    expect(screen.queryByText(/retired.*inactive/i)).toBeNull()
+    expect(await screen.findByRole('button', { name: 'Connect' })).toBeTruthy()
+    expect(await screen.findByRole('button', { name: /Honcho settings/ })).toBeTruthy()
+    expect(await screen.findByPlaceholderText('Enter Honcho API key')).toBeTruthy()
   })
 
   it('saves a dynamically discovered selection through the debounced config path', async () => {

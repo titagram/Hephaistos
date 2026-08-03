@@ -40,6 +40,10 @@ interface MemoryProviderSelectData {
   options: string[]
 }
 
+function isRetiredMemoryProviderSelection(status: MemoryStatusResponse | null, current: string): boolean {
+  return Boolean(status?.retired && (status.configured ?? status.active) === current)
+}
+
 function memoryProviderSelectData(
   status: MemoryStatusResponse | null,
   current: string,
@@ -73,7 +77,7 @@ function memoryProviderSelectData(
   if (current && !options.includes(current)) {
     labels[current] = prettyName(current)
 
-    if (!status?.retired || status.configured !== current) {
+    if (!isRetiredMemoryProviderSelection(status, current)) {
       options.push(current)
       details[current] = {
         status: discoveryFailed
@@ -444,6 +448,7 @@ export function ConfigSettings({
 
   const fields = sectionFields.get(activeSectionId) ?? []
   const currentMemoryProvider = config ? String(getNested(config, 'memory.provider') ?? '') : ''
+  const currentMemoryProviderRetired = isRetiredMemoryProviderSelection(memoryStatus, currentMemoryProvider)
 
   const memoryProviderSelect = useMemo(
     () => memoryProviderSelectData(memoryStatus, currentMemoryProvider, memoryDiscoveryFailed),
@@ -532,10 +537,10 @@ export function ConfigSettings({
                       {memoryDiscoveryFailed ? (
                         <span>Provider discovery unavailable; keeping the current selection.</span>
                       ) : null}
-                      {memoryStatus?.retired && memoryStatus.message ? (
+                      {currentMemoryProviderRetired && memoryStatus?.message ? (
                         <span>{memoryStatus.message}</span>
                       ) : null}
-                      {getNested(config, key) && !memoryStatus?.retired ? (
+                      {getNested(config, key) && !currentMemoryProviderRetired ? (
                         <MemoryConnect provider={String(getNested(config, key))} />
                       ) : null}
                     </>
@@ -545,8 +550,8 @@ export function ConfigSettings({
                   key === 'memory.provider'
                     ? memoryProviderSelect.options
                     : key === 'tts.elevenlabs.voice_id'
-                    ? enumOptionsFor(key, getNested(config, key), config, elevenLabsVoiceOptions ?? undefined)
-                    : enumOptionsFor(key, getNested(config, key), config)
+                      ? enumOptionsFor(key, getNested(config, key), config, elevenLabsVoiceOptions ?? undefined)
+                      : enumOptionsFor(key, getNested(config, key), config)
                 }
                 onChange={value => updateConfig(setNested(config, key, value))}
                 optionDetails={key === 'memory.provider' ? memoryProviderSelect.details : undefined}
@@ -561,7 +566,10 @@ export function ConfigSettings({
                 schemaKey={key}
                 value={getNested(config, key)}
               />
-              {key === 'memory.provider' && typeof getNested(config, key) === 'string' && getNested(config, key) && !memoryStatus?.retired ? (
+              {key === 'memory.provider' &&
+              typeof getNested(config, key) === 'string' &&
+              getNested(config, key) &&
+              !currentMemoryProviderRetired ? (
                 <ProviderConfigPanel provider={String(getNested(config, key))} />
               ) : null}
             </div>
