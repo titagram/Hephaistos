@@ -773,6 +773,69 @@ def test_external_plugin_mcp_stdio_exposes_only_project_tools_when_unlinked(
         _terminate_process(process)
 
 
+@pytest.mark.live_system_guard_bypass
+def test_external_plugin_mcp_stdio_query_uses_the_linked_derived_credential(
+    tmp_path: Path,
+) -> None:
+    """A linked MCP project query resolves one persisted binding and its derived token."""
+    root = _external_plugin_root_or_skip()
+    entrypoint = _load_external_entrypoint(root)
+    pairing = importlib.import_module(f"{entrypoint.__name__}.hades_backend_plugin.pairing")
+    profile, workspace = tmp_path / "profile", tmp_path / "linked-workspace"
+    workspace.mkdir()
+    calls: list[tuple[str, str]] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802
+            calls.append((self.path, self.headers.get("Authorization", "")))
+            if self.path.endswith("token/verify"):
+                payload: dict[str, Any] = {"project_id": "project-a", "valid": True}
+            elif self.path.endswith("agents/register"):
+                payload = {"agent_id": "agent-a", "agent_token": "DERIVED_MCP_A", "capabilities": dict.fromkeys(pairing.PROJECT_KNOWLEDGE_CAPABILITIES, True)}
+            elif self.path.endswith("workspaces/bind"):
+                payload = {"workspace_binding_id": "binding-a"}
+            else:
+                self.send_error(404)
+                return
+            encoded = json.dumps(payload).encode()
+            self.send_response(200); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(encoded))); self.end_headers(); self.wfile.write(encoded)
+
+        def do_GET(self) -> None:  # noqa: N802
+            calls.append((self.path, self.headers.get("Authorization", "")))
+            assert self.path.startswith("/api/hades/v1/memory/search?")
+            encoded = json.dumps({"items": [], "count": 0}).encode()
+            self.send_response(200); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(encoded))); self.end_headers(); self.wfile.write(encoded)
+
+        def log_message(self, _format: str, *_args: Any) -> None:
+            return None
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
+    try:
+        pairing.pair_project(base_url=f"http://127.0.0.1:{server.server_port}", project_id="project-a", bootstrap_token="BOOTSTRAP_MCP_A", workspace=workspace, profile_home=profile)
+        process = subprocess.Popen([sys.executable, "-m", "hades_backend_plugin.mcp_server"], cwd=workspace, env={**os.environ, "HERMES_HOME": str(profile), "PYTHONPATH": str(root), "PYTHONDONTWRITEBYTECODE": "1"}, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            _mcp_stdio_request(process, {"jsonrpc": "2.0", "id": "initialize", "method": "initialize", "params": {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "task13", "version": "1"}}})
+            response = _mcp_stdio_request(process, {"jsonrpc": "2.0", "id": "search", "method": "tools/call", "params": {"name": "project_search", "arguments": {"workspace": str(workspace), "query": "needle"}}})
+        finally:
+            _terminate_process(process)
+    finally:
+        server.shutdown(); thread.join(timeout=2)
+
+    payload = json.loads(response["result"]["content"][0]["text"])
+    assert payload["status"] == "ok"
+    assert calls[-1][1] == "Bearer DERIVED_MCP_A"
+    assert "project_id=project-a" in calls[-1][0]
+    assert "workspace_binding_id=binding-a" in calls[-1][0]
+    assert [authorization for _path, authorization in calls[:2]] == [
+        "Bearer BOOTSTRAP_MCP_A",
+        "Bearer BOOTSTRAP_MCP_A",
+    ]
+    assert "BOOTSTRAP_MCP_A" not in (profile / ".env").read_text(encoding="utf-8")
+    assert "BOOTSTRAP_MCP_A" not in (profile / "hades_backend.db").read_text(errors="ignore")
+    assert "BOOTSTRAP_MCP_A" not in repr(response)
+
+
 def test_external_plugin_real_pairing_service_and_profile_routes_are_scoped(
     tmp_path: Path,
 ) -> None:
@@ -936,6 +999,48 @@ def test_external_plugin_real_pairing_service_and_profile_routes_are_scoped(
     assert revoked["status"] == "revoked_or_auth_failed"
     assert revoked["network_attempted"] is False
     assert len(issued) == 3
+
+
+def test_external_default_service_client_uses_each_profile_derived_credential(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Default service construction never borrows a route or token from another profile."""
+    entrypoint = _load_external_entrypoint(_external_plugin_root_or_skip())
+    package = f"{entrypoint.__name__}.hades_backend_plugin"
+    pairing = importlib.import_module(f"{package}.pairing")
+    service = importlib.import_module(f"{package}.service")
+    workspace = tmp_path / "workspace"; workspace.mkdir()
+    profiles = {"a": tmp_path / "profile-a", "b": tmp_path / "profile-b"}
+
+    class PairClient:
+        def __init__(self, label: str, token: str) -> None: self.label, self.token = label, token
+        def verify_token(self, *, project_id: str) -> dict[str, Any]:
+            assert (project_id, self.token) == (f"project-{self.label}", f"BOOTSTRAP_{self.label.upper()}")
+            return {"valid": True}
+        def register_agent(self, **_kwargs: Any) -> dict[str, Any]:
+            return {"agent_id": f"agent-{self.label}", "agent_token": f"DERIVED_{self.label.upper()}", "capabilities": dict.fromkeys(pairing.PROJECT_KNOWLEDGE_CAPABILITIES, True)}
+        def bind_workspace(self, **_kwargs: Any) -> dict[str, Any]: return {"workspace_binding_id": f"binding-{self.label}"}
+        def close(self) -> None: return None
+
+    for label, profile in profiles.items():
+        pairing.pair_project(base_url=f"https://backend-{label}.invalid", project_id=f"project-{label}", bootstrap_token=f"BOOTSTRAP_{label.upper()}", workspace=workspace, profile_home=profile, client_factory=lambda _url, token, label=label: PairClient(label, token))
+
+    constructed: list[tuple[str, str]] = []
+    class StrictClient:
+        def __init__(self, base_url: str, token: str) -> None: constructed.append((base_url, token))
+        def project_search(self, **payload: Any) -> dict[str, Any]: return {"items": [], **payload}
+        def close(self) -> None: return None
+
+    monkeypatch.setattr(service, "BackendApiClient", StrictClient)
+    assert service.ProjectKnowledgeService(profile_home=profiles["a"]).project_search(workspace, "a")["project_id"] == "project-a"
+    assert service.ProjectKnowledgeService(profile_home=profiles["b"]).project_search(workspace, "b")["project_id"] == "project-b"
+    assert constructed == [("https://backend-a.invalid", "DERIVED_A"), ("https://backend-b.invalid", "DERIVED_B")]
+    with sqlite3.connect(profiles["a"] / "hades_backend.db") as connection:
+        connection.execute("UPDATE workspace_bindings SET status = 'revoked'")
+        connection.commit()
+    revoked = service.ProjectKnowledgeService(profile_home=profiles["a"]).project_search(workspace, "no-fallback")
+    assert revoked["status"] == "revoked_or_auth_failed" and revoked["network_attempted"] is False
+    assert len(constructed) == 2
 
 
 def test_external_plugin_sync_is_one_scoped_project_transaction_only(
