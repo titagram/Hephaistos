@@ -427,6 +427,62 @@ test("caller deadline abort interrupts exactly once and maps to timeout", async 
   await server.close();
 });
 
+test("abort before turn binding reaps Codex and the next run lazily recovers", async () => {
+  const { server, processes } = createHarness();
+  const controller = new AbortController();
+  const first = server.run({ prompt: "Abort before binding." }, controller.signal);
+  const firstPeer = new FakeRpcPeer(processes[0]!);
+  await initialize(firstPeer);
+
+  const threadStart = await firstPeer.next();
+  assert.equal(threadStart.method, "thread/start");
+  firstPeer.respond(threadStart.id!, { thread: { id: "thread-unbound" } });
+  const turnStart = await firstPeer.next();
+  assert.equal(turnStart.method, "turn/start");
+
+  controller.abort(new DOMException("request deadline", "TimeoutError"));
+  await expectKind(first, "timeout");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(processes[0]!.signals, ["SIGTERM"]);
+  assert.equal(server.isReady(), false);
+
+  const secondInvocation = { prompt: "Recover after abort." };
+  const second = server.run(secondInvocation);
+  assert.equal(processes.length, 2);
+  const secondPeer = new FakeRpcPeer(processes[1]!);
+  await initialize(secondPeer);
+  await acceptRun(secondPeer, "thread-recovered", "turn-recovered", secondInvocation);
+  completeRun(secondPeer, "thread-recovered", "turn-recovered", "recovered");
+  assert.equal((await second).text, "recovered");
+  await server.close();
+});
+
+test("self-closed JSON-RPC transport invalidates readiness, reaps Codex, and recovers", async () => {
+  const { server, processes } = createHarness();
+  const firstInvocation = { prompt: "Lose transport." };
+  const first = server.run(firstInvocation);
+  const firstPeer = new FakeRpcPeer(processes[0]!);
+  await initialize(firstPeer);
+  await acceptRun(firstPeer, "thread-transport", "turn-transport", firstInvocation);
+  assert.equal(server.isReady(), true);
+
+  processes[0]!.stdout.end();
+  await expectKind(first, "unavailable");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(server.isReady(), false);
+  assert.deepEqual(processes[0]!.signals, ["SIGTERM"]);
+
+  const secondInvocation = { prompt: "Recover transport." };
+  const second = server.run(secondInvocation);
+  assert.equal(processes.length, 2);
+  const secondPeer = new FakeRpcPeer(processes[1]!);
+  await initialize(secondPeer);
+  await acceptRun(secondPeer, "thread-transport-2", "turn-transport-2", secondInvocation);
+  completeRun(secondPeer, "thread-transport-2", "turn-transport-2", "recovered transport");
+  assert.equal((await second).text, "recovered transport");
+  await server.close();
+});
+
 test("process death fails active work and one later run lazily starts one replacement", async () => {
   const { server, processes } = createHarness();
   assert.equal(server.isReady(), false);

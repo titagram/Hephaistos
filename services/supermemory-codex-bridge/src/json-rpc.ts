@@ -16,6 +16,7 @@ interface PendingRequest {
 
 type NotificationListener = (method: string, params: unknown) => void;
 type RequestListener = (id: JsonRpcId, method: string, params: unknown) => void;
+type CloseListener = () => void;
 
 export class JsonRpcError extends Error {
   constructor(public readonly code: number, message: string, public readonly data?: unknown) {
@@ -28,6 +29,7 @@ export class JsonRpcClient {
   private readonly pending = new Map<JsonRpcId, PendingRequest>();
   private readonly notificationListeners = new Set<NotificationListener>();
   private readonly requestListeners = new Set<RequestListener>();
+  private readonly closeListeners = new Set<CloseListener>();
   private readonly decoder = new StringDecoder("utf8");
   private readonly completeLineByteLengths: number[] = [];
   private nextId = 1;
@@ -91,6 +93,8 @@ export class JsonRpcClient {
     stdout.once("end", this.onEnd);
     stdout.once("close", this.onEnd);
     stdout.once("error", this.onStreamError);
+    stdin.once("close", this.onEnd);
+    stdin.once("error", this.onStreamError);
   }
 
   request<T>(method: string, params?: unknown, signal?: AbortSignal): Promise<T> {
@@ -142,6 +146,15 @@ export class JsonRpcClient {
     return () => this.requestListeners.delete(listener);
   }
 
+  onClose(listener: CloseListener): () => void {
+    if (this.closed) {
+      listener();
+      return () => {};
+    }
+    this.closeListeners.add(listener);
+    return () => this.closeListeners.delete(listener);
+  }
+
   respondResult(id: JsonRpcId, result: unknown): void {
     if (!this.closed) {
       this.write({ jsonrpc: "2.0", id, result });
@@ -163,6 +176,8 @@ export class JsonRpcClient {
     this.stdout.off("end", this.onEnd);
     this.stdout.off("close", this.onEnd);
     this.stdout.off("error", this.onStreamError);
+    this.stdin.off("close", this.onEnd);
+    this.stdin.off("error", this.onStreamError);
     this.notificationListeners.clear();
     this.requestListeners.clear();
 
@@ -172,6 +187,15 @@ export class JsonRpcClient {
     for (const [id, pending] of this.pending) {
       this.removePending(id, pending);
       pending.reject(closeError);
+    }
+    const closeListeners = [...this.closeListeners];
+    this.closeListeners.clear();
+    for (const listener of closeListeners) {
+      try {
+        listener();
+      } catch {
+        // Transport lifecycle listeners cannot affect cleanup.
+      }
     }
   }
 

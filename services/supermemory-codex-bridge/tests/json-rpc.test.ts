@@ -195,6 +195,8 @@ test("cancels a pending request and ignores its late response", async () => {
 
 test("rejects every pending request when stdout contains malformed JSON", async () => {
   const { client, stdin, stdout } = createTransport();
+  let closeCalls = 0;
+  client.onClose(() => { closeCalls += 1; });
   const first = client.request("turn/one");
   const second = client.request("turn/two");
 
@@ -203,17 +205,47 @@ test("rejects every pending request when stdout contains malformed JSON", async 
   const firstError = await expectRejection(first, "protocol");
   const secondError = await expectRejection(second, "protocol");
   assert.equal(firstError, secondError);
+  assert.equal(closeCalls, 1);
 });
 
 test("rejects every pending request when stdout ends", async () => {
   const { client, stdin, stdout } = createTransport();
+  let closeCalls = 0;
+  client.onClose(() => { closeCalls += 1; });
   const request = client.request("turn/start");
   await nextLine(stdin);
 
   stdout.end();
 
   await expectRejection(request, "closed");
+  assert.equal(closeCalls, 1);
 });
+
+for (const failure of ["close", "EPIPE"] as const) {
+  test(`closes safely and rejects pending requests when stdin emits ${failure}`, async () => {
+    const { client, stdin, stdout } = createTransport();
+    let closeCalls = 0;
+    client.onClose(() => { closeCalls += 1; });
+    const request = client.request("turn/start");
+    await nextLine(stdin);
+
+    if (failure === "EPIPE") {
+      const error = Object.assign(new Error("broken pipe detail"), { code: "EPIPE" });
+      stdin.emit("error", error);
+    } else {
+      stdin.emit("close");
+    }
+
+    await expectRejection(request, "closed");
+    assert.equal(closeCalls, 1);
+    assert.equal(stdin.listenerCount("error"), 0);
+    assert.equal(stdin.listenerCount("close"), 0);
+    assert.equal(stdout.listenerCount("data"), 0);
+    assert.equal(stdout.listenerCount("error"), 0);
+    client.close();
+    assert.equal(closeCalls, 1);
+  });
+}
 
 test("rejects malformed JSON-RPC error responses as protocol failures", async () => {
   const { client, stdin, stdout } = createTransport();

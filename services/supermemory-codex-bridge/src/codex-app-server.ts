@@ -283,6 +283,7 @@ export class CodexAppServer implements CodexRunner {
     try {
       rpc = this.rpcFactory(process.stdout, process.stdin);
       this.rpc = rpc;
+      rpc.onClose(() => this.handleRpcClose(process, rpc!));
       rpc.onNotification((method, params) => this.handleNotification(rpc!, method, params));
       rpc.onRequest((id, method, params) => this.handleServerRequest(rpc!, id, method, params));
       await rpc.request("initialize", {
@@ -473,6 +474,12 @@ export class CodexAppServer implements CodexRunner {
     state.signal = signal;
     state.abortListener = () => {
       const rpc = this.rpc;
+      const process = this.process;
+      if (!state.turnId && rpc && process) {
+        this.failTurn(state, new CodexUpstreamError("timeout"));
+        this.retireRpcProcess(process, rpc);
+        return;
+      }
       this.failTurn(state, new CodexUpstreamError("timeout"), rpc, true);
     };
     if (signal.aborted) {
@@ -553,6 +560,28 @@ export class CodexAppServer implements CodexRunner {
     this.readyProcess = undefined;
     this.startPromise = undefined;
     rpc?.close();
+    for (const state of [...this.turnsByThread.values()]) {
+      this.failTurn(state, new CodexUpstreamError("unavailable"));
+    }
+    void this.terminateAndReap(process).then((reaped) => {
+      if (reaped && this.process === process) this.process = undefined;
+    });
+  }
+
+  private handleRpcClose(process: CodexProcess, rpc: JsonRpcClient): void {
+    this.releaseRpcProcess(process, rpc, false);
+  }
+
+  private retireRpcProcess(process: CodexProcess, rpc: JsonRpcClient): void {
+    this.releaseRpcProcess(process, rpc, true);
+  }
+
+  private releaseRpcProcess(process: CodexProcess, rpc: JsonRpcClient, closeRpc: boolean): void {
+    if (this.process !== process || this.rpc !== rpc) return;
+    this.rpc = undefined;
+    this.readyProcess = undefined;
+    this.startPromise = undefined;
+    if (closeRpc) rpc.close();
     for (const state of [...this.turnsByThread.values()]) {
       this.failTurn(state, new CodexUpstreamError("unavailable"));
     }
