@@ -168,7 +168,8 @@ Codex authentication; it is not part of rollback.
 
 ## Milestone 1 acceptance evidence
 
-Milestone 1 remains open until every live check below is `PASS`. Keep this
+A dated acceptance run is complete only when every live check in that run is
+`PASS`. Earlier failed runs remain below as diagnostic history. Keep this
 record limited to statuses, artifact identity, DNS/TLS facts, restart outcome,
 and a hashed or truncated marker. Do not add keys, htpasswd hashes, tokens,
 document text, headers, or model output.
@@ -189,3 +190,25 @@ document text, headers, or model output.
 | Search retrieval | FAIL | marker `—` |
 | Restart persistence and Codex auth | FAIL | — |
 | Hermes/Hades untouched | PASS | Milestone 1 deployment scope only |
+
+### 2026-08-03
+
+| Check | Status | Non-secret evidence |
+| --- | --- | --- |
+| Local quality gates | PASS | 98/98 bridge tests; TypeScript build; server/bridge image tests; Compose topology; public-route assertions; local smoke |
+| Server release image/tag/checksum | PASS | `server-v0.0.6`; binary SHA-256 `bb1b7cee393818236873b8e2518a435e10d9195e27ea5608a3af48a733ef8ee8` |
+| Deployment container image IDs | PASS | bridge `sha256:901b3e41464dfb0b21e9b668c15b0870b2758ca2402321e5c4bcf7e65bdd908c`; server `sha256:8584d85bda6e91965c25f8ff82c854dfabd1c70d1b2e22358dd84be2e75fe3bf` |
+| DNS IPv4 | PASS | `persephone.cc` resolved to `162.19.229.31` |
+| TLS issuer/expiry | PASS | Let's Encrypt YR2; valid 2026-08-02 through 2026-10-31; hostname check passed |
+| Built-in UI | PASS | local UI marker passed; public root remained behind the Traefik BasicAuth challenge |
+| HTTPS and authentication boundary | PASS | HTTP 302 to HTTPS; unauthenticated HTTPS 401 with `Basic realm="traefik"`; Bearer API retrieval succeeded |
+| Bridge private | PASS | bridge and server published no host ports; bridge had no public Traefik route |
+| Document added and Codex extraction observed | PASS | marker SHA-256 prefix `f4ee0164e52412db`; three symbolic tool turns returned 200; workflow created one memory |
+| Search retrieval | PASS | filtered hybrid search returned one result containing the exact marker |
+| Restart persistence and Codex auth | PASS | both services healthy after restart; the same search still returned one exact result; `Logged in using ChatGPT` |
+| Hermes/Hades untouched | PASS | no Hermes or OpenCode provider participated; deployment remained scoped to Supermemory and the dedicated bridge |
+
+The auxiliary container-description structured-output call still returned a
+sanitized upstream schema error in this run. Supermemory treats that operation
+as optional; document finalization, memory creation, retrieval, restart
+persistence, and Codex authentication all completed successfully.
