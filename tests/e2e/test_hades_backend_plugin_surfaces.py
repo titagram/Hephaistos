@@ -371,6 +371,82 @@ def test_external_backend_plugin_cli_slash_and_mcp_stay_explicit(
     assert constructed == []
 
 
+@pytest.mark.live_system_guard_bypass
+def test_external_plugin_mcp_stdio_exposes_only_project_tools_when_unlinked(
+    tmp_path: Path,
+) -> None:
+    """The shipped MCP executable is lazy, project-only, and local when unlinked."""
+    root = _external_plugin_root_or_skip()
+    profile = tmp_path / "profile"
+    workspace = tmp_path / "unlinked-workspace"
+    workspace.mkdir()
+    process = subprocess.Popen(
+        [sys.executable, "-m", "hades_backend_plugin.mcp_server"],
+        cwd=workspace,
+        env={
+            **os.environ,
+            "HERMES_HOME": str(profile),
+            "PYTHONPATH": str(root),
+            "PYTHONDONTWRITEBYTECODE": "1",
+        },
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        initialized = _mcp_stdio_request(process, {
+            "jsonrpc": "2.0",
+            "id": "initialize",
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": {"name": "task13", "version": "1"},
+            },
+        })
+        assert initialized["result"]["serverInfo"]["name"] == "hades-backend"
+        assert process.stdin is not None
+        process.stdin.write(
+            json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"})
+            + "\n"
+        )
+        process.stdin.flush()
+        listed = _mcp_stdio_request(process, {
+            "jsonrpc": "2.0",
+            "id": "tools-list",
+            "method": "tools/list",
+            "params": {},
+        })
+        names = {tool["name"] for tool in listed["result"]["tools"]}
+        assert names == {
+            "project_status",
+            "project_search",
+            "graph_search",
+            "graph_traverse",
+            "source_slice_fetch",
+            "bug_evidence_search",
+            "evidence_pack_search",
+            "causal_pack_fetch",
+            "diagnosis_report_create",
+            "resolved_bug_promote",
+        }
+        assert not {name for name in names if "memory" in name or "sync" in name}
+        unlinked = _mcp_stdio_request(process, {
+            "jsonrpc": "2.0",
+            "id": "unlinked",
+            "method": "tools/call",
+            "params": {
+                "name": "project_status",
+                "arguments": {"workspace": str(workspace)},
+            },
+        })
+        payload = json.loads(unlinked["result"]["content"][0]["text"])
+        assert payload["network_attempted"] is False
+    finally:
+        _terminate_process(process)
+
+
 def test_external_plugin_real_pairing_service_and_profile_routes_are_scoped(
     tmp_path: Path,
 ) -> None:
@@ -717,6 +793,35 @@ def _wait_for_owned_secret_request(server: ModuleType, session_id: str) -> str:
             return requests[0]
         time.sleep(0.01)
     pytest.fail(f"secret.request was not emitted for {session_id}")
+
+
+def _mcp_stdio_request(
+    process: subprocess.Popen[str], message: dict[str, Any]
+) -> dict[str, Any]:
+    assert process.stdin is not None
+    assert process.stdout is not None
+    process.stdin.write(json.dumps(message) + "\n")
+    process.stdin.flush()
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        ready, _, _ = select.select([process.stdout], [], [], 0.1)
+        if ready:
+            response = json.loads(process.stdout.readline())
+            if response.get("id") == message["id"]:
+                return response
+        if process.poll() is not None:
+            break
+    stderr = process.stderr.read() if process.stderr is not None else ""
+    pytest.fail(f"MCP stdio request did not return: {message['id']}; stderr: {stderr}")
+
+
+def _terminate_process(process: subprocess.Popen[str]) -> tuple[str, str]:
+    process.terminate()
+    try:
+        return process.communicate(timeout=10)
+    except subprocess.TimeoutExpired:  # pragma: no cover - failure cleanup
+        process.kill()
+        return process.communicate(timeout=10)
 
 
 def _wait_for_spawned_serve_port(
