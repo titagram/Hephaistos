@@ -88,11 +88,11 @@ Successful privacy operations are audited backend-side with counts and scope
 metadata only. Audit rows are safe to reference by id during escalation; they
 must not be used as a source of raw evidence content.
 
-If the backend is configured and the user explicitly agrees, ask them to submit
-the compact backend report:
+Core Doctor is Backend-independent. If the optional plugin is enabled, collect
+its local, workspace-scoped status instead:
 
 ```bash
-hades doctor --report-backend
+hades backend status
 ```
 
 Do not ask users to send:
@@ -108,9 +108,9 @@ Do not ask users to send:
 
 | Symptom | Command | Expected evidence | Recovery | Escalate when |
 | --- | --- | --- | --- | --- |
-| Backend unreachable | `hades backend support-report --json`; `hades doctor`; `hades logs --level WARNING --session latest` | `degraded=true`, sync action, `sync.error` or `sync.client_error` warning | Confirm network/DNS/TLS/backend URL, then rerun `hades backend sync` | Health fails for multiple users or backend dashboard also cannot reach `/api/hades/v1/health` |
-| Token expired or revoked | `hades doctor`; `hades backend status --json` | Missing derived-credential warning or an explicit auth error with token redacted | Create/copy a new project token separately, then from the project root run `hades backend set-token --url <backend-url> --project-id <project-id>` and enter it only in the masked prompt | A freshly generated token fails or the backend cannot revoke the old token |
-| Pairing failed | `hades backend status --json`; `hades doctor` | Backend not configured, no linked workspace, or pairing failed before an explicit sync | Re-run the token-free `set-token` command from the workspace root; local Hades still works without the optional project-knowledge plugin | Repeated pairing creates duplicate backend agents or never reaches agent registration |
+| Backend unreachable | `hades backend support-report --json`; `hades logs --level WARNING --session latest` | `degraded=true`, sync action, `sync.error` or `sync.client_error` warning | Confirm network/DNS/TLS/backend URL, then rerun `hades backend sync` | Health fails for multiple users or backend dashboard also cannot reach `/api/hades/v1/health` |
+| Token expired or revoked | `hades backend status --json` | Missing derived-credential warning or an explicit auth error with token redacted | Create/copy a new project token separately, then from the project root run `hades backend set-token --url <backend-url> --project-id <project-id>` and enter it only in the masked prompt | A freshly generated token fails or the backend cannot revoke the old token |
+| Pairing failed | `hades backend status --json` | Backend not configured, no linked workspace, or pairing failed before an explicit sync | Re-run the token-free `set-token` command from the workspace root; local Hades still works without the optional project-knowledge plugin | Repeated pairing creates duplicate backend agents or never reaches agent registration |
 | Workspace already linked | `hades backend profiles --json`; `hades backend support-report --json` | Existing linked binding for the same workspace fingerprint or backend says workspace conflict | If it is the same project, keep the existing link and run `hades backend sync`; otherwise `hades project unlink <project>` and relink the intended project | Backend shows an active binding the user cannot see or unlink locally |
 | Job waiting confirmation | `hades backend jobs` | `waiting_confirmation` jobs and status action telling the user to review work | `hades backend approve-job <job_id>` for expected work, or `hades backend refuse-job <job_id> --reason "too broad"` | Job repeatedly returns to waiting after refusal or has unclear capability/payload |
 | Source-free awareness partial | `hades backend status --json`; `hades backend jobs --status waiting_confirmation` | Artifact/code graph current, source-slice jobs pending, or `missing=["bug_evidence"]` | Run `hades backend sync`; approve expected `read_source_slice` jobs; ingest typed bug evidence with `ingest-test`, `ingest-log`, `ingest-http`, or `bug-intake` before asking for a precise root cause | Artifacts stay missing after sync, source-slice jobs 404 repeatedly, or a real bug has evidence but awareness still reports `bug_evidence` missing |
@@ -125,8 +125,8 @@ Do not ask users to send:
 ## Incident Steps
 
 1. Identify whether the failure is local-only, backend-wide, or release-wide.
-2. Preserve only safe evidence: doctor output, support report JSON, warning
-   logs, and backend report ID if submitted.
+2. Preserve only safe evidence: generic Doctor output, plugin status/support
+   JSON, and warning logs.
 3. Revoke or rotate affected bootstrap/project tokens before asking the user to
    retry a setup flow.
 4. Prefer recovery commands over manual SQLite edits. Manual DB edits are a last

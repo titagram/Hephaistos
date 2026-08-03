@@ -27,7 +27,7 @@ def test_backend_command_is_plugin_owned_while_core_commands_remain_available(
     assert resolve_command("doctor").name == "doctor"
     assert resolve_command("uninstall").name == "uninstall"
     assert "link" in SUBCOMMANDS["/project"]
-    assert "cleanup" in SUBCOMMANDS["/doctor"]
+    assert "/doctor" not in SUBCOMMANDS
 
     home = tmp_path / "profile"
     plugin = home / "plugins" / "hades-backend"

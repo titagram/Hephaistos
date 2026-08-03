@@ -309,20 +309,19 @@ Local Hades backend state has explicit retention classes:
 | State | Local retention | Cleanup |
 | --- | --- | --- |
 | Waiting jobs | Kept until approved, refused, or `deadline_at` expires | `hades backend approve-job`, `hades backend refuse-job`, automatic expiry during sync |
-| Terminal jobs (`completed`, `failed`, `expired`, `cancelled`, `unlinked`) | 30 days after last update | `hades doctor cleanup --stale-jobs` |
+| Terminal jobs (`completed`, `failed`, `expired`, `cancelled`, `unlinked`) | 30 days after last update | Plugin-owned cleanup follow-up |
 | Pending memory proposals | Kept until backend accepts/refuses/conflicts them | `hades backend sync` |
 | Refused/conflicted memory proposals | Kept until local review | `hades backend ack-proposal <proposal_id>` |
-| Accepted/acknowledged memory proposals | 90 days after last update | `hades doctor cleanup --stale-proposals` |
-| Orphaned shared-memory cache | 90 days after unlink | `hades doctor cleanup --orphaned-cache` |
-| Local Persephone inbox events | 30 days after receipt | `hades doctor cleanup --stale-inbox` |
+| Accepted/acknowledged memory proposals | 90 days after last update | Plugin-owned cleanup follow-up |
+| Orphaned shared-memory cache | 90 days after unlink | Plugin-owned cleanup follow-up |
+| Local Persephone inbox events | 30 days after receipt | Plugin-owned cleanup follow-up |
 | Artifact payloads | Not retained locally after upload | Backend artifact retention policy |
 | Doctor reports | Not retained locally after explicit submit | Backend doctor-report retention policy |
 | Backend bug evidence, source slices, evidence packs, diagnosis reports | Backend workspace scoped policy | `hades backend privacy-export`, `hades backend privacy-delete`, `hades backend retention-cleanup` |
 
-Cleanup is dry-run by default. Add `--yes` to remove rows and
-`--retention-days <days>` to override the selected local retention window for a
-one-off maintenance run. `--all` includes non-expired selected candidates, but
-does not delete active jobs or unreviewed refused/conflicted proposals.
+The core `hades doctor` command does not inspect or clean Backend state. Any
+future cleanup operation must be owned by the standalone plugin and resolve an
+explicit workspace; the core does not provide a default-agent fallback.
 
 Backend privacy cleanup is also dry-run first:
 
@@ -353,8 +352,8 @@ cleanup.
 ## MVP Smoke
 
 The deterministic no-network MVP smoke composes local setup state, shared-memory
-snapshot/proposal sync, job execution, artifact upload, inbox polling, doctor
-reporting, and the TUI/backend status payload:
+snapshot/proposal sync, job execution, artifact upload, inbox polling, the
+generic core Doctor, and the TUI/backend status payload:
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider \
@@ -368,13 +367,14 @@ bootstrap command for a test project. Then run:
 hades backend status --json
 hades backend support-report --json
 hades backend sync
-hades doctor --report-backend
+hades doctor
 ```
 
-Use `support-report` for tickets; it keeps backend status, awareness, sync, and
-action fields while redacting local absolute paths and likely secrets. Do not
-paste project bootstrap tokens, derived agent tokens, raw job payloads, or local
-absolute paths into logs or support tickets.
+`hades doctor` verifies only the core installation and does not submit a
+Backend report. Use `support-report` for tickets; it keeps backend status,
+awareness, sync, and action fields while redacting local absolute paths and
+likely secrets. Do not paste project bootstrap tokens, derived agent tokens,
+raw job payloads, or local absolute paths into logs or support tickets.
 
 For release or periodic governance checks, run:
 
@@ -443,7 +443,6 @@ Useful event names:
 - `sync.error`, `sync.client_error`
 - `artifact.uploaded`, `artifact.skipped`
 - `worker.start`, `worker.claimed`, `worker.completed`, `worker.failed`
-- `doctor_report.submitted`, `doctor_report.failed`
 
 The records include IDs, counts, status summaries, artifact schema,
 truncation/redaction counts, and sanitized error text. They must not include

@@ -8,40 +8,20 @@ Run:
 hades doctor
 ```
 
-The Hades Backend section checks registration, agent token presence, linked
-workspaces, backend health, capabilities, job counts, proposal counts, and last
-sync state.
+Core Doctor is Backend-independent: it checks the Hades installation,
+configuration, dependencies, tools, and services. It deliberately does not
+import the optional Backend plugin, read Backend state, construct a Backend
+client, or contact Laravel.
 
-Doctor does not send diagnostics to Laravel by default. To submit a compact
-backend report explicitly, run:
-
-```bash
-hades doctor --report-backend
-```
-
-The report contains aggregate Hades state such as binding counts, job/proposal
-counts, inbox counts, and last sync status. It does not include backend tokens,
-job payload contents, or local absolute paths.
-
-## Cleanup
-
-Maintenance commands live under the doctor namespace. MVP cleanup includes
-local-only cache/job/proposal/inbox cleanup. Cleanup is dry-run unless `--yes`
-is present:
+When the standalone project-knowledge plugin is installed and enabled, use its
+explicit workspace-scoped status command instead:
 
 ```bash
-hades doctor cleanup --orphaned-cache
-hades doctor cleanup --stale-jobs
-hades doctor cleanup --stale-proposals
-hades doctor cleanup --stale-inbox
-hades doctor cleanup --orphaned-cache --all --yes
+hades backend status
 ```
 
-Cleanup does not delete backend memory. It only removes local stale or orphaned
-state after confirmation. Refused or conflicted memory proposals remain visible
-until they are acknowledged with `hades backend ack-proposal <proposal_id>`;
-cleanup removes accepted or already-acknowledged proposal rows after the local
-retention window.
+Backend-specific reporting and cleanup are plugin-owned follow-ups. They are
+not part of the core `hades doctor` interface.
 
 ## Degraded States
 
@@ -130,5 +110,5 @@ hades backend status --json
 ```
 
 Expected local evidence: `inbox_counts.unread` changes after sync. If local
-events are old and no longer useful, use `hades doctor cleanup --stale-inbox`
-first as a dry run, then add `--yes` to remove stale local rows.
+events are old and no longer useful, preserve them until the optional plugin
+provides an explicit workspace-scoped cleanup operation.

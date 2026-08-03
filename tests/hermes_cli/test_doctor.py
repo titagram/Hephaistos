@@ -5,6 +5,7 @@ import sys
 import types
 import io
 import contextlib
+import builtins
 from argparse import Namespace
 from types import SimpleNamespace
 
@@ -217,6 +218,134 @@ def test_run_doctor_sets_interactive_env_for_tool_checks(monkeypatch, tmp_path):
         doctor_mod.run_doctor(Namespace(fix=False))
 
     assert seen["interactive"] == "1"
+
+
+def _run_doctor_without_external_probes(monkeypatch, tmp_path, plugin_state):
+    hermes_home = tmp_path / ".hermes"
+    project_root = tmp_path / "project"
+    hermes_home.mkdir(parents=True, exist_ok=True)
+    project_root.mkdir(parents=True, exist_ok=True)
+
+    enabled = plugin_state == "enabled"
+    (hermes_home / "config.yaml").write_text(
+        "plugins:\n  enabled: [hades-backend]\n"
+        if enabled
+        else "plugins:\n  enabled: []\n",
+        encoding="utf-8",
+    )
+    if plugin_state != "absent":
+        plugin_dir = hermes_home / "plugins" / "hades-backend"
+        plugin_dir.mkdir(parents=True)
+        (plugin_dir / "plugin.yaml").write_text(
+            "name: hades-backend\nkind: standalone\nversion: 0.0.0-test\n",
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(doctor_mod, "HERMES_HOME", hermes_home)
+    monkeypatch.setattr(doctor_mod, "PROJECT_ROOT", project_root)
+    monkeypatch.setattr(doctor_mod, "_DHH", str(hermes_home))
+    monkeypatch.setitem(
+        sys.modules,
+        "model_tools",
+        types.SimpleNamespace(
+            check_tool_availability=lambda *args, **kwargs: ([], []),
+            TOOLSET_REQUIREMENTS={},
+        ),
+    )
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        doctor_mod.run_doctor(Namespace(fix=False, ack=None))
+
+
+@pytest.mark.parametrize("plugin_state", ["absent", "disabled", "enabled"])
+def test_run_doctor_never_imports_backend_modules(monkeypatch, tmp_path, plugin_state):
+    """Core doctor must stay independent of the optional Backend plugin."""
+    attempted_imports = []
+    real_import = builtins.__import__
+
+    def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
+        backend_import = name.startswith("hermes_cli.hades_backend") or (
+            name == "hermes_cli"
+            and any(str(item).startswith("hades_backend") for item in fromlist)
+        )
+        if backend_import:
+            attempted_imports.append((name, tuple(fromlist)))
+            raise AssertionError(f"core doctor imported Backend module: {name}")
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+
+    _run_doctor_without_external_probes(monkeypatch, tmp_path, plugin_state)
+
+    assert attempted_imports == []
+
+
+@pytest.mark.parametrize("plugin_state", ["absent", "disabled", "enabled"])
+def test_run_doctor_never_reads_backend_state_or_constructs_client(
+    monkeypatch, tmp_path, plugin_state
+):
+    """Legacy state/client sentinels must remain untouched in every plugin state."""
+    import hermes_cli
+
+    state_reads = []
+    client_calls = []
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    agent = SimpleNamespace(
+        project_id="legacy-default-project",
+        agent_id="legacy-default-agent",
+        token_env_key="HADES_BACKEND_AGENT_TOKEN_DOCTOR_SENTINEL",
+    )
+
+    def record(name, value):
+        def call(*_args, **_kwargs):
+            state_reads.append(name)
+            return value
+
+        return call
+
+    fake_db = types.SimpleNamespace(
+        connect_closing=lambda: FakeConnection(),
+        get_default_agent=record("default_agent", agent),
+        list_workspace_bindings=record("bindings", []),
+        count_jobs_by_status=record("jobs", {}),
+        count_memory_proposals_by_status=record("proposals", {}),
+        count_inbox_events=record("inbox", {"total": 0, "unread": 0}),
+        get_sync_state=record("sync_state", None),
+    )
+
+    class ExplodingClient:
+        def health(self):
+            raise AssertionError("core doctor called Backend health")
+
+        def capabilities(self):
+            raise AssertionError("core doctor called Backend capabilities")
+
+    def construct_client():
+        client_calls.append("constructed")
+        return ExplodingClient()
+
+    monkeypatch.setenv(
+        "HADES_BACKEND_AGENT_TOKEN_DOCTOR_SENTINEL", "derived-test-token"
+    )
+    monkeypatch.setattr(hermes_cli, "hades_backend_db", fake_db, raising=False)
+    monkeypatch.setitem(sys.modules, "hermes_cli.hades_backend_db", fake_db)
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_cli.hades_backend_runtime",
+        types.SimpleNamespace(client_from_config=construct_client),
+    )
+
+    _run_doctor_without_external_probes(monkeypatch, tmp_path, plugin_state)
+
+    assert state_reads == []
+    assert client_calls == []
 
 
 def test_check_gateway_service_linger_warns_when_disabled(monkeypatch, tmp_path, capsys):

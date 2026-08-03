@@ -31,7 +31,11 @@ def test_hades_mvp_user_docs_describe_the_optional_project_knowledge_contract():
             "never runs automatic sync",
             "masked token prompt",
         ],
-        "doctor-troubleshooting.md": ["hades doctor", "cleanup", "degraded"],
+        "doctor-troubleshooting.md": [
+            "hades doctor",
+            "backend-independent",
+            "degraded",
+        ],
         "support-runbook.md": [
             "Safe Support Bundle",
             "Pairing failed",
@@ -337,7 +341,7 @@ def test_hades_support_runbook_covers_launch_failures_without_secret_collection(
         "docker permissions",
         "windows path issue",
         "desktop/backend version mismatch",
-        "hades doctor --report-backend",
+        "core doctor is backend-independent",
         "no-codebase-diagnosis.md",
         "do not ask users to send",
     ]

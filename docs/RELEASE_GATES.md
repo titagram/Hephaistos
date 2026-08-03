@@ -69,11 +69,12 @@ bootstrap credentials:
 export HERMES_HOME="$(mktemp -d)"
 hades backend status --json
 hades backend sync
-hades doctor --report-backend
+hades doctor
 ```
 
-Do not preserve bootstrap tokens, derived agent tokens, raw job payloads, or
-absolute local paths in release logs.
+`hades doctor` is a core-only check and must not contact Backend. Do not
+preserve bootstrap tokens, derived agent tokens, raw job payloads, or absolute
+local paths in release logs.
 
 ## Release Steps
 

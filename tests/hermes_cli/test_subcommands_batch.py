@@ -88,6 +88,16 @@ def test_single_handler_builders(name, builder, kw, argv):
     assert ns.func is handler
 
 
+@pytest.mark.parametrize("legacy_args", [["--report-backend"], ["cleanup"]])
+def test_doctor_parser_rejects_backend_specific_legacy_surfaces(legacy_args):
+    parser = argparse.ArgumentParser(prog="hermes")
+    sub = parser.add_subparsers(dest="command")
+    build_doctor_parser(sub, cmd_doctor=_h("doctor"))
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["doctor", *legacy_args])
+
+
 def test_dashboard_builder_two_handlers():
     parser = argparse.ArgumentParser(prog="hermes")
     sub = parser.add_subparsers(dest="command")
