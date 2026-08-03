@@ -323,6 +323,33 @@ class TestDoctorMemoryProviderSection:
         assert "Memory Provider" in out
         assert "Built-in memory active" not in out
 
+    def test_retired_provider_is_reported_without_importing_user_plugin(self, monkeypatch, tmp_path):
+        """Doctor must use the effective provider before generic plugin loading."""
+        marker = tmp_path / "retired-provider-imported"
+        plugin_dir = tmp_path / "plugins" / "hades_backend"
+        plugin_dir.mkdir(parents=True)
+        plugin_dir.joinpath("__init__.py").write_text(
+            "from pathlib import Path\n"
+            "from agent.memory_provider import MemoryProvider\n"
+            f"Path({str(marker)!r}).write_text('imported')\n"
+            "class RetiredProvider(MemoryProvider):\n"
+            "    @property\n"
+            "    def name(self): return 'hades_backend'\n"
+            "    def is_available(self): return True\n"
+            "    def initialize(self, **kwargs): pass\n"
+            "    def get_tool_schemas(self): return []\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            "plugins.memory._get_user_plugins_dir", lambda: tmp_path / "plugins"
+        )
+
+        out = self._run_doctor_and_capture(monkeypatch, tmp_path, provider="hades_backend")
+
+        assert "retired memory selection is inactive" in out
+        assert "hades memory setup" in out
+        assert not marker.exists()
+
 
 def test_run_doctor_termux_treats_docker_and_browser_warnings_as_expected(monkeypatch, tmp_path):
     helper = TestDoctorMemoryProviderSection()

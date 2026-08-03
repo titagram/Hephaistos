@@ -56,6 +56,90 @@ def test_valid_memory_provider_resolution_passes_through_unchanged():
     assert resolution.message == ""
 
 
+def _make_retired_user_memory_plugin(hermes_home, marker):
+    """Install a legacy-named user plugin whose imports are observable."""
+    plugin_dir = hermes_home / "plugins" / "hades_backend"
+    plugin_dir.mkdir(parents=True)
+    marker_literal = repr(str(marker))
+    (plugin_dir / "__init__.py").write_text(
+        "from pathlib import Path\n"
+        "from agent.memory_provider import MemoryProvider\n"
+        f"Path({marker_literal}).write_text('provider imported')\n"
+        "class RetiredProvider(MemoryProvider):\n"
+        "    @property\n"
+        "    def name(self): return 'hades_backend'\n"
+        "    def is_available(self): return True\n"
+        "    def initialize(self, **kwargs): pass\n"
+        "    def get_tool_schemas(self): return []\n"
+        "    def backup_paths(self): return []\n"
+        "def register(ctx): ctx.register_memory_provider(RetiredProvider())\n",
+        encoding="utf-8",
+    )
+    (plugin_dir / "cli.py").write_text(
+        "from pathlib import Path\n"
+        f"Path({marker_literal}).write_text('cli imported')\n"
+        "def register_cli(subparser): pass\n",
+        encoding="utf-8",
+    )
+    (plugin_dir / "plugin.yaml").write_text(
+        "name: hades_backend\ndescription: legacy test provider\n", encoding="utf-8"
+    )
+
+
+def _write_retired_config(hermes_home):
+    original = "memory:\n  provider: hades_backend  # retain\n  unknown: keep\n"
+    config_path = hermes_home / "config.yaml"
+    config_path.write_text(original, encoding="utf-8")
+    return config_path, original
+
+
+def test_retired_user_plugin_is_never_imported_by_memory_catalog_or_status(tmp_path, monkeypatch, capsys):
+    """Setup/status must filter a retired user plugin before its module executes."""
+    hermes_home = tmp_path / "hermes"
+    hermes_home.mkdir()
+    config_path, original = _write_retired_config(hermes_home)
+    marker = tmp_path / "retired-imported"
+    _make_retired_user_memory_plugin(hermes_home, marker)
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+    providers = memory_setup._get_available_providers()
+    memory_setup.cmd_status(SimpleNamespace())
+
+    assert "hades_backend" not in [name for name, _description, _provider in providers]
+    assert "• hades_backend" not in capsys.readouterr().out
+    assert not marker.exists()
+    assert config_path.read_text(encoding="utf-8") == original
+
+
+def test_retired_user_plugin_is_never_imported_by_parser_or_backup(tmp_path, monkeypatch):
+    """Startup CLI discovery and backup must consume the effective provider only."""
+    hermes_home = tmp_path / "hermes"
+    hermes_home.mkdir()
+    config_path, original = _write_retired_config(hermes_home)
+    marker = tmp_path / "retired-imported"
+    _make_retired_user_memory_plugin(hermes_home, marker)
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+    from hermes_cli.backup import _collect_memory_provider_external_paths
+    from plugins.memory import discover_plugin_cli_commands
+
+    assert discover_plugin_cli_commands() == []
+    assert _collect_memory_provider_external_paths() == []
+    assert not marker.exists()
+    assert config_path.read_text(encoding="utf-8") == original
+
+
+def test_active_provider_lookup_keeps_supported_provider_effective(monkeypatch):
+    """The generic active-provider boundary must continue to return supported names."""
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config", lambda: {"memory": {"provider": "openviking"}}
+    )
+
+    from plugins.memory import _get_active_memory_provider
+
+    assert _get_active_memory_provider() == "openviking"
+
+
 def test_retired_selection_is_inert_through_agent_and_status_without_rewriting_config(
     tmp_path, monkeypatch, capsys
 ):

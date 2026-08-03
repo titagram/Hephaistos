@@ -9551,12 +9551,10 @@ class MemoryReset(BaseModel):
 @app.get("/api/memory")
 async def get_memory_status():
     from plugins.memory import discover_memory_providers
+    from hermes_cli.retired_memory_providers import resolve_effective_memory_provider
 
     cfg = load_config()
-    active = ""
-    mem = cfg.get("memory")
-    if isinstance(mem, dict):
-        active = str(mem.get("provider") or "")
+    resolution = resolve_effective_memory_provider(cfg)
 
     providers = []
     try:
@@ -9580,7 +9578,11 @@ async def get_memory_status():
         files[key] = path.stat().st_size if path.exists() else 0
 
     return {
-        "active": active,
+        "active": resolution.effective,
+        "configured": resolution.configured,
+        "effective": resolution.effective,
+        "retired": resolution.retired,
+        "message": resolution.message,
         "providers": providers,
         "builtin_files": files,
     }

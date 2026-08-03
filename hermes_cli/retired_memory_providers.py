@@ -19,6 +19,11 @@ class MemoryProviderResolution:
     message: str
 
 
+def is_retired_memory_provider(name: object) -> bool:
+    """Return whether a provider identity is retired without loading it."""
+    return isinstance(name, str) and name.strip() in RETIRED_MEMORY_PROVIDERS
+
+
 def resolve_effective_memory_provider(config: Mapping[str, Any]) -> MemoryProviderResolution:
     """Return the provider safe to activate while preserving the configured value."""
     memory = config.get("memory", {}) if isinstance(config, Mapping) else {}

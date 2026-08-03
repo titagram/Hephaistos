@@ -2455,7 +2455,7 @@ def run_doctor(args):
         check_warn("No GITHUB_TOKEN", f"(60 req/hr rate limit — set in {_DHH}/.env for better rates)")
 
     _section("Memory Provider")
-    _active_memory_provider = ""
+    _memory_provider_resolution = None
     try:
         import yaml as _yaml
         _mem_cfg_path = HERMES_HOME / "config.yaml"
@@ -2467,11 +2467,18 @@ def run_doctor(args):
                 _raw_cfg = managed_scope.apply_managed_overlay(_raw_cfg)
             except Exception:
                 pass
-            _active_memory_provider = (_raw_cfg.get("memory") or {}).get("provider", "")
+            from hermes_cli.retired_memory_providers import resolve_effective_memory_provider
+            _memory_provider_resolution = resolve_effective_memory_provider(_raw_cfg)
     except Exception:
         pass
 
-    if not _active_memory_provider:
+    _active_memory_provider = (
+        _memory_provider_resolution.effective if _memory_provider_resolution else ""
+    )
+
+    if _memory_provider_resolution and _memory_provider_resolution.retired:
+        check_info(_memory_provider_resolution.message)
+    elif not _active_memory_provider:
         check_ok("Built-in memory active", "(no external provider configured — this is fine)")
     elif _active_memory_provider == "honcho":
         try:

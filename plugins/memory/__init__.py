@@ -28,7 +28,10 @@ import logging
 import sys
 from pathlib import Path
 from typing import List, Optional, Tuple
-from hermes_cli.config import cfg_get
+from hermes_cli.retired_memory_providers import (
+    is_retired_memory_provider,
+    resolve_effective_memory_provider,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +104,8 @@ def _iter_provider_dirs() -> List[Tuple[str, Path]]:
         for child in sorted(_MEMORY_PLUGINS_DIR.iterdir()):
             if not child.is_dir() or child.name.startswith(("_", ".")):
                 continue
+            if is_retired_memory_provider(child.name):
+                continue
             if not (child / "__init__.py").exists():
                 continue
             seen.add(child.name)
@@ -111,6 +116,8 @@ def _iter_provider_dirs() -> List[Tuple[str, Path]]:
     if user_dir:
         for child in sorted(user_dir.iterdir()):
             if not child.is_dir() or child.name.startswith(("_", ".")):
+                continue
+            if is_retired_memory_provider(child.name):
                 continue
             if child.name in seen:
                 continue  # bundled takes precedence
@@ -126,6 +133,9 @@ def find_provider_dir(name: str) -> Optional[Path]:
 
     Checks bundled first, then user-installed.
     """
+    if is_retired_memory_provider(name):
+        return None
+
     # Bundled
     bundled = _MEMORY_PLUGINS_DIR / name
     if bundled.is_dir() and (bundled / "__init__.py").exists():
@@ -346,7 +356,7 @@ def _get_active_memory_provider() -> Optional[str]:
     try:
         from hermes_cli.config import load_config
         config = load_config()
-        return cfg_get(config, "memory", "provider") or None
+        return resolve_effective_memory_provider(config).effective or None
     except Exception:
         return None
 
