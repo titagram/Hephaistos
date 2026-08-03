@@ -35,6 +35,7 @@ def main_runtime_from_agent(agent: Any) -> dict[str, Any]:
         "api_mode": getattr(agent, "api_mode", None),
     }
 
+
 _TITLE_PROMPT = (
     "Generate a short, descriptive title (3-7 words) for a conversation that starts with the "
     "following exchange. The title should capture the main topic or intent. "
@@ -87,11 +88,18 @@ def generate_title(
     assistant_snippet = assistant_response[:500] if assistant_response else ""
 
     language = _title_language()
-    prompt = _TITLE_PROMPT_PINNED_LANGUAGE.format(language=language) if language else _TITLE_PROMPT
+    prompt = (
+        _TITLE_PROMPT_PINNED_LANGUAGE.format(language=language)
+        if language
+        else _TITLE_PROMPT
+    )
 
     messages = [
         {"role": "system", "content": prompt},
-        {"role": "user", "content": f"User: {user_snippet}\n\nAssistant: {assistant_snippet}"},
+        {
+            "role": "user",
+            "content": f"User: {user_snippet}\n\nAssistant: {assistant_snippet}",
+        },
     ]
 
     try:
@@ -105,7 +113,7 @@ def generate_title(
         )
         title = (response.choices[0].message.content or "").strip()
         # Clean up: remove quotes, trailing punctuation, prefixes like "Title: "
-        title = title.strip('"\'')
+        title = title.strip("\"'")
         if title.lower().startswith("title:"):
             title = title[6:].strip()
         # Enforce reasonable length
@@ -154,7 +162,10 @@ def auto_title_session(
         return
 
     title = generate_title(
-        user_message, assistant_response, failure_callback=failure_callback, main_runtime=main_runtime
+        user_message,
+        assistant_response,
+        failure_callback=failure_callback,
+        main_runtime=main_runtime,
     )
     if not title:
         return
@@ -194,7 +205,9 @@ def maybe_auto_title(
     # conversation_history includes the exchange that just happened,
     # so for a first exchange we expect exactly 1 user message
     # (or 2 counting system). Be generous: generate on first 2 exchanges.
-    user_msg_count = sum(1 for m in (conversation_history or []) if m.get("role") == "user")
+    user_msg_count = sum(
+        1 for m in (conversation_history or []) if m.get("role") == "user"
+    )
     if user_msg_count > 2:
         return
 
