@@ -31,7 +31,7 @@ def test_normal_turn_never_runs_backend_sync(monkeypatch):
         "finalize_turn",
         lambda *args, **kwargs: {"final_response": "ok"},
     )
-    monkeypatch.setattr(hades_sync, "maybe_run_backend_sync_for_workspace", fail_backend_sync)
+    monkeypatch.setattr(hades_sync, "run_backend_sync", fail_backend_sync)
 
     agent = SimpleNamespace(
         api_mode="chat_completions",

@@ -421,8 +421,10 @@ def test_loaded_status_prefers_nested_workspace_binding_over_default_agent(
     subproject.mkdir(parents=True)
 
     from hermes_cli import hades_backend_db as db
-    from hermes_cli.hades_backend_status import load_backend_status_payload
-    from hermes_cli.hades_backend_sync import background_sync_state_key
+    from hermes_cli.hades_backend_status import (
+        background_sync_state_key,
+        load_backend_status_payload,
+    )
 
     with db.connect_closing() as conn:
         db.save_agent(
@@ -477,8 +479,10 @@ def test_loaded_status_does_not_fallback_to_failed_aggregate_for_current_binding
     workspace.mkdir()
 
     from hermes_cli import hades_backend_db as db
-    from hermes_cli.hades_backend_status import load_backend_status_payload
-    from hermes_cli.hades_backend_sync import BACKGROUND_SYNC_STATE_KEY
+    from hermes_cli.hades_backend_status import (
+        BACKGROUND_SYNC_STATE_KEY,
+        load_backend_status_payload,
+    )
 
     with db.connect_closing() as conn:
         db.save_agent(

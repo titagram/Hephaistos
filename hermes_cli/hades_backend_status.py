@@ -12,13 +12,10 @@ from hermes_cli import hades_backend_db as db
 from hermes_cli import hades_backend_runtime as runtime
 from hermes_cli.config import load_config
 from hermes_cli.hades_backend_client import redact_secret
-from hermes_cli.hades_backend_sync import (
-    BACKGROUND_SYNC_STATE_KEY,
-    background_sync_state_key,
-)
 
 ABSOLUTE_PATH_RE = re.compile(r"(?<![A-Za-z0-9:/])(?:/[^\s,;:]+)+")
 WINDOWS_PATH_RE = re.compile(r"\b[A-Za-z]:\\[^\s,;:]+")
+BACKGROUND_SYNC_STATE_KEY = "background_sync"
 QUALITY_REPORT_STALE_SECONDS = 7 * 24 * 60 * 60
 QUALITY_REPORT_HISTORY_KEY = "quality_report_history"
 QUALITY_REPORT_HISTORY_LIMIT = 10
@@ -29,6 +26,11 @@ PERSEPHONE_STATES = frozenset(
         "draining", "stopped",
     }
 )
+
+
+def background_sync_state_key(workspace_binding_id: str) -> str:
+    """Return the legacy status key for a previously recorded background run."""
+    return f"{BACKGROUND_SYNC_STATE_KEY}:{workspace_binding_id}"
 
 
 def load_backend_status_payload(

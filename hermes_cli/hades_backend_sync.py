@@ -9,12 +9,10 @@ import hashlib
 import logging
 from pathlib import Path
 import re
-import threading
 import time
 from typing import Callable
 
 from hermes_cli import hades_backend_db as db
-from hermes_cli.config import cfg_get, load_config_readonly
 from hermes_cli.hades_artifact_hash import (
     artifact_payload_hash as _artifact_payload_hash,
     canonical_artifact_bytes,
@@ -29,80 +27,12 @@ class SyncResult:
     exit_code: int
 
 
-@dataclass(frozen=True)
-class BackgroundSyncDecision:
-    status: str
-    reason: str
-    summary: dict[str, object] | None = None
-
-
-BACKGROUND_SYNC_STATE_KEY = "background_sync"
 ARTIFACT_UPLOAD_CACHE_PREFIX = "artifact_upload_cache"
 ARTIFACT_COMPRESSION_MIN_BYTES = 64 * 1024
 GRAPH_V2_UPLOAD_CACHE_PREFIX = "graph_v2_upload_cache"
 GRAPH_V2_ACTIVE_CACHE_PREFIX = "graph_v2_active"
 GRAPH_IMPORT_POLL_TIMEOUT_SECONDS = 180.0
 GRAPH_IMPORT_POLL_INTERVAL_SECONDS = 2.0
-_BACKGROUND_SYNC_LOCK = threading.Lock()
-_BACKGROUND_SYNC_RUNNING = False
-
-
-def background_sync_state_key(workspace_binding_id: str) -> str:
-    """Return the isolated background-sync state key for one binding."""
-    return f"{BACKGROUND_SYNC_STATE_KEY}:{workspace_binding_id}"
-
-
-def _background_sync_state_key(
-    workspace_binding_ids: list[str] | tuple[str, ...] | None,
-) -> str:
-    selected = [
-        str(binding_id).strip()
-        for binding_id in (workspace_binding_ids or [])
-        if str(binding_id or "").strip()
-    ]
-    return (
-        background_sync_state_key(selected[0])
-        if len(selected) == 1
-        else BACKGROUND_SYNC_STATE_KEY
-    )
-
-
-def _memory_sync_enabled(include_memory: bool | None) -> bool:
-    """Keep backend memory calls opt-in unless its provider owns memory."""
-    if include_memory is not None:
-        return bool(include_memory)
-    config = load_config_readonly()
-    return cfg_get(config, "memory", "provider", default="") == "hades_backend"
-
-
-def _logbook_summary_for_sync(
-    conn,
-    *,
-    agent: db.BackendAgent,
-    bindings: list[db.WorkspaceBinding],
-    project_id: str | None,
-) -> dict[str, int]:
-    """Count every durable logbook obligation owned by the selected actors.
-
-    Workspace bindings are delivery routes, not the identity of the durable
-    obligation.  Keep entries visible when a route is unlinked or replaced;
-    an explicit re-emission can safely reroute them later.
-    """
-
-    actor_scopes = {(binding.project_id, binding.agent_id) for binding in bindings}
-    if project_id is None or project_id == agent.project_id:
-        actor_scopes.add((agent.project_id, agent.agent_id))
-
-    legacy_binding_scopes = {
-        (binding.project_id, binding.backend_workspace_binding_id)
-        for binding in db.list_workspace_bindings(conn)
-        if (binding.project_id, binding.agent_id) in actor_scopes
-    }
-    return db.summarize_logbook_outbox_entries(
-        conn,
-        actor_scopes=actor_scopes,
-        legacy_binding_scopes=legacy_binding_scopes,
-    )
 
 
 def _credential_fingerprint(secret: str) -> str | None:
@@ -226,32 +156,15 @@ def run_backend_sync(
     quiet: bool = False,
     project_id: str | None = None,
     workspace_binding_ids: list[str] | tuple[str, ...] | None = None,
-    include_memory: bool | None = None,
 ) -> SyncResult:
+    """Explicitly synchronize project artifacts for linked workspaces."""
+
     from hermes_cli import hades_backend_runtime as runtime
-    from hermes_cli.hades_backend_cmd import (
-        AUTO_JOB_CAPABILITIES,
-        SKIP_JOB_STATUSES,
-        _detect_default_capabilities,
-        _job_capability,
-        _job_id,
-        _job_payload,
-        _requires_confirmation,
-        _response_jobs,
-        _sync_memory,
-    )
-    from hermes_cli.hades_backend_actions import status_payload as _status_payload
     from hermes_cli.hades_backend_client import redact_secret
     from hermes_cli.hades_backend_jobs import execute_job
-    from hermes_cli.hades_information_worker import execute_stored_information_request
-    from hermes_cli.hades_logbook_actions import flush_due_logbook_entries
-    from hermes_cli.hades_persephone_messages import BACKEND_CAPABILITY
-    from hermes_cli.hades_persephone_receiver import PersephoneReceiver
-    from hermes_cli.hades_persephone_store import get_cursor
 
+    sync_time = now
     started_monotonic = time.monotonic()
-    memory_enabled = _memory_sync_enabled(include_memory)
-    background_state_key = _background_sync_state_key(workspace_binding_ids)
     with db.connect_closing() as conn:
         agent = db.get_default_agent(conn)
         bindings = db.list_workspace_bindings(conn, status="linked") if agent else []
@@ -265,27 +178,6 @@ def run_backend_sync(
             for binding in bindings
             if (loaded := db.get_agent(conn, binding.agent_id)) is not None
         }
-        expired_jobs = db.expire_waiting_jobs(
-            conn,
-            now=now,
-            project_id=project_id,
-            workspace_binding_ids=[binding.backend_workspace_binding_id for binding in bindings],
-        ) if agent and bindings else []
-        initial_logbook_summary = (
-            _logbook_summary_for_sync(
-                conn,
-                agent=agent,
-                bindings=bindings,
-                project_id=project_id,
-            )
-            if agent is not None
-            else {
-                "logbook_pending": 0,
-                "logbook_sent": 0,
-                "logbook_retry": 0,
-                "logbook_dead_letter": 0,
-            }
-        )
 
     if agent is None:
         logger.info(
@@ -293,6 +185,19 @@ def run_backend_sync(
             extra={"hades_event": "sync.skipped", "hades_reason": "not_configured"},
         )
         return SyncResult({"error": 1}, 1)
+
+    empty_summary: dict[str, object] = {
+        "artifacts_uploaded": 0,
+        "artifacts_skipped": 0,
+        "artifact_errors": 0,
+        "source_slice_candidates": 0,
+        "auth_failed_routes": 0,
+        "auth_quarantined_routes": 0,
+        "stale_auth_routes": 0,
+        "duration_ms": max(
+            0, int((time.monotonic() - started_monotonic) * 1000)
+        ),
+    }
     if not bindings:
         logger.info(
             "hades_backend.sync.skipped",
@@ -301,26 +206,11 @@ def run_backend_sync(
                 "hades_reason": "no_linked_workspace",
                 "hades_agent_id": agent.agent_id,
                 "hades_project_id": agent.project_id,
-                "hades_expired_jobs": len(expired_jobs),
             },
         )
-        summary = {
-            "pulled": 0,
-            "completed": 0,
-            "waiting": 0,
-            "failed": 0,
-            "skipped": 0,
-            "expired": len(expired_jobs),
-            "memory_enabled": memory_enabled,
-            **initial_logbook_summary,
-            "duration_ms": max(0, int((time.monotonic() - started_monotonic) * 1000)),
-        }
-        unresolved = bool(
-            summary["logbook_pending"] or summary["logbook_dead_letter"]
-        )
         with db.connect_closing() as conn:
-            db.record_sync_state(conn, "last_sync_summary", summary)
-        return SyncResult(summary, 1 if unresolved else 0)
+            db.record_sync_state(conn, "last_sync_summary", empty_summary)
+        return SyncResult(empty_summary, 0)
 
     logger.info(
         "hades_backend.sync.start",
@@ -329,19 +219,12 @@ def run_backend_sync(
             "hades_agent_id": agent.agent_id,
             "hades_project_id": agent.project_id,
             "hades_binding_count": len(bindings),
-            "hades_expired_jobs": len(expired_jobs),
         },
     )
     clients: dict[str, object] = {}
-    queue_capabilities: dict[str, bool] = {}
-    polled_agent_queues: set[tuple[str, str]] = set()
+    created_clients: list[object] = []
     route_auth: dict[tuple[str, str], dict[str, bool | int]] = {}
     used_credential_fingerprints: dict[str, str | None] = {}
-    receiver = PersephoneReceiver(
-        information_executor=execute_stored_information_request,
-        now=(lambda: int(time.time()) if now is None else int(now)),
-    )
-    receiver.refresh_bindings(bindings, agents=agents)
 
     def client_for_agent(sync_agent: db.BackendAgent) -> object:
         if sync_agent.agent_id not in used_credential_fingerprints:
@@ -349,448 +232,185 @@ def run_backend_sync(
                 _credential_fingerprint(runtime.agent_token(sync_agent))
             )
         if client_factory is not None:
-            return client_factory()
+            created = client_factory()
+            created_clients.append(created)
+            return created
         existing = clients.get(sync_agent.agent_id)
         if existing is not None:
             return existing
-        if sync_agent.agent_id == agent.agent_id and sync_agent.project_id == agent.project_id:
+        if (
+            sync_agent.agent_id == agent.agent_id
+            and sync_agent.project_id == agent.project_id
+        ):
             created = runtime.client_from_config()
         else:
             created = runtime.client_for_agent(sync_agent)
         clients[sync_agent.agent_id] = created
+        created_clients.append(created)
         return created
 
-    pulled = completed = waiting = failed = skipped = 0
-    memory_snapshots = proposals_synced = proposal_errors = 0
-    artifacts_uploaded = artifact_errors = artifacts_skipped = source_slices_uploaded = source_slice_errors = inbox_events = 0
-    source_slice_candidates = source_slice_jobs_waiting = 0
+    artifacts_uploaded = 0
+    artifact_errors = 0
+    artifacts_skipped = 0
+    source_slice_candidates = 0
     sync_errors = 0
-    expired = 0
-    logbook_sent = logbook_retry = logbook_dead_letter = 0
-    logbook_budget = 20
 
-    for job in expired_jobs:
-        with db.connect_closing() as conn:
-            binding = db.get_binding_for_backend_id(conn, job.workspace_binding_id)
-        if binding is None:
-            continue
-        binding_agent = agents.get(binding.agent_id)
-        if binding_agent is None:
-            sync_errors += 1
-            _record_sync_error(binding, f"missing local backend agent for {binding.agent_id}")
-            continue
-        try:
-            client = client_for_agent(binding_agent)
-            client.update_job_status(
-                job.job_id,
-                **_status_payload(binding_agent, binding, "expired", reason="deadline_expired"),
-            )
-        except Exception as exc:
-            sync_errors += 1
-            _record_sync_error(binding, str(exc))
-        expired += 1
-
-    for binding in bindings:
-        binding_agent = agents.get(binding.agent_id)
-        if binding_agent is None:
-            sync_errors += 1
-            _record_sync_error(binding, f"missing local backend agent for {binding.agent_id}")
-            continue
-
-        route_key = (binding.project_id, binding_agent.agent_id)
-        auth_observation = route_auth.setdefault(
-            route_key,
-            {"success": False, "unauthorized": False, "unauthorized_errors": 0},
-        )
-
-        try:
-            client = client_for_agent(binding_agent)
-        except Exception as exc:
-            if _is_unauthorized_error(exc):
-                auth_observation["unauthorized"] = True
-                auth_observation["unauthorized_errors"] += 1
-            sync_errors += 1
-            _record_sync_error(binding, str(exc))
-            if not quiet:
-                print(f"backend sync: failed to configure client for {binding.display_path}: {redact_secret(str(exc))}")
-            continue
-
-        try:
-            binding, metadata_refreshed = _refresh_workspace_binding_metadata(
-                client, binding_agent, binding
-            )
-            if metadata_refreshed:
-                auth_observation["success"] = True
-        except Exception as exc:
-            if _is_unauthorized_error(exc):
-                auth_observation["unauthorized"] = True
-                auth_observation["unauthorized_errors"] += 1
-            sync_errors += 1
-            _record_sync_error(binding, str(exc))
-            if not quiet:
-                print(
-                    f"backend sync: failed to refresh workspace metadata for "
-                    f"{binding.display_path}: {redact_secret(str(exc))}"
+    try:
+        for binding in bindings:
+            binding_agent = agents.get(binding.agent_id)
+            if binding_agent is None:
+                sync_errors += 1
+                _record_sync_error(
+                    binding,
+                    f"missing local backend agent for {binding.agent_id}",
                 )
-            continue
+                continue
 
-        # A logbook append is a durable consequence of a prior mutation.  Do
-        # not let later passive reads make the sync look fully healthy while a
-        # persisted append is still unsent or permanently rejected.
-        if logbook_budget > 0:
+            route_key = (binding.project_id, binding_agent.agent_id)
+            auth_observation = route_auth.setdefault(
+                route_key,
+                {
+                    "success": False,
+                    "unauthorized": False,
+                    "unauthorized_errors": 0,
+                },
+            )
             try:
-                with db.connect_closing() as conn:
-                    logbook = flush_due_logbook_entries(
-                        conn,
-                        client,
-                        now=now,
-                        limit=logbook_budget,
-                        project_id=binding.project_id,
-                        workspace_binding_id=binding.backend_workspace_binding_id,
-                    )
-                delivered = logbook["sent"] + logbook["retry"] + logbook["dead_letter"]
-                logbook_budget = max(0, logbook_budget - delivered)
-                logbook_sent += logbook["sent"]
-                logbook_retry += logbook["retry"]
-                logbook_dead_letter += logbook["dead_letter"]
+                client = client_for_agent(binding_agent)
             except Exception as exc:
+                if _is_unauthorized_error(exc):
+                    auth_observation["unauthorized"] = True
+                    auth_observation["unauthorized_errors"] += 1
                 sync_errors += 1
                 _record_sync_error(binding, str(exc))
                 if not quiet:
                     print(
-                        f"backend sync: failed to flush logbook for "
+                        "backend sync: failed to configure client for "
                         f"{binding.display_path}: {redact_secret(str(exc))}"
                     )
-
-        if binding_agent.agent_id not in queue_capabilities:
-            try:
-                advertised = client.capabilities()
-                auth_observation["success"] = True
-            except Exception as exc:
-                if _is_unauthorized_error(exc):
-                    auth_observation["unauthorized"] = True
-                    auth_observation["unauthorized_errors"] += 1
-                advertised = {}
-            queue_capabilities[binding_agent.agent_id] = bool(
-                isinstance(advertised, dict)
-                and advertised.get(BACKEND_CAPABILITY) is True
-            )
-        queue_supported = queue_capabilities[binding_agent.agent_id]
-        receiver.set_queue_capability(
-            project_id=binding.project_id,
-            agent_id=binding_agent.agent_id,
-            supported=queue_supported,
-        )
-
-        if memory_enabled:
-            try:
-                snapshots, synced, errors = _sync_memory(client, binding)
-                auth_observation["success"] = True
-                memory_snapshots += snapshots
-                proposals_synced += synced
-                proposal_errors += errors
-                sync_errors += errors
-            except Exception as exc:
-                if _is_unauthorized_error(exc):
-                    auth_observation["unauthorized"] = True
-                    auth_observation["unauthorized_errors"] += 1
-                sync_errors += 1
-                _record_sync_error(binding, str(exc))
-                if not quiet:
-                    print(f"backend sync: failed to sync memory for {binding.display_path}: {redact_secret(str(exc))}")
-
-        queue_key = (binding.project_id, binding_agent.agent_id)
-        if not queue_supported or queue_key not in polled_agent_queues:
-            try:
-                inbox_params = {"project_id": binding.project_id}
-                if queue_supported:
-                    inbox_params["target_agent_id"] = binding_agent.agent_id
-                    with db.connect_closing() as conn:
-                        cursor = get_cursor(
-                            conn,
-                            project_id=binding.project_id,
-                            target_agent_id=binding_agent.agent_id,
-                        )
-                    if cursor:
-                        inbox_params["cursor"] = cursor
-                    inbox_params["limit"] = receiver.batch_size
-                    polled_agent_queues.add(queue_key)
-                inbox = client.list_inbox(**inbox_params)
-                auth_observation["success"] = True
-                saved = _sync_inbox(
-                    inbox,
-                    binding.project_id,
-                    receiver=receiver if queue_supported else None,
-                    target_agent_id=(
-                        binding_agent.agent_id if queue_supported else None
-                    ),
-                )
-                inbox_events += saved
-            except AttributeError:
-                pass
-            except Exception as exc:
-                if _is_unauthorized_error(exc):
-                    auth_observation["unauthorized"] = True
-                    auth_observation["unauthorized_errors"] += 1
-                sync_errors += 1
-                _record_sync_error(binding, str(exc))
-                if not quiet:
-                    print(f"backend sync: failed to poll Persephone inbox for {binding.display_path}: {redact_secret(str(exc))}")
-
-        try:
-            response = client.pull_jobs(
-                project_id=binding.project_id,
-                agent_id=binding_agent.agent_id,
-                workspace_binding_id=binding.backend_workspace_binding_id,
-                capabilities=_detect_default_capabilities(),
-            )
-            auth_observation["success"] = True
-        except Exception as exc:
-            if _is_unauthorized_error(exc):
-                auth_observation["unauthorized"] = True
-                auth_observation["unauthorized_errors"] += 1
-            sync_errors += 1
-            _record_sync_error(binding, str(exc))
-            if not quiet:
-                print(f"backend sync: failed to pull jobs for {binding.display_path}: {redact_secret(str(exc))}")
-            continue
-
-        binding_pulled = 0
-        for job in _response_jobs(response):
-            jid = _job_id(job)
-            capability = _job_capability(job)
-            payload = _job_payload(job)
-            if not jid:
-                skipped += 1
                 continue
-            pulled += 1
-            binding_pulled += 1
-
-            with db.connect_closing() as conn:
-                existing = db.get_job(conn, jid)
-                if existing and existing.status in SKIP_JOB_STATUSES:
-                    skipped += 1
-                    continue
-                db.upsert_job(
-                    conn,
-                    job_id=jid,
-                    project_id=binding.project_id,
-                    workspace_binding_id=binding.backend_workspace_binding_id,
-                    capability=capability,
-                    payload=payload,
-                    status="received",
-                )
 
             try:
-                client.update_job_status(jid, **_status_payload(binding_agent, binding, "received"))
-                if capability not in AUTO_JOB_CAPABILITIES or _requires_confirmation(job):
-                    with db.connect_closing() as conn:
-                        db.update_job_status(conn, jid, "waiting_confirmation")
-                    client.update_job_status(
-                        jid,
-                        **_status_payload(
-                            binding_agent,
-                            binding,
-                            "waiting_confirmation",
-                            reason="local_confirmation_required",
-                        ),
-                    )
-                    waiting += 1
-                    if capability == "read_source_slice":
-                        source_slice_jobs_waiting += 1
-                    continue
-
-                with db.connect_closing() as conn:
-                    db.update_job_status(conn, jid, "started")
-                client.update_job_status(jid, **_status_payload(binding_agent, binding, "started"))
-
-                result = execute_job(
-                    {
-                        "job_id": jid,
-                        "capability": capability,
-                        "payload": {
-                            **payload,
-                            "project_id": binding.project_id,
-                            "workspace_binding_id": binding.backend_workspace_binding_id,
-                        },
-                    },
-                    workspace_root=binding.repo_root,
+                binding, metadata_refreshed = _refresh_workspace_binding_metadata(
+                    client,
+                    binding_agent,
+                    binding,
                 )
-                final_status = str(result.get("status") or "completed")
-                if final_status not in {"completed", "failed"}:
-                    final_status = "completed"
-                with db.connect_closing() as conn:
-                    db.update_job_status(conn, jid, final_status, result=result)
-                if final_status == "completed":
-                    uploaded, upload_failed, upload_skipped = _upload_job_artifact(client, binding_agent, binding, jid, result)
-                    slices_uploaded, slices_failed = _upload_job_source_slice(client, binding_agent, binding, jid, result)
-                    candidates = result.get("source_slice_candidates") if isinstance(result, dict) else None
-                    if isinstance(candidates, list):
-                        source_slice_candidates += len(candidates)
-                    artifacts_uploaded += uploaded
-                    artifact_errors += upload_failed
-                    artifacts_skipped += upload_skipped
-                    source_slices_uploaded += slices_uploaded
-                    source_slice_errors += slices_failed
-                    sync_errors += upload_failed
-                    sync_errors += slices_failed
-                    client.submit_job_result(jid, **_status_payload(binding_agent, binding, final_status, result=result))
-                    completed += 1
-                else:
-                    client.update_job_status(
-                        jid,
-                        **_status_payload(binding_agent, binding, final_status, error=redact_secret(result.get("summary", ""))),
-                    )
-                    failed += 1
-            except Exception as exc:
-                result = {"status": "failed", "summary": redact_secret(str(exc))}
-                with db.connect_closing() as conn:
-                    db.update_job_status(conn, jid, "failed", result=result)
-                try:
-                    client.update_job_status(jid, **_status_payload(binding_agent, binding, "failed", error=result["summary"]))
-                except Exception:
-                    pass
-                failed += 1
-
-        if binding_pulled == 0:
-            try:
+                if metadata_refreshed:
+                    auth_observation["success"] = True
                 (
                     baseline_uploaded,
                     baseline_failed,
                     baseline_skipped,
                     baseline_candidates,
-                ) = _sync_baseline_artifacts(client, binding_agent, binding, execute_job=execute_job)
+                ) = _sync_baseline_artifacts(
+                    client,
+                    binding_agent,
+                    binding,
+                    execute_job=execute_job,
+                )
                 artifacts_uploaded += baseline_uploaded
                 artifact_errors += baseline_failed
                 artifacts_skipped += baseline_skipped
                 source_slice_candidates += baseline_candidates
                 sync_errors += baseline_failed
+                if baseline_uploaded or baseline_skipped:
+                    auth_observation["success"] = True
             except Exception as exc:
+                if _is_unauthorized_error(exc):
+                    auth_observation["unauthorized"] = True
+                    auth_observation["unauthorized_errors"] += 1
                 sync_errors += 1
                 _record_sync_error(binding, str(exc))
                 if not quiet:
                     print(
-                        f"backend sync: failed to upload baseline artifacts for {binding.display_path}: "
-                        f"{redact_secret(str(exc))}"
+                        "backend sync: failed to upload baseline artifacts for "
+                        f"{binding.display_path}: {redact_secret(str(exc))}"
                     )
 
-    with db.connect_closing() as conn:
-        active_binding_ids = {
-            binding.backend_workspace_binding_id for binding in bindings
-        }
-        source_slice_jobs_waiting = max(
-            source_slice_jobs_waiting,
-            sum(
-                1
-                for job in db.list_jobs(conn, statuses=["waiting_confirmation"])
-                if job.capability == "read_source_slice"
-                and job.workspace_binding_id in active_binding_ids
-            ),
-        )
-
-    auth_failed_routes = auth_quarantined_routes = stale_auth_routes = 0
-    with db.connect_closing() as conn:
-        for (route_project_id, route_agent_id), observation in route_auth.items():
-            unauthorized_cycle = bool(
-                observation["unauthorized"] and not observation["success"]
-            )
-            route_agent = agents.get(route_agent_id)
-            used_fingerprint = used_credential_fingerprints.get(route_agent_id)
-            persisted_fingerprint = (
-                _persisted_credential_fingerprint(route_agent)
-                if route_agent is not None
-                else None
-            )
-            stale_credential = bool(
-                unauthorized_cycle
-                and used_fingerprint
-                and persisted_fingerprint
-                and used_fingerprint != persisted_fingerprint
-            )
-            if stale_credential:
-                stale_auth_routes += 1
-                sync_errors = max(
-                    0,
-                    sync_errors - int(observation["unauthorized_errors"]),
+        auth_failed_routes = 0
+        auth_quarantined_routes = 0
+        stale_auth_routes = 0
+        with db.connect_closing() as conn:
+            for (
+                route_project_id,
+                route_agent_id,
+            ), observation in route_auth.items():
+                unauthorized_cycle = bool(
+                    observation["unauthorized"] and not observation["success"]
                 )
-                continue
-            if unauthorized_cycle:
-                auth_failed_routes += 1
-            elif not observation["success"]:
-                continue
-            outcome = db.record_route_auth_cycle(
-                conn,
-                project_id=route_project_id,
-                agent_id=route_agent_id,
-                unauthorized=unauthorized_cycle,
-                now=now,
-            )
-            if outcome["quarantined"]:
-                auth_quarantined_routes += 1
+                route_agent = agents.get(route_agent_id)
+                used_fingerprint = used_credential_fingerprints.get(route_agent_id)
+                persisted_fingerprint = (
+                    _persisted_credential_fingerprint(route_agent)
+                    if route_agent is not None
+                    else None
+                )
+                stale_credential = bool(
+                    unauthorized_cycle
+                    and used_fingerprint
+                    and persisted_fingerprint
+                    and used_fingerprint != persisted_fingerprint
+                )
+                if stale_credential:
+                    stale_auth_routes += 1
+                    sync_errors = max(
+                        0,
+                        sync_errors - int(observation["unauthorized_errors"]),
+                    )
+                    continue
+                if unauthorized_cycle:
+                    auth_failed_routes += 1
+                elif not observation["success"]:
+                    continue
+                outcome = db.record_route_auth_cycle(
+                    conn,
+                    project_id=route_project_id,
+                    agent_id=route_agent_id,
+                    unauthorized=unauthorized_cycle,
+                    now=sync_time,
+                )
+                if outcome["quarantined"]:
+                    auth_quarantined_routes += 1
 
-    with db.connect_closing() as conn:
-        current_logbook_summary = _logbook_summary_for_sync(
-            conn,
-            agent=agent,
-            bindings=bindings,
-            project_id=project_id,
+        summary = {
+            "artifacts_uploaded": artifacts_uploaded,
+            "artifacts_skipped": artifacts_skipped,
+            "artifact_errors": artifact_errors,
+            "source_slice_candidates": source_slice_candidates,
+            "auth_failed_routes": auth_failed_routes,
+            "auth_quarantined_routes": auth_quarantined_routes,
+            "stale_auth_routes": stale_auth_routes,
+            "duration_ms": max(
+                0, int((time.monotonic() - started_monotonic) * 1000)
+            ),
+        }
+        with db.connect_closing() as conn:
+            db.record_sync_state(conn, "last_sync_summary", summary)
+            if sync_errors == 0:
+                db.clear_sync_state(conn, "last_sync_error")
+
+        logger.info(
+            "hades_backend.sync.complete",
+            extra={
+                "hades_event": "sync.complete",
+                "hades_agent_id": agent.agent_id,
+                "hades_project_id": agent.project_id,
+                "hades_exit_code": 1 if sync_errors else 0,
+                "hades_summary": summary,
+            },
         )
-    logbook_pending = current_logbook_summary["logbook_pending"]
-    logbook_sent = current_logbook_summary["logbook_sent"]
-    logbook_dead_letter = current_logbook_summary["logbook_dead_letter"]
-    logbook_retry = current_logbook_summary["logbook_retry"]
-    if logbook_pending or logbook_dead_letter:
-        sync_errors += 1
-
-    summary = {
-        "pulled": pulled,
-        "completed": completed,
-        "waiting": waiting,
-        "failed": failed,
-        "skipped": skipped,
-        "expired": expired,
-        "memory_enabled": memory_enabled,
-        "memory_snapshots": memory_snapshots,
-        "proposals_synced": proposals_synced,
-        "proposal_errors": proposal_errors,
-        "artifacts_uploaded": artifacts_uploaded,
-        "artifacts_skipped": artifacts_skipped,
-        "artifact_errors": artifact_errors,
-        "source_slices_uploaded": source_slices_uploaded,
-        "source_slice_errors": source_slice_errors,
-        "source_slice_candidates": source_slice_candidates,
-        "source_slice_jobs_waiting": source_slice_jobs_waiting,
-        "inbox_events": inbox_events,
-        "auth_failed_routes": auth_failed_routes,
-        "auth_quarantined_routes": auth_quarantined_routes,
-        "stale_auth_routes": stale_auth_routes,
-        "logbook_pending": logbook_pending,
-        "logbook_sent": logbook_sent,
-        "logbook_retry": logbook_retry,
-        "logbook_dead_letter": logbook_dead_letter,
-        "duration_ms": max(0, int((time.monotonic() - started_monotonic) * 1000)),
-    }
-    with db.connect_closing() as conn:
-        db.record_sync_state(conn, "last_sync_summary", summary)
-        if sync_errors == 0:
-            db.clear_sync_state(conn, "last_sync_error")
-            db.clear_sync_state(conn, background_state_key)
-
-    logger.info(
-        "hades_backend.sync.complete",
-        extra={
-            "hades_event": "sync.complete",
-            "hades_agent_id": agent.agent_id,
-            "hades_project_id": agent.project_id,
-            "hades_exit_code": 1 if sync_errors else 0,
-            "hades_summary": summary,
-        },
-    )
-    for client in clients.values():
-        close = getattr(client, "close", None)
-        if callable(close):
-            close()
-    return SyncResult(summary, 1 if sync_errors else 0)
+        return SyncResult(summary, 1 if sync_errors else 0)
+    finally:
+        closed: set[int] = set()
+        for client in created_clients:
+            identity = id(client)
+            if identity in closed:
+                continue
+            closed.add(identity)
+            close = getattr(client, "close", None)
+            if callable(close):
+                close()
 
 
 def _sync_baseline_artifacts(
@@ -901,186 +521,6 @@ def _agent_has_capability(agent: db.BackendAgent, capability: str) -> bool:
     return True
 
 
-def maybe_run_backend_sync(
-    *,
-    now: int | None = None,
-    min_interval_seconds: int = 300,
-    failure_base_delay_seconds: int = 60,
-    max_backoff_seconds: int = 3600,
-    force: bool = False,
-    run_inline: bool = False,
-    client_factory: Callable[[], object] | None = None,
-    sync_runner: Callable[..., SyncResult] = run_backend_sync,
-    project_id: str | None = None,
-    workspace_binding_ids: list[str] | tuple[str, ...] | None = None,
-) -> BackgroundSyncDecision:
-    """Start a bounded piggyback sync if the profile is linked and due."""
-    current = int(now if now is not None else time.time())
-    if not db.hades_backend_db_path().exists():
-        return BackgroundSyncDecision("skipped", "not_configured")
-
-    with db.connect_closing() as conn:
-        agent = db.get_default_agent(conn)
-        bindings = db.list_workspace_bindings(conn, status="linked") if agent else []
-        bindings = _filter_sync_bindings(
-            bindings,
-            project_id=project_id,
-            workspace_binding_ids=workspace_binding_ids,
-        )
-        state_key = _background_sync_state_key(workspace_binding_ids)
-        state = db.get_sync_state(conn, state_key) or {}
-    if agent is None or not bindings:
-        return BackgroundSyncDecision("skipped", "not_configured")
-
-    if not force:
-        next_attempt = _as_int(state.get("next_attempt_at"))
-        if next_attempt and current < next_attempt:
-            return BackgroundSyncDecision("skipped", "backoff")
-        last_attempt = _as_int(state.get("last_attempt_at"))
-        if (
-            state.get("status") != "failed"
-            and last_attempt
-            and current - last_attempt < max(0, int(min_interval_seconds))
-        ):
-            return BackgroundSyncDecision("skipped", "interval")
-
-    global _BACKGROUND_SYNC_RUNNING
-    with _BACKGROUND_SYNC_LOCK:
-        if _BACKGROUND_SYNC_RUNNING:
-            return BackgroundSyncDecision("skipped", "already_running")
-        _BACKGROUND_SYNC_RUNNING = True
-
-    _record_background_sync_state(
-        {
-            "status": "running",
-            "last_attempt_at": current,
-            "failure_count": _as_int(state.get("failure_count")),
-            "next_attempt_at": current + max(0, int(min_interval_seconds)),
-        },
-        state_key=state_key,
-    )
-
-    if run_inline:
-        return _run_background_sync_once(
-            started_at=current,
-            previous_state=state,
-            min_interval_seconds=min_interval_seconds,
-            failure_base_delay_seconds=failure_base_delay_seconds,
-            max_backoff_seconds=max_backoff_seconds,
-            client_factory=client_factory,
-            sync_runner=sync_runner,
-            project_id=project_id,
-            workspace_binding_ids=workspace_binding_ids,
-            state_key=state_key,
-        )
-
-    thread = threading.Thread(
-        target=_run_background_sync_once,
-        kwargs={
-            "started_at": current,
-            "previous_state": state,
-            "min_interval_seconds": min_interval_seconds,
-            "failure_base_delay_seconds": failure_base_delay_seconds,
-            "max_backoff_seconds": max_backoff_seconds,
-            "client_factory": client_factory,
-            "sync_runner": sync_runner,
-            "project_id": project_id,
-            "workspace_binding_ids": workspace_binding_ids,
-            "state_key": state_key,
-        },
-        name="hades-backend-sync",
-        daemon=True,
-    )
-    thread.start()
-    return BackgroundSyncDecision("started", "due")
-
-
-def _run_background_sync_once(
-    *,
-    started_at: int,
-    previous_state: dict,
-    min_interval_seconds: int,
-    failure_base_delay_seconds: int,
-    max_backoff_seconds: int,
-    client_factory: Callable[[], object] | None,
-    sync_runner: Callable[..., SyncResult],
-    project_id: str | None = None,
-    workspace_binding_ids: list[str] | tuple[str, ...] | None = None,
-    state_key: str = BACKGROUND_SYNC_STATE_KEY,
-) -> BackgroundSyncDecision:
-    global _BACKGROUND_SYNC_RUNNING
-    try:
-        kwargs: dict[str, object] = {"quiet": True}
-        if client_factory is not None:
-            kwargs["client_factory"] = client_factory
-        if project_id is not None:
-            kwargs["project_id"] = project_id
-        if workspace_binding_ids is not None:
-            kwargs["workspace_binding_ids"] = list(workspace_binding_ids)
-        result = sync_runner(**kwargs)
-        finished_at = started_at
-        if result.exit_code == 0:
-            state = {
-                "status": "ok",
-                "last_attempt_at": started_at,
-                "last_success_at": finished_at,
-                "failure_count": 0,
-                "next_attempt_at": finished_at + max(0, int(min_interval_seconds)),
-                "summary": result.summary,
-                "exit_code": result.exit_code,
-            }
-            _record_background_sync_state(state, state_key=state_key)
-            return BackgroundSyncDecision("ran", "ok", result.summary)
-
-        failure_count = _as_int(previous_state.get("failure_count")) + 1
-        delay = min(
-            max(0, int(max_backoff_seconds)),
-            max(0, int(failure_base_delay_seconds)) * (2 ** max(0, failure_count - 1)),
-        )
-        state = {
-            "status": "failed",
-            "last_attempt_at": started_at,
-            "last_success_at": previous_state.get("last_success_at"),
-            "failure_count": failure_count,
-            "next_attempt_at": finished_at + delay,
-            "summary": result.summary,
-            "exit_code": result.exit_code,
-        }
-        _record_background_sync_state(state, state_key=state_key)
-        return BackgroundSyncDecision("ran", "failed", result.summary)
-    except Exception as exc:
-        from hermes_cli.hades_backend_client import redact_secret
-
-        failure_count = _as_int(previous_state.get("failure_count")) + 1
-        delay = min(
-            max(0, int(max_backoff_seconds)),
-            max(0, int(failure_base_delay_seconds)) * (2 ** max(0, failure_count - 1)),
-        )
-        summary: dict[str, object] = {"error": 1}
-        state = {
-            "status": "failed",
-            "last_attempt_at": started_at,
-            "last_success_at": previous_state.get("last_success_at"),
-            "failure_count": failure_count,
-            "next_attempt_at": started_at + delay,
-            "summary": summary,
-            "exit_code": 1,
-            "last_error": redact_secret(str(exc)),
-        }
-        _record_background_sync_state(state, state_key=state_key)
-        return BackgroundSyncDecision("ran", "failed", summary)
-    finally:
-        with _BACKGROUND_SYNC_LOCK:
-            _BACKGROUND_SYNC_RUNNING = False
-
-
-def _record_background_sync_state(
-    value: dict, *, state_key: str = BACKGROUND_SYNC_STATE_KEY,
-) -> None:
-    with db.connect_closing() as conn:
-        db.record_sync_state(conn, state_key, value)
-
-
 def _filter_sync_bindings(
     bindings: list[db.WorkspaceBinding],
     *,
@@ -1151,35 +591,6 @@ def matching_workspace_binding_ids(
 def _matching_workspace_binding_ids(**kwargs):
     """Backward-compatible private alias for workspace binding matching."""
     return matching_workspace_binding_ids(**kwargs)
-
-
-def maybe_run_backend_sync_for_workspace(
-    *,
-    cwd: str | Path | None = None,
-    changed_paths: list[str] | tuple[str, ...] | set[str] | None = None,
-    force: bool = True,
-    run_inline: bool = False,
-    min_interval_seconds: int = 0,
-    sync_runner: Callable[..., SyncResult] = run_backend_sync,
-) -> BackgroundSyncDecision:
-    """Start a scoped sync for the workspace touched by an agent turn."""
-    binding_ids = _matching_workspace_binding_ids(cwd=cwd, changed_paths=changed_paths)
-    if not binding_ids:
-        return BackgroundSyncDecision("skipped", "no_matching_workspace")
-    return maybe_run_backend_sync(
-        force=force,
-        run_inline=run_inline,
-        min_interval_seconds=min_interval_seconds,
-        workspace_binding_ids=binding_ids,
-        sync_runner=sync_runner,
-    )
-
-
-def _as_int(value: object) -> int:
-    try:
-        return int(value or 0)
-    except (TypeError, ValueError):
-        return 0
 
 
 def _is_unauthorized_error(exc: Exception) -> bool:
@@ -1716,48 +1127,3 @@ def _upload_job_source_slice(client: object, agent: db.BackendAgent, binding: db
     except Exception as exc:
         _record_sync_error(binding, f"source slice upload failed: {exc}")
         return (0, 1)
-
-
-def _sync_inbox(
-    response: dict,
-    project_id: str,
-    *,
-    receiver: object | None = None,
-    target_agent_id: str | None = None,
-    workspace_binding_id: str | None = None,
-) -> int:
-    events = response.get("events") if isinstance(response, dict) else None
-    if not isinstance(events, list):
-        return 0
-    saved = 0
-    with db.connect_closing() as conn:
-        for event in events:
-            if not isinstance(event, dict):
-                continue
-            if (
-                receiver is not None
-                and getattr(receiver, "is_agent_event")(event)
-            ):
-                disposition = getattr(receiver, "ingest_event")(
-                    event,
-                    expected_project_id=project_id,
-                    expected_target_agent_id=target_agent_id,
-                    expected_workspace_binding_id=workspace_binding_id,
-                )
-                if disposition not in {"invalid_agent_message", "not_agent_message"}:
-                    saved += 1
-                continue
-            event_id = str(event.get("id") or event.get("event_id") or "").strip()
-            event_type = str(event.get("event_type") or "").strip()
-            payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
-            if not event_id or not event_type:
-                continue
-            db.save_inbox_event(
-                conn,
-                event_id=event_id,
-                project_id=str(event.get("project_id") or project_id),
-                event_type=event_type,
-                payload=payload,
-            )
-            saved += 1
-    return saved

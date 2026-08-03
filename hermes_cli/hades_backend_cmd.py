@@ -1270,13 +1270,12 @@ def _cmd_sync(args: argparse.Namespace) -> int:
     summary = result.summary
 
     print(
-        "Hades backend sync: "
-        f"pulled {summary.get('pulled', 0)} job(s), completed {summary.get('completed', 0)}, "
-        f"waiting {summary.get('waiting', 0)}, failed {summary.get('failed', 0)}, "
-        f"skipped {summary.get('skipped', 0)}, expired {summary.get('expired', 0)}, "
-        f"memory {summary.get('memory_snapshots', 0)}, proposals {summary.get('proposals_synced', 0)}, "
-        f"artifacts {summary.get('artifacts_uploaded', 0) + summary.get('artifacts_skipped', 0)}, "
-        f"inbox {summary.get('inbox_events', 0)}"
+        "Hades backend project sync: "
+        f"artifacts {summary.get('artifacts_uploaded', 0) + summary.get('artifacts_skipped', 0)} "
+        f"(uploaded {summary.get('artifacts_uploaded', 0)}, "
+        f"unchanged {summary.get('artifacts_skipped', 0)}), "
+        f"errors {summary.get('artifact_errors', 0)}, "
+        f"source candidates {summary.get('source_slice_candidates', 0)}"
     )
     return result.exit_code
 

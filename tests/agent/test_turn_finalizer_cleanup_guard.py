@@ -195,7 +195,7 @@ def test_workspace_tool_use_never_runs_backend_sync(monkeypatch, tool_name):
         calls.append((args, kwargs))
         raise AssertionError("ordinary agent lifecycle attempted Backend sync")
 
-    monkeypatch.setattr(hades_sync, "maybe_run_backend_sync_for_workspace", fail_backend_sync)
+    monkeypatch.setattr(hades_sync, "run_backend_sync", fail_backend_sync)
 
     agent = _StubAgent(raise_in=())
     agent._turn_file_mutation_paths = (

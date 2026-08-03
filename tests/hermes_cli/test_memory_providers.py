@@ -44,3 +44,12 @@ def test_api_key_is_a_secret_bound_to_env():
 
 def test_unknown_provider_is_none():
     assert get_memory_provider("builtin") is None
+
+
+def test_hades_backend_is_not_a_bundled_memory_provider():
+    from plugins.memory import discover_memory_providers, load_memory_provider
+
+    names = {name for name, _description, _available in discover_memory_providers()}
+
+    assert "hades_backend" not in names
+    assert load_memory_provider("hades_backend") is None

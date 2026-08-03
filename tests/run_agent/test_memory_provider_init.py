@@ -1,5 +1,6 @@
 """Regression tests for memory provider selection during AIAgent init."""
 
+from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -56,6 +57,50 @@ def test_blank_memory_provider_does_not_auto_enable_honcho():
     assert agent._memory_manager is None
     from_global_config.assert_not_called()
     load_memory_provider.assert_not_called()
+    save_config.assert_not_called()
+
+
+def test_removed_hades_backend_provider_selection_is_inert_and_preserves_config(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    cfg = {
+        "memory": {
+            "provider": "hades_backend",
+            "custom": {"retention_days": 91},
+        },
+        "agent": {},
+    }
+    before = deepcopy(cfg)
+
+    with (
+        patch("hermes_cli.config.load_config", return_value=cfg),
+        patch("hermes_cli.config.save_config") as save_config,
+        patch(
+            "hermes_cli.hades_backend_runtime.current_agent",
+            return_value=SimpleNamespace(capabilities={"memory": True}),
+        ),
+        patch(
+            "hermes_cli.hades_backend_runtime.current_workspace_agent_binding",
+            return_value=None,
+        ),
+        patch("agent.model_metadata.get_model_context_length", return_value=204_800),
+        patch("run_agent.get_tool_definitions", return_value=[]),
+        patch("run_agent.check_toolset_requirements", return_value={}),
+        patch("run_agent.OpenAI"),
+    ):
+        from run_agent import AIAgent
+
+        agent = AIAgent(
+            api_key="test-key-1234567890",
+            base_url="https://openrouter.ai/api/v1",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=False,
+        )
+
+    assert agent._memory_manager is None
+    assert cfg == before
     save_config.assert_not_called()
 
 
