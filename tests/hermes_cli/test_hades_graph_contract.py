@@ -196,56 +196,21 @@ def _bundle_with_path_array(array_key: str, paths: list[str]) -> dict[str, Any]:
     return bundle
 
 
-def test_v2_only() -> None:
+def test_public_graph_facade_is_v2_only() -> None:
     assert GRAPH_CONTRACT_VERSION == "hades.graph_artifact.v2"
     assert not hasattr(facade, "finalize_graph_artifact")
     assert not hasattr(facade, "DEFAULT_MAX_GRAPH_NODES")
     assert not hasattr(facade, "_NODE_ID_PREFIX")
 
-    test_schema_facade_rejects_unknown_names_and_v1_with_typed_codes()
-
-    from hermes_cli.hades_backend_sync import _upload_job_artifact
-    from plugins.memory import hades_backend as memory_provider
-
     for legacy_schema in ("hades.code_graph.v1", "hades.php_graph.v1"):
-        assert _upload_job_artifact(
-            object(),
-            object(),
-            object(),
-            "legacy-job",
-            {"artifact": {"schema": legacy_schema}},
-        ) == (0, 1, 0)
-        assert (
-            memory_provider._graph_artifact_from_source({
-                "item": {"schema": legacy_schema, "nodes": [], "edges": []}
-            })
-            is None
-        )
-        assert legacy_schema not in memory_provider.GRAPH_ARTIFACT_SCHEMAS
-        assert (
-            memory_provider._local_graph_artifacts([
-                {
-                    "item": {"schema": legacy_schema, "nodes": [], "edges": []},
-                    "origin": "legacy-cache",
-                }
-            ])
-            == []
-        )
-        assert not memory_provider._active_v2_identity_matches(
-            {}, {}, {"schema": legacy_schema}
-        )
-        assert (
-            memory_provider._authoritative_scope_topology_error(
-                {"schema": legacy_schema},
-                scope="project",
-                handle="hades:node:v2:" + "a" * 64,
-                project_id="01KXJD0SV73EBGWKNE2EK3M4KD",
-                workspace_binding_id="01KXJD1BDMQ2TFABMVJV6EFE8Q",
-                active_identity={"schema": legacy_schema},
-            )
-            == "graph topology schema is not hades.code_graph.v2"
-        )
-    assert "hades.code_graph.v2" in memory_provider.GRAPH_ARTIFACT_SCHEMAS
+        with pytest.raises(GraphContractError) as exc_info:
+            validate_schema("artifact.schema.json", {"schema": legacy_schema})
+        assert exc_info.value.code == "graph_v1_not_supported"
+
+    validate_schema(
+        "bundle.schema.json",
+        _golden()["contract_examples"]["bundle"],
+    )
 
 
 def test_named_node_id_survives_unrelated_line_insertion() -> None:

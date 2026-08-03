@@ -553,4 +553,11 @@ def test_loaded_status_reports_auth_quarantine_without_counting_receiver_routes(
     assert payload["auth_quarantine"] == {"routes": 1, "bindings": 2}
     assert support["auth_quarantine"] == {"routes": 1, "bindings": 2}
     assert payload["persephone"]["routes"] == 0
-    assert any("bootstrap" in action.lower() for action in payload["actions"])
+    recovery_actions = [
+        action.lower()
+        for action in payload["actions"]
+        if "quarantined" in action.lower()
+    ]
+    assert recovery_actions == [
+        "re-authenticate quarantined hades routes from each affected checkout."
+    ]

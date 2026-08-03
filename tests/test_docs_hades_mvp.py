@@ -9,22 +9,41 @@ HADES_DOCS = REPO_ROOT / "docs" / "hades"
 WEBSITE_DOCS = REPO_ROOT / "website" / "docs"
 
 
-def test_hades_mvp_user_docs_exist_with_required_topics():
+def _normalized_text(path: Path) -> str:
+    lines = path.read_text(encoding="utf-8").lower().splitlines()
+    return " ".join(line.strip().removeprefix("> ") for line in lines)
+
+
+def test_hades_mvp_user_docs_describe_the_optional_project_knowledge_contract():
     required = {
         "README.md": ["Hades MVP", "Install", "Backend", "Troubleshooting"],
-        "launch.md": ["install", "backend bootstrap", "privacy", "troubleshoot", "source of truth"],
-        "installation.md": ["one-liner", "backend bootstrap", "Windows"],
-        "backend.md": ["hades backend bootstrap", "hades project link", "shared memory"],
-        "operations.md": ["job", "waiting_confirmation", "Persephone"],
+        "installation.md": [
+            "optional project knowledge plugin",
+            "hades plugins install",
+            "hades backend set-token",
+            "prompts for the token masked",
+            "not a memory provider",
+        ],
+        "backend.md": [
+            "historical only",
+            "optional, standalone, workspace-scoped",
+            "not a memory provider",
+            "never runs automatic sync",
+            "masked token prompt",
+        ],
         "doctor-troubleshooting.md": ["hades doctor", "cleanup", "degraded"],
-        "support-runbook.md": ["Safe Support Bundle", "Recovery Matrix", "Escalate"],
+        "support-runbook.md": [
+            "Safe Support Bundle",
+            "Pairing failed",
+            "set-token",
+            "masked prompt",
+        ],
         "no-codebase-diagnosis.md": ["source-free", "bug-intake", "quality-report", "diagnosable_without_source"],
-        "developer-flow.md": ["subagent", "model routing", "local-only", "hades backend profiles"],
+        "developer-flow.md": ["subagent", "model routing", "local-only"],
     }
 
     for filename, topics in required.items():
-        text = (HADES_DOCS / filename).read_text(encoding="utf-8")
-        lowered = text.lower()
+        lowered = _normalized_text(HADES_DOCS / filename)
         for topic in topics:
             assert topic.lower() in lowered, f"{filename} missing {topic!r}"
 
@@ -64,24 +83,7 @@ def test_hades_openapi_contract_covers_client_routes():
     assert spec["paths"]["/api/hades/v1/token/verify"]["post"]["responses"]["401"]["$ref"] == "#/components/responses/Unauthorized"
 
 
-def test_hades_logbook_docs_and_openapi_make_recovery_contract_explicit():
-    backend = (HADES_DOCS / "backend.md").read_text(encoding="utf-8").lower()
-    operations = (HADES_DOCS / "operations.md").read_text(encoding="utf-8").lower()
-    documented = f"{backend}\n{operations}"
-
-    for topic in [
-        "hades backend logbook list",
-        "hades backend logbook show <entry-id>",
-        "hades backend logbook write",
-        "write_project_logbook",
-        "no legacy grant",
-        "re-registration",
-        "dead-letter",
-        "degraded sync",
-        "re-register",
-    ]:
-        assert topic in documented, f"missing logbook operational contract: {topic!r}"
-
+def test_hades_openapi_makes_logbook_recovery_contract_explicit():
     def unique_object(pairs):
         result = {}
         for key, value in pairs:
@@ -328,11 +330,10 @@ def test_hades_support_runbook_covers_launch_failures_without_secret_collection(
     required_topics = [
         "backend unreachable",
         "token expired or revoked",
-        "failed bootstrap",
+        "pairing failed",
+        "hades backend set-token",
+        "masked prompt",
         "workspace already linked",
-        "job waiting confirmation",
-        "proposal refused or conflicted",
-        "artifact too large or truncated",
         "docker permissions",
         "windows path issue",
         "desktop/backend version mismatch",
@@ -347,26 +348,29 @@ def test_hades_support_runbook_covers_launch_failures_without_secret_collection(
     assert "raw source files" in lowered
 
 
-def test_hades_launch_docs_are_public_and_do_not_depend_on_coordination_logs():
-    launch_text = (HADES_DOCS / "launch.md").read_text(encoding="utf-8")
-    website_text = (WEBSITE_DOCS / "getting-started" / "hades-backend.md").read_text(encoding="utf-8")
+def test_current_backend_setup_docs_are_public_token_free_and_explicit():
+    hades_install_text = _normalized_text(HADES_DOCS / "installation.md")
+    website_text = _normalized_text(WEBSITE_DOCS / "getting-started" / "hades-backend.md")
     index_text = (WEBSITE_DOCS / "index.mdx").read_text(encoding="utf-8")
-    install_text = (WEBSITE_DOCS / "getting-started" / "installation.md").read_text(encoding="utf-8")
+    install_text = _normalized_text(WEBSITE_DOCS / "getting-started" / "installation.md")
+    current_docs = f"{hades_install_text}\n{website_text}\n{install_text}"
 
-    for topic in [
-        "hades backend bootstrap",
-        "hades backend status --json",
-        "hades backend sync",
-        "derived agent token",
-        "profile secret",
-        "model provider choices",
-        "do not send",
+    for contract in [
+        "optional project knowledge",
+        "hades plugins install titagram/hades-backend-plugin --enable",
+        "hades backend set-token --url",
+        "masked",
+        "memory.provider",
+        "never backend",
+        "sync is an explicit, workspace-scoped operation",
+        "hades update",
+        "does not install, update, enable, pair, reconfigure, or synchronize backend",
+        "hades serve",
+        "is not hades backend",
     ]:
-        assert topic in launch_text.lower()
+        assert contract in current_docs
 
-    assert "docs/backend-agent-coordination.md" in launch_text
-    assert "maintainer evidence" in launch_text.lower()
     assert "/getting-started/hades-backend" in index_text
-    assert "Backend Setup" in install_text
-    assert "hades backend bootstrap" in website_text
-    assert "The backend does not choose your model" in website_text
+    assert "backend plugin setup" in install_text
+    assert "backend bootstrap" not in current_docs
+    assert "--project-token" not in current_docs

@@ -1148,42 +1148,6 @@ def test_binding_scoped_subscription_rejects_other_binding(receiver):
     assert result == "subscription_route_mismatch"
 
 
-def test_manual_poll_a_rejects_b_envelope_and_advances_only_a_cursor(receiver):
-    from hermes_cli.hades_backend_sync import _sync_inbox
-    from hermes_cli.hades_persephone_store import get_cursor, get_message
-
-    receiver.refresh_bindings(
-        [
-            _binding(project="project_a", agent="agent_a", binding="wb_a"),
-            _binding(project="project_b", agent="agent_b", binding="wb_b"),
-        ]
-    )
-    response = {
-        "events": [
-            _event(
-                message_id="manual_b",
-                project="project_b",
-                agent="agent_b",
-                binding="wb_b",
-            )
-        ]
-    }
-
-    assert _sync_inbox(
-        response,
-        "project_a",
-        receiver=receiver,
-        target_agent_id="agent_a",
-    ) == 1
-    with receiver.connection_factory() as conn:
-        stored = get_message(conn, "manual_b")
-        cursor_a = get_cursor(conn, project_id="project_a", target_agent_id="agent_a")
-        cursor_b = get_cursor(conn, project_id="project_b", target_agent_id="agent_b")
-    assert stored is not None and stored.state == "received"
-    assert cursor_a == "cursor_manual_b"
-    assert cursor_b is None
-
-
 def test_cross_subscription_duplicate_is_still_rejected_without_rewriting_b(receiver):
     from hermes_cli.hades_persephone_store import get_cursor, get_message
 

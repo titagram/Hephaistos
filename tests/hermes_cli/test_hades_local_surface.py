@@ -16,16 +16,51 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 HADES_DISTRIBUTION_DOC = REPO_ROOT / "docs" / "hades" / "plugin-skill-distribution.md"
 
 
-def test_hades_slash_registry_exposes_backend_project_doctor_uninstall():
+def test_backend_command_is_plugin_owned_while_core_commands_remain_available(
+    tmp_path, monkeypatch
+):
     from hermes_cli.commands import SUBCOMMANDS, resolve_command
+    from hermes_cli.plugins import PluginManager
 
-    assert resolve_command("backend").name == "backend"
+    assert resolve_command("backend") is None
     assert resolve_command("project").name == "project"
     assert resolve_command("doctor").name == "doctor"
     assert resolve_command("uninstall").name == "uninstall"
-    assert "worker" in SUBCOMMANDS["/backend"]
     assert "link" in SUBCOMMANDS["/project"]
     assert "cleanup" in SUBCOMMANDS["/doctor"]
+
+    home = tmp_path / "profile"
+    plugin = home / "plugins" / "hades-backend"
+    plugin.mkdir(parents=True)
+    (home / "config.yaml").write_text(
+        "plugins:\n  enabled: [hades-backend]\n", encoding="utf-8"
+    )
+    (plugin / "plugin.yaml").write_text(
+        "name: hades-backend\nkind: standalone\nversion: 0.0.0-test\n",
+        encoding="utf-8",
+    )
+    (plugin / "__init__.py").write_text(
+        "def setup(parser):\n"
+        "    return None\n"
+        "def run(_args):\n"
+        "    return 0\n"
+        "def register(ctx):\n"
+        "    ctx.register_cli_command(name='backend', help='Project knowledge', "
+        "setup_fn=setup, handler_fn=run)\n"
+        "    ctx.register_command('backend', lambda raw: 'project knowledge:' + raw, "
+        "description='Optional project knowledge', args_hint='set-token|status|sync')\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(home))
+
+    manager = PluginManager()
+    manager.discover_and_load()
+
+    assert manager._plugins["hades-backend"].enabled is True
+    assert manager._plugin_commands["backend"]["handler"]("status") == (
+        "project knowledge:status"
+    )
+    assert manager._cli_commands["backend"]["plugin"] == "hades-backend"
 
 
 def test_hades_auth_help_does_not_expose_spotify():
@@ -40,7 +75,7 @@ def test_hades_auth_help_does_not_expose_spotify():
     assert "spotify" not in result.stdout.lower()
 
 
-def test_hades_slash_subcommand_dispatches_to_main(monkeypatch):
+def test_hades_core_slash_subcommand_dispatches_to_main(monkeypatch):
     from cli import HermesCLI
 
     captured: dict = {}
@@ -54,9 +89,9 @@ def test_hades_slash_subcommand_dispatches_to_main(monkeypatch):
     cli = HermesCLI.__new__(HermesCLI)
     cli._console_print = lambda *args, **kwargs: None
 
-    cli._handle_hades_subcommand_slash("/backend status")
+    cli._handle_hades_subcommand_slash("/project status")
 
-    assert captured["cmd"][-3:] == ["hermes_cli.main", "backend", "status"]
+    assert captured["cmd"][-3:] == ["hermes_cli.main", "project", "status"]
     assert captured["cmd"][-4] == "-m"
     assert captured["kwargs"]["stdin"] is subprocess.DEVNULL
     assert captured["kwargs"]["capture_output"] is True
@@ -238,7 +273,6 @@ def test_hades_cli_help_view_is_curated_for_developer_ai_ops():
     }
 
     expected_present = {
-        "/backend",
         "/browser",
         "/codex-runtime",
         "/debug",
@@ -351,8 +385,18 @@ def test_hades_plugin_skill_distribution_audit_tracks_exclusions():
         assert entry in text
 
 
-def test_hades_skill_index_community_sources_are_not_documented_as_official():
-    data = json.loads((REPO_ROOT / "website" / "static" / "api" / "skills-index.json").read_text(encoding="utf-8"))
+def test_hades_skill_index_community_sources_are_not_documented_as_official(
+    tmp_path, monkeypatch
+):
+    import scripts.build_skills_index as build_mod
+    from tests.scripts.test_build_skills_index_health import _install_fake_sources
+
+    generated_index = tmp_path / "skills-index.json"
+    monkeypatch.setattr(build_mod, "OUTPUT_PATH", str(generated_index))
+    _install_fake_sources(monkeypatch, github_count=200)
+    build_mod.main()
+
+    data = json.loads(generated_index.read_text(encoding="utf-8"))
     sources = {
         skill.get("source")
         for skill in data.get("skills", [])
