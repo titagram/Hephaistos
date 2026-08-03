@@ -13087,7 +13087,11 @@ def _(rid, params: dict) -> dict:
             invoke_plugin_command = None
 
     if plugin_handler and invoke_plugin_command:
+        home_token = None
         try:
+            profile_home = session.get("profile_home")
+            if profile_home:
+                home_token = set_hermes_home_override(profile_home)
             from hermes_cli.plugin_command_context import create_plugin_command_context
 
             context = create_plugin_command_context(
@@ -13119,6 +13123,9 @@ def _(rid, params: dict) -> dict:
             return _ok(rid, {"output": str(result or "(no output)")})
         except Exception as e:
             return _ok(rid, {"output": f"Plugin command error: {e}"})
+        finally:
+            if home_token is not None:
+                reset_hermes_home_override(home_token)
 
     worker = session.get("slash_worker")
     if not worker:
