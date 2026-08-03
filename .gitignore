@@ -156,10 +156,16 @@ infographic/
 .hades-dev/**/hermes-home/
 .hades-dev/**/trajectories/
 .hades-dev/tmp_remote_patch/
-.superpowers/sdd/progress.md
+# Per-plan Superpowers SDD reports and scratch artifacts are workspace-only.
+.superpowers/sdd/**
 
 # Host-only Traefik staging files; canonical config lives on the server.
 .codex-tmp-traefik/
+
+# Supermemory deployment credentials are generated at runtime.
+deploy/supermemory/.env.runtime
+deploy/supermemory/.env.runtime.tmp.*
+services/supermemory-codex-bridge/dist/
 
 # Isolated feature worktrees managed by Superpowers skills.
 .worktrees/
