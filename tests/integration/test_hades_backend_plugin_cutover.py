@@ -16,16 +16,21 @@ def test_backend_plugin_matrix_is_hermetic_across_classic_cli_and_tui(
     tmp_path: Path,
 ) -> None:
     """Only an enabled ordinary plugin exposes Backend on either host surface."""
-    for state, visible in (
-        ("absent", False),
-        ("disabled", False),
-        ("enabled-unconfigured", True),
-        ("enabled-unlinked", True),
-        ("enabled-linked-a", True),
-        ("enabled-linked-a-and-b", True),
+    for state, visible, expected in (
+        ("absent", False, (False, False, False, ())),
+        ("disabled", False, (True, False, False, ())),
+        ("enabled-unconfigured", True, (True, True, False, ())),
+        ("enabled-unlinked", True, (True, True, True, ())),
+        ("enabled-linked-a", True, (True, True, True, ("workspace-a",))),
+        (
+            "enabled-linked-a-and-b",
+            True,
+            (True, True, True, ("workspace-a", "workspace-b")),
+        ),
     ):
         home = _matrix_home(tmp_path / state, state=state)
 
+        assert _matrix_state(home) == expected
         assert _backend_visible_in_classic_cli(home) is visible
         assert _backend_visible_in_tui_catalog(home) is visible
 
@@ -40,13 +45,39 @@ def _matrix_home(home: Path, *, state: str) -> Path:
         else "plugins:\n  enabled: []\n",
         encoding="utf-8",
     )
-    if enabled:
+    if state != "absent":
         _write_generic_backend_plugin(home)
+    configured = state in {
+        "enabled-unlinked", "enabled-linked-a", "enabled-linked-a-and-b"
+    }
+    if configured:
+        with (home / "config.yaml").open("a", encoding="utf-8") as stream:
+            stream.write(
+                "mcp_servers:\n  hades-backend:\n    command: python\n"
+            )
+    bindings: list[str] = []
     if state.endswith("linked-a") or state.endswith("linked-a-and-b"):
         (home / "workspace-a").mkdir()
+        bindings.append("workspace-a")
     if state.endswith("linked-a-and-b"):
         (home / "workspace-b").mkdir()
+        bindings.append("workspace-b")
+    (home / "hades-backend-test-bindings.json").write_text(
+        json.dumps({"bindings": bindings}), encoding="utf-8"
+    )
     return home
+
+
+def _matrix_state(home: Path) -> tuple[bool, bool, bool, tuple[str, ...]]:
+    """Read the profile state represented by each matrix row, not its label."""
+    config = (home / "config.yaml").read_text(encoding="utf-8")
+    installed = (home / "plugins" / "hades-backend" / "plugin.yaml").is_file()
+    enabled = "enabled: [hades-backend]" in config
+    configured = "mcp_servers:\n  hades-backend:" in config
+    bindings = tuple(json.loads(
+        (home / "hades-backend-test-bindings.json").read_text(encoding="utf-8")
+    )["bindings"])
+    return installed, enabled, configured, bindings
 
 
 def _write_generic_backend_plugin(home: Path) -> None:
