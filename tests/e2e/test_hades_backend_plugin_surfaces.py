@@ -8,11 +8,13 @@ released plugin checkout without making a sibling repository a CI dependency.
 from __future__ import annotations
 
 import asyncio
+from contextlib import ExitStack
 import importlib.util
 import io
 import json
 import os
 from pathlib import Path
+import queue
 import select
 import sqlite3
 import subprocess
@@ -28,6 +30,16 @@ import pytest
 
 from hermes_cli.plugin_command_context import create_plugin_command_context
 from hermes_cli.plugins import PluginContext, PluginManager, PluginManifest
+
+
+_MATRIX_STATES = (
+    "absent",
+    "disabled",
+    "enabled-unconfigured",
+    "enabled-unlinked",
+    "enabled-linked-a",
+    "enabled-linked-a-and-b",
+)
 
 
 @pytest.fixture()
@@ -57,6 +69,417 @@ def _manager_with_backend_handler(handler) -> PluginManager:
         "backend", handler, "Optional project knowledge", "set-token|status|sync"
     )
     return manager
+
+
+@pytest.fixture()
+def fake_model_endpoint():
+    """Reusable loopback-only OpenAI-compatible endpoint for real AIAgent turns."""
+    requests: list[dict[str, Any]] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802
+            length = int(self.headers.get("Content-Length", "0"))
+            payload = json.loads(self.rfile.read(length) or b"{}")
+            requests.append({"path": self.path, "payload": payload})
+            if self.path == "/api/show":
+                response: dict[str, Any] = {"capabilities": {}}
+            elif self.path == "/v1/chat/completions":
+                if payload.get("stream"):
+                    chunks = [
+                        {
+                            "id": "task13-fake",
+                            "object": "chat.completion.chunk",
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {
+                                        "role": "assistant",
+                                        "content": "ordinary fake-model response",
+                                    },
+                                    "finish_reason": None,
+                                }
+                            ],
+                        },
+                        {
+                            "id": "task13-fake",
+                            "object": "chat.completion.chunk",
+                            "choices": [
+                                {"index": 0, "delta": {}, "finish_reason": "stop"}
+                            ],
+                            "usage": {
+                                "prompt_tokens": 1,
+                                "completion_tokens": 1,
+                                "total_tokens": 2,
+                            },
+                        },
+                    ]
+                    encoded = (
+                        b"".join(
+                            f"data: {json.dumps(chunk)}\n\n".encode()
+                            for chunk in chunks
+                        )
+                        + b"data: [DONE]\n\n"
+                    )
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream")
+                    self.send_header("Content-Length", str(len(encoded)))
+                    self.end_headers()
+                    self.wfile.write(encoded)
+                    return
+                response = {
+                    "id": "task13-fake",
+                    "object": "chat.completion",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {
+                                "role": "assistant",
+                                "content": "ordinary fake-model response",
+                            },
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": 1,
+                        "completion_tokens": 1,
+                        "total_tokens": 2,
+                    },
+                }
+            else:  # pragma: no cover - diagnostic for unexpected model routes
+                self.send_error(404)
+                return
+            encoded = json.dumps(response).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
+
+        def log_message(self, _format: str, *_args: Any) -> None:
+            return None
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield f"http://127.0.0.1:{server.server_port}/v1", requests
+    server.shutdown()
+    thread.join(timeout=2)
+
+
+@pytest.fixture()
+def backend_fail_sentinel():
+    """Count any forbidden automatic Backend request without using external I/O."""
+    requests: list[tuple[str, str]] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def _reject(self) -> None:
+            requests.append((self.command, self.path))
+            self.send_error(500, "automatic Backend access is forbidden")
+
+        do_GET = _reject  # type: ignore[assignment]
+        do_POST = _reject  # type: ignore[assignment]
+        do_PUT = _reject  # type: ignore[assignment]
+        do_DELETE = _reject  # type: ignore[assignment]
+
+        def log_message(self, _format: str, *_args: Any) -> None:
+            return None
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield f"http://127.0.0.1:{server.server_port}", requests
+    server.shutdown()
+    thread.join(timeout=2)
+
+
+@pytest.fixture()
+def external_backend_endpoint():
+    """Loopback-only Backend boundary for real external pairing/query/sync."""
+    calls: list[dict[str, Any]] = []
+    capabilities = {
+        name: True
+        for name in (
+            "read_files",
+            "read_source_slice",
+            "project_inspection",
+            "sync_git_tree",
+            "populate_backend_ast",
+            "populate_project_wiki",
+            "verify_project_wiki",
+            "write_project_logbook",
+        )
+    }
+
+    class Handler(BaseHTTPRequestHandler):
+        def _record(self, body: dict[str, Any] | None = None) -> None:
+            calls.append({
+                "method": self.command,
+                "path": self.path,
+                "authorization": self.headers.get("Authorization", ""),
+                "body": body,
+            })
+
+        def _reply(self, payload: dict[str, Any]) -> None:
+            encoded = json.dumps(payload).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
+
+        def do_POST(self) -> None:  # noqa: N802
+            length = int(self.headers.get("Content-Length", "0"))
+            body = json.loads(self.rfile.read(length) or b"{}")
+            self._record(body)
+            route = self.path.removeprefix("/api/hades/v1/")
+            project = str(body.get("project_id") or "project")
+            suffix = project.upper().replace("-", "_")
+            if route == "token/verify":
+                self._reply({"project_id": project, "valid": True})
+            elif route == "agents/register":
+                self._reply({
+                    "agent_id": f"agent-{project}",
+                    "agent_token": f"DERIVED_{suffix}",
+                    "capabilities": capabilities,
+                })
+            elif route == "workspaces/bind":
+                self._reply({"workspace_binding_id": f"binding-{project}"})
+            elif route == "artifacts":
+                self._reply({"ok": True})
+            else:  # pragma: no cover - protocol diagnostic
+                self.send_error(404)
+
+        def do_GET(self) -> None:  # noqa: N802
+            self._record()
+            route = self.path.removeprefix("/api/hades/v1/").split("?", 1)[0]
+            if route == "memory/search":
+                self._reply({"items": [], "count": 0})
+            elif route == "artifacts/lookup":
+                self._reply({"exists": False})
+            else:  # pragma: no cover - protocol diagnostic
+                self.send_error(404)
+
+        def log_message(self, _format: str, *_args: Any) -> None:
+            return None
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield f"http://127.0.0.1:{server.server_port}", calls
+    server.shutdown()
+    thread.join(timeout=2)
+
+
+def _write_lifecycle_matrix_profile(
+    profile: Path,
+    *,
+    state: str,
+    memory_provider: str,
+    model_url: str,
+    backend_url: str,
+) -> dict[str, bytes]:
+    """Create one canonical matrix row and return exact memory snapshots."""
+    profile.mkdir(parents=True)
+    enabled = state.startswith("enabled")
+    memory_block = (
+        "memory:\n  provider: holographic\n  holographic:\n    namespace: task13\n"
+        if memory_provider == "holographic"
+        else "memory:\n  provider: ''\n  builtin:\n    namespace: task13\n"
+    )
+    config = (
+        f"plugins:\n  enabled: [{'hades-backend' if enabled else ''}]\n"
+        f"{memory_block}"
+        "model:\n"
+        "  default: task13-fake\n"
+        "  provider: custom\n"
+        f"  base_url: {model_url}\n"
+        "  api_key: fake-key\n"
+        "  api_mode: chat_completions\n"
+    )
+    if state in {
+        "enabled-unlinked",
+        "enabled-linked-a",
+        "enabled-linked-a-and-b",
+    }:
+        config += "mcp_servers:\n  hades_backend:\n    command: python\n"
+    (profile / "config.yaml").write_text(config, encoding="utf-8")
+    if state != "absent":
+        plugin = profile / "plugins" / "hades-backend"
+        plugin.mkdir(parents=True)
+        (plugin / "plugin.yaml").write_text(
+            "name: hades-backend\nkind: standalone\nversion: 0.0.0-test\n",
+            encoding="utf-8",
+        )
+        (plugin / "__init__.py").write_text(
+            "def register(ctx):\n"
+            "    ctx.register_command('backend', lambda _raw, _ctx: 'local-only', "
+            "'Backend', 'set-token|status|sync')\n",
+            encoding="utf-8",
+        )
+
+    linked = []
+    if state in {"enabled-linked-a", "enabled-linked-a-and-b"}:
+        linked.append("a")
+    if state == "enabled-linked-a-and-b":
+        linked.append("b")
+    if linked:
+        with sqlite3.connect(profile / "hades_backend.db") as connection:
+            connection.executescript(
+                "CREATE TABLE backend_agents ("
+                "agent_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, "
+                "base_url TEXT NOT NULL, label TEXT NOT NULL, "
+                "token_env_key TEXT NOT NULL, capabilities TEXT NOT NULL);"
+                "CREATE TABLE workspace_bindings ("
+                "workspace_fingerprint TEXT PRIMARY KEY, project_id TEXT NOT NULL, "
+                "agent_id TEXT NOT NULL, local_project_id TEXT NOT NULL, "
+                "backend_workspace_binding_id TEXT NOT NULL, display_path TEXT NOT NULL, "
+                "repo_root TEXT NOT NULL, git_remote_display TEXT, git_remote_hash TEXT, "
+                "head_commit TEXT, status TEXT NOT NULL);"
+            )
+            env_lines = []
+            for label in linked:
+                workspace = profile / f"workspace-{label}"
+                workspace.mkdir()
+                token_key = f"TASK13_DERIVED_{label.upper()}"
+                connection.execute(
+                    "INSERT INTO backend_agents VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        f"agent-{label}",
+                        f"project-{label}",
+                        backend_url,
+                        label,
+                        token_key,
+                        "{}",
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO workspace_bindings VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        f"fingerprint-{label}",
+                        f"project-{label}",
+                        f"agent-{label}",
+                        f"local-{label}",
+                        f"binding-{label}",
+                        str(workspace),
+                        str(workspace),
+                        "",
+                        "",
+                        "",
+                        "linked",
+                    ),
+                )
+                env_lines.append(f"{token_key}=DERIVED_{label.upper()}\n")
+        (profile / ".env").write_text("".join(env_lines), encoding="utf-8")
+
+    (profile / "MEMORY.md").write_text("task13 memory sentinel\n", encoding="utf-8")
+    (profile / "USER.md").write_text("task13 user sentinel\n", encoding="utf-8")
+    (profile / "memory_store.db").write_bytes(b"task13-memory-database")
+    return _memory_snapshot(profile)
+
+
+def _memory_snapshot(profile: Path) -> dict[str, bytes]:
+    config = (profile / "config.yaml").read_text(encoding="utf-8")
+    memory_lines = []
+    collecting = False
+    for line in config.splitlines(keepends=True):
+        if line.startswith("memory:"):
+            collecting = True
+        elif collecting and line and not line.startswith((" ", "\t")):
+            break
+        if collecting:
+            memory_lines.append(line)
+    return {
+        "memory_config": "".join(memory_lines).encode(),
+        "MEMORY.md": (profile / "MEMORY.md").read_bytes(),
+        "USER.md": (profile / "USER.md").read_bytes(),
+        "memory_store.db": (profile / "memory_store.db").read_bytes(),
+    }
+
+
+def _prepare_external_profile(
+    profile: Path,
+    plugin_root: Path,
+    *,
+    memory_provider: str,
+    model_url: str | None = None,
+) -> dict[str, bytes]:
+    profile.mkdir(parents=True)
+    plugin_dir = profile / "plugins"
+    plugin_dir.mkdir()
+    (plugin_dir / "hades-backend").symlink_to(plugin_root, target_is_directory=True)
+    memory_block = (
+        "memory:\n  provider: holographic\n  holographic:\n    namespace: task13\n"
+        if memory_provider == "holographic"
+        else "memory:\n  provider: ''\n  builtin:\n    namespace: task13\n"
+    )
+    config = "plugins:\n  enabled: [hades-backend]\n" + memory_block
+    if model_url is not None:
+        config += (
+            "model:\n"
+            "  default: task13-fake\n"
+            "  provider: custom\n"
+            f"  base_url: {model_url}\n"
+            "  api_key: fake-key\n"
+            "  api_mode: chat_completions\n"
+        )
+    (profile / "config.yaml").write_text(config, encoding="utf-8")
+    (profile / "MEMORY.md").write_text(
+        f"task13 {memory_provider} memory sentinel\n", encoding="utf-8"
+    )
+    (profile / "USER.md").write_text(
+        f"task13 {memory_provider} user sentinel\n", encoding="utf-8"
+    )
+    (profile / "memory_store.db").write_bytes(
+        f"task13-{memory_provider}-memory-database".encode()
+    )
+    return _memory_snapshot(profile)
+
+
+def _assert_external_secret_hygiene(
+    profile: Path,
+    *,
+    bootstrap: str,
+    derived: str,
+    sinks: Any,
+) -> None:
+    """Scan persisted/runtime observer sinks, excluding the fake server recorder."""
+    file_blobs: list[tuple[Path, bytes]] = []
+    for path in profile.rglob("*"):
+        if path.is_file() and not path.is_symlink():
+            file_blobs.append((path, path.read_bytes()))
+    assert all(bootstrap.encode() not in blob for _path, blob in file_blobs)
+    rendered_sinks = json.dumps(sinks, sort_keys=True, default=str)
+    assert bootstrap not in rendered_sinks
+    env = (profile / ".env").read_text(encoding="utf-8")
+    assert env.count(derived) == 1
+    occurrences = sum(blob.count(derived.encode()) for _path, blob in file_blobs)
+    assert occurrences == 1
+
+
+def _exercise_external_query_and_sync(
+    plugin_root: Path,
+    *,
+    profile: Path,
+    workspace: Path,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    entrypoint = _load_external_entrypoint(plugin_root)
+    package = f"{entrypoint.__name__}.hades_backend_plugin"
+    service = importlib.import_module(f"{package}.service")
+    sync = importlib.import_module(f"{package}.sync")
+    query = service.ProjectKnowledgeService(profile_home=profile).project_search(
+        workspace, "task13"
+    )
+    synced = sync.sync_project_knowledge(
+        sync.ProjectSyncRequest(
+            workspace=workspace,
+            domain="source_index",
+            profile_home=profile,
+        )
+    )
+    assert query["status"] == "ok"
+    assert synced["status"] == "ok"
+    assert synced["network_attempted"] is True
+    return query, synced
 
 
 @pytest.mark.parametrize("surface", ["tui", "desktop"])
@@ -202,7 +625,10 @@ def test_desktop_plugin_invocations_keep_profiles_scoped_across_success_and_canc
     from hermes_constants import get_hermes_home
 
     launch_home = tmp_path / "launch-profile"
-    profiles = {"success": tmp_path / "profile-success", "cancel": tmp_path / "profile-cancel"}
+    profiles = {
+        "success": tmp_path / "profile-success",
+        "cancel": tmp_path / "profile-cancel",
+    }
     for profile in (launch_home, *profiles.values()):
         profile.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(launch_home))
@@ -216,27 +642,52 @@ def test_desktop_plugin_invocations_keep_profiles_scoped_across_success_and_canc
         return "cancelled" if not token else "completed"
 
     manager = PluginManager()
-    context = PluginContext(PluginManifest(name="profile-probe", source="user"), manager)
+    context = PluginContext(
+        PluginManifest(name="profile-probe", source="user"), manager
+    )
     context.register_command("profile-probe", profile_handler, "Profile probe")
     monkeypatch.setattr("hermes_cli.plugins._plugin_manager", manager)
     for label, profile in profiles.items():
         gateway_server._sessions[f"desktop-{label}"] = {
-            "agent": None, "cwd": str(tmp_path), "profile_home": str(profile),
-            "session_key": f"desktop-{label}", "source": "desktop",
+            "agent": None,
+            "cwd": str(tmp_path),
+            "profile_home": str(profile),
+            "session_key": f"desktop-{label}",
+            "source": "desktop",
         }
 
     responses: dict[str, dict[str, Any]] = {}
-    workers = [threading.Thread(target=lambda label=label: responses.setdefault(label, gateway_server.handle_request({
-        "id": f"{label}-command", "method": "slash.exec",
-        "params": {"session_id": f"desktop-{label}", "command": "profile-probe"},
-    }))) for label in profiles]
+    workers = [
+        threading.Thread(
+            target=lambda label=label: responses.setdefault(
+                label,
+                gateway_server.handle_request({
+                    "id": f"{label}-command",
+                    "method": "slash.exec",
+                    "params": {
+                        "session_id": f"desktop-{label}",
+                        "command": "profile-probe",
+                    },
+                }),
+            )
+        )
+        for label in profiles
+    ]
     for worker in workers:
         worker.start()
-    request_ids = {label: _wait_for_owned_secret_request(gateway_server, f"desktop-{label}") for label in profiles}
+    request_ids = {
+        label: _wait_for_owned_secret_request(gateway_server, f"desktop-{label}")
+        for label in profiles
+    }
     for label, value in (("success", "DERIVED_SUCCESS_ONLY"), ("cancel", "")):
         gateway_server.handle_request({
-            "id": f"{label}-secret", "method": "secret.respond",
-            "params": {"request_id": request_ids[label], "session_id": f"desktop-{label}", "value": value},
+            "id": f"{label}-secret",
+            "method": "secret.respond",
+            "params": {
+                "request_id": request_ids[label],
+                "session_id": f"desktop-{label}",
+                "value": value,
+            },
         })
     for worker in workers:
         worker.join(timeout=2)
@@ -250,6 +701,118 @@ def test_desktop_plugin_invocations_keep_profiles_scoped_across_success_and_canc
     }
     assert str(get_hermes_home()) == str(launch_home)
     assert "DERIVED_SUCCESS_ONLY" not in repr(responses)
+
+
+def test_dispatched_plugin_invocations_scope_concurrent_success_cancel_and_error(
+    monkeypatch, gateway_server, tmp_path: Path
+) -> None:
+    """Fallback dispatch owns the same per-session profile scope as slash.exec."""
+    from hermes_cli import plugin_command_context
+    from hermes_constants import get_hermes_home
+
+    launch_home = tmp_path / "launch-profile"
+    outcomes = ("success", "cancel", "error")
+    profiles = {outcome: tmp_path / f"profile-{outcome}" for outcome in outcomes}
+    for profile in (launch_home, *profiles.values()):
+        profile.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(launch_home))
+
+    created: dict[str, str] = {}
+    observed: dict[str, tuple[str, str]] = {}
+    original_create_context = plugin_command_context.create_plugin_command_context
+
+    def create_context(**kwargs: Any):
+        created[kwargs["session_id"]] = str(get_hermes_home())
+        return original_create_context(**kwargs)
+
+    def profile_handler(raw_args: str, context) -> str:
+        before = str(get_hermes_home())
+        token = context.request_secret("Profile-scoped token")
+        after = str(get_hermes_home())
+        observed[raw_args] = (before, after)
+        if raw_args == "error":
+            raise RuntimeError("profile-probe-error")
+        return "cancelled" if not token else "completed"
+
+    manager = PluginManager()
+    plugin_context = PluginContext(
+        PluginManifest(name="profile-probe", source="user"), manager
+    )
+    plugin_context.register_command("profile-probe", profile_handler, "Profile probe")
+    monkeypatch.setattr(
+        plugin_command_context, "create_plugin_command_context", create_context
+    )
+    monkeypatch.setattr("hermes_cli.plugins._plugin_manager", manager)
+
+    for outcome, profile in profiles.items():
+        session_id = f"desktop-dispatch-{outcome}"
+        gateway_server._sessions[session_id] = {
+            "agent": None,
+            "cwd": str(tmp_path),
+            "profile_home": str(profile),
+            "session_key": session_id,
+            "source": "desktop",
+        }
+
+    responses: dict[str, dict[str, Any]] = {}
+
+    def invoke(outcome: str) -> None:
+        responses[outcome] = gateway_server.handle_request({
+            "id": f"{outcome}-command",
+            "method": "command.dispatch",
+            "params": {
+                "session_id": f"desktop-dispatch-{outcome}",
+                "name": "profile-probe",
+                "arg": outcome,
+            },
+        })
+
+    workers = {
+        outcome: threading.Thread(target=invoke, args=(outcome,))
+        for outcome in outcomes
+    }
+    for worker in workers.values():
+        worker.start()
+    request_ids = {
+        outcome: _wait_for_owned_secret_request(
+            gateway_server, f"desktop-dispatch-{outcome}"
+        )
+        for outcome in outcomes
+    }
+    for outcome, value in (
+        ("success", "DERIVED_SUCCESS_ONLY"),
+        ("cancel", ""),
+        ("error", "DERIVED_ERROR_ONLY"),
+    ):
+        gateway_server.handle_request({
+            "id": f"{outcome}-secret",
+            "method": "secret.respond",
+            "params": {
+                "request_id": request_ids[outcome],
+                "session_id": f"desktop-dispatch-{outcome}",
+                "value": value,
+            },
+        })
+    for worker in workers.values():
+        worker.join(timeout=2)
+        assert not worker.is_alive()
+
+    assert created == {
+        f"desktop-dispatch-{outcome}": str(profiles[outcome]) for outcome in outcomes
+    }
+    assert observed == {
+        outcome: (str(profiles[outcome]), str(profiles[outcome]))
+        for outcome in outcomes
+    }
+    assert responses["success"]["result"]["output"] == "completed"
+    assert responses["cancel"]["result"]["output"] == "cancelled"
+    assert (
+        "Plugin command error: profile-probe-error"
+        in responses["error"]["result"]["output"]
+    )
+    assert str(get_hermes_home()) == str(launch_home)
+    assert "DERIVED_SUCCESS_ONLY" not in repr(responses)
+    assert "DERIVED_ERROR_ONLY" not in repr(responses)
 
 
 def test_fake_model_factory_preserves_the_configured_opencode_runtime(
@@ -287,13 +850,16 @@ def test_fake_model_factory_preserves_the_configured_opencode_runtime(
     monkeypatch.setattr(
         server,
         "_resolve_runtime_with_fallback",
-        lambda kwargs: resolved.append(kwargs) or {
-            "provider": "opencode-go",
-            "base_url": "http://fake.invalid/v1",
-            "api_key": "fake-key",
-            "api_mode": "chat_completions",
-            "credential_pool": None,
-        },
+        lambda kwargs: (
+            resolved.append(kwargs)
+            or {
+                "provider": "opencode-go",
+                "base_url": "http://fake.invalid/v1",
+                "api_key": "fake-key",
+                "api_mode": "chat_completions",
+                "credential_pool": None,
+            }
+        ),
     )
 
     server._make_agent("tui-surface", "session-a")
@@ -307,7 +873,10 @@ def test_fake_model_factory_preserves_the_configured_opencode_runtime(
         "deepseek-v4-flash",
         "deepseek-v4-flash",
     ]
-    assert [agent["provider"] for agent in constructed] == ["opencode-go", "opencode-go"]
+    assert [agent["provider"] for agent in constructed] == [
+        "opencode-go",
+        "opencode-go",
+    ]
     prompts = [agent["ephemeral_system_prompt"].encode() for agent in constructed]
     assert prompts == [prompt.encode(), prompt.encode()]
 
@@ -380,7 +949,9 @@ def test_fake_model_turn_routes_title_after_an_ordinary_surface_conversation(
         lambda event, sid, payload=None: emitted.append((event, sid, payload or {})),
     )
     monkeypatch.setattr(gateway_server, "_get_db", lambda: None)
-    monkeypatch.setattr(gateway_server, "_sync_agent_model_with_config", lambda *_args: None)
+    monkeypatch.setattr(
+        gateway_server, "_sync_agent_model_with_config", lambda *_args: None
+    )
     monkeypatch.setattr(gateway_server, "make_stream_renderer", lambda _cols: None)
     monkeypatch.setattr(gateway_server, "render_message", lambda _raw, _cols: None)
 
@@ -392,11 +963,13 @@ def test_fake_model_turn_routes_title_after_an_ordinary_surface_conversation(
         })
 
     assert response["result"] == {"status": "streaming"}
-    assert received == [{
-        "prompt": "ordinary question",
-        "history": [],
-        "task_id": f"{surface}-stored-session",
-    }]
+    assert received == [
+        {
+            "prompt": "ordinary question",
+            "history": [],
+            "task_id": f"{surface}-stored-session",
+        }
+    ]
     complete = next(
         payload
         for event, sid, payload in emitted
@@ -513,13 +1086,303 @@ def test_classic_fake_model_turn_and_resume_keep_one_runtime_and_title(
         {"role": "assistant", "content": "answer: first question"},
     ]
     assert title.call_count == 2
-    assert all(call.kwargs["main_runtime"] == {
-        "model": "deepseek-v4-flash",
-        "provider": "opencode-go",
-        "base_url": "http://fake.invalid/v1",
-        "api_key": "fake-key",
-        "api_mode": "chat_completions",
-    } for call in title.call_args_list)
+    assert all(
+        call.kwargs["main_runtime"]
+        == {
+            "model": "deepseek-v4-flash",
+            "provider": "opencode-go",
+            "base_url": "http://fake.invalid/v1",
+            "api_key": "fake-key",
+            "api_mode": "chat_completions",
+        }
+        for call in title.call_args_list
+    )
+
+
+def _classic_cli_with_agent(agent, model_url: str):
+    import cli
+
+    class QuietConsole:
+        width = 80
+
+        def print(self, *_args: Any, **_kwargs: Any) -> None:
+            return None
+
+    classic = cli.HermesCLI.__new__(cli.HermesCLI)
+    classic.agent = agent
+    classic.api_mode = "chat_completions"
+    classic.api_key = "fake-key"
+    classic.base_url = model_url
+    classic.bell_on_complete = False
+    classic.conversation_history = []
+    classic.console = QuietConsole()
+    classic.final_response_markdown = False
+    classic.model = "task13-fake"
+    classic.provider = "opencode-go"
+    classic.session_id = agent.session_id
+    classic.show_reasoning = False
+    classic._active_agent_route_signature = "task13-fixed-route"
+    classic._clarify_freetext = False
+    classic._clarify_state = None
+    classic._interrupt_queue = queue.Queue()
+    classic._last_turn_interrupted = False
+    classic._pending_model_switch_note = None
+    classic._pending_skills_reload_note = None
+    classic._pending_moa_config = None
+    classic._prompt_start_time = None
+    classic._session_db = getattr(agent, "_session_db", None)
+    classic._stream_box_opened = False
+    classic._stream_started = False
+    classic._voice_continuous = False
+    classic._voice_mode = False
+    classic._voice_tts = False
+    classic._ensure_runtime_credentials = lambda: True
+    classic._flush_credit_notices = lambda: None
+    classic._flush_stream = lambda: None
+    classic._invalidate = lambda **_kwargs: None
+    classic._reset_stream_state = lambda: None
+    classic._resolve_turn_agent_config = lambda _message: {
+        "signature": "task13-fixed-route",
+        "model": "task13-fake",
+        "runtime": {"provider": "opencode-go"},
+    }
+    classic._scrollback_box_width = lambda: 80
+    classic._secret_capture_callback = lambda *_args: None
+    classic._sudo_password_callback = lambda *_args: None
+    classic._approval_callback = lambda *_args: None
+    classic._transfer_session_yolo = lambda *_args: None
+    return classic, QuietConsole
+
+
+@pytest.mark.live_system_guard_bypass
+@pytest.mark.parametrize("state", _MATRIX_STATES)
+@pytest.mark.parametrize("memory_provider", ["holographic", "builtin-only"])
+def test_every_canonical_row_runs_real_classic_and_tui_agent_lifecycle_without_backend(
+    monkeypatch,
+    gateway_server,
+    tmp_path: Path,
+    fake_model_endpoint,
+    backend_fail_sentinel,
+    state: str,
+    memory_provider: str,
+) -> None:
+    """Every profile state supports ordinary/resumed real-agent work without Backend."""
+    import cli
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+    from hermes_state import SessionDB
+    from run_agent import AIAgent
+
+    model_url, model_requests = fake_model_endpoint
+    backend_url, backend_requests = backend_fail_sentinel
+    profile = tmp_path / f"{state}-{memory_provider}"
+    before = _write_lifecycle_matrix_profile(
+        profile,
+        state=state,
+        memory_provider=memory_provider,
+        model_url=model_url,
+        backend_url=backend_url,
+    )
+    workspace = profile / "ordinary-workspace"
+    workspace.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(profile))
+    home_token = set_hermes_home_override(profile)
+    backend_count = len(backend_requests)
+    model_count = len(model_requests)
+    titles: list[dict[str, Any]] = []
+
+    def capture_title(*_args: Any, **kwargs: Any) -> None:
+        titles.append(kwargs["main_runtime"])
+
+    def make_agent(session_id: str, db_path: Path) -> AIAgent:
+        agent = AIAgent(
+            model="task13-fake",
+            provider="opencode-go",
+            base_url=model_url,
+            api_key="fake-key",
+            api_mode="chat_completions",
+            quiet_mode=True,
+            session_id=session_id,
+            skip_context_files=True,
+            skip_memory=True,
+            session_db=SessionDB(db_path=db_path),
+        )
+        agent._disable_streaming = True
+        return agent
+
+    try:
+        classic_agent = make_agent("task13-classic", profile / "classic-state.db")
+        classic, quiet_console = _classic_cli_with_agent(classic_agent, model_url)
+        with (
+            patch.object(cli, "ChatConsole", quiet_console),
+            patch.object(cli, "Panel", lambda value, **_kwargs: value),
+            patch.object(cli, "_cprint", lambda *_args, **_kwargs: None),
+            patch.object(cli.time, "sleep", lambda _seconds: None),
+            patch("agent.title_generator.maybe_auto_title", side_effect=capture_title),
+        ):
+            assert classic.chat("classic ordinary") == "ordinary fake-model response"
+            assert classic.chat("classic resumed") == "ordinary fake-model response"
+        assert [message["content"] for message in classic.conversation_history] == [
+            "classic ordinary",
+            "ordinary fake-model response",
+            "classic resumed",
+            "ordinary fake-model response",
+        ]
+
+        tui_db = SessionDB(db_path=profile / "state.db")
+        tui_agent = make_agent("task13-tui-stored", profile / "state.db")
+        session_id = "task13-tui-live"
+        ready = threading.Event()
+        ready.set()
+        gateway_server._sessions[session_id] = {
+            "agent": tui_agent,
+            "agent_error": None,
+            "agent_ready": ready,
+            "attached_images": [],
+            "cols": 80,
+            "created_at": time.time(),
+            "cwd": str(workspace),
+            "explicit_cwd": True,
+            "history": [],
+            "history_lock": threading.Lock(),
+            "history_version": 0,
+            "image_counter": 0,
+            "inflight_turn": None,
+            "last_active": time.time(),
+            "profile_home": str(profile),
+            "running": False,
+            "session_key": "task13-tui-stored",
+            "slash_worker": None,
+            "source": "tui",
+            "tool_progress_mode": "all",
+            "transport": gateway_server._stdio_transport,
+        }
+        emitted: list[tuple[str, str, dict[str, Any]]] = []
+
+        def wait_for_completions(expected: int) -> None:
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                completed = [
+                    event
+                    for event, _sid, _payload in emitted
+                    if event == "message.complete"
+                ]
+                if len(completed) >= expected:
+                    return
+                time.sleep(0.01)
+            pytest.fail(f"expected {expected} completed TUI turns; events={emitted!r}")
+
+        def wait_for_titles(expected: int) -> None:
+            deadline = time.monotonic() + 2
+            while len(titles) < expected and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert len(titles) >= expected
+
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch.object(
+                    gateway_server,
+                    "_emit",
+                    lambda event, sid, payload=None: emitted.append((
+                        event,
+                        sid,
+                        payload or {},
+                    )),
+                )
+            )
+            stack.enter_context(patch.object(gateway_server, "_get_db", lambda: tui_db))
+            stack.enter_context(
+                patch.object(
+                    gateway_server, "_sync_agent_model_with_config", lambda *_args: None
+                )
+            )
+            stack.enter_context(
+                patch.object(gateway_server, "make_stream_renderer", lambda _cols: None)
+            )
+            stack.enter_context(
+                patch.object(gateway_server, "render_message", lambda _raw, _cols: None)
+            )
+            stack.enter_context(
+                patch(
+                    "agent.title_generator.maybe_auto_title", side_effect=capture_title
+                )
+            )
+            catalog = gateway_server.handle_request({
+                "id": "catalog",
+                "method": "commands.catalog",
+                "params": {},
+            })
+            settings = gateway_server.handle_request({
+                "id": "settings",
+                "method": "config.get",
+                "params": {"key": "full"},
+            })
+            first = gateway_server.handle_request({
+                "id": "first",
+                "method": "prompt.submit",
+                "params": {"session_id": session_id, "text": "tui ordinary"},
+            })
+            wait_for_completions(1)
+            wait_for_titles(3)
+            resumed = gateway_server.handle_request({
+                "id": "resume",
+                "method": "session.resume",
+                "params": {
+                    "session_id": "task13-tui-stored",
+                    "eager_build": True,
+                },
+            })
+            resumed_id = resumed["result"]["session_id"]
+            second = gateway_server.handle_request({
+                "id": "second",
+                "method": "prompt.submit",
+                "params": {"session_id": resumed_id, "text": "tui resumed"},
+            })
+            wait_for_completions(2)
+            wait_for_titles(4)
+            closed = gateway_server.handle_request({
+                "id": "close",
+                "method": "session.close",
+                "params": {"session_id": resumed_id},
+            })
+
+        assert "result" in catalog and "result" in settings
+        assert first["result"] == {"status": "streaming"}
+        assert second["result"] == {"status": "streaming"}
+        assert closed["result"] == {"closed": True}
+        assert (
+            len([
+                event
+                for event, _sid, _payload in emitted
+                if event == "message.complete"
+            ])
+            == 2
+        )
+    finally:
+        reset_hermes_home_override(home_token)
+
+    ordinary_requests = [
+        request
+        for request in model_requests[model_count:]
+        if request["path"] == "/v1/chat/completions"
+    ]
+    assert len(ordinary_requests) == 4
+    assert {request["payload"]["model"] for request in ordinary_requests} == {
+        "task13-fake"
+    }
+    assert len(titles) == 4
+    assert all(
+        runtime
+        == {
+            "model": "task13-fake",
+            "provider": "opencode-go",
+            "base_url": model_url,
+            "api_key": "fake-key",
+            "api_mode": "chat_completions",
+        }
+        for runtime in titles
+    )
+    assert backend_requests[backend_count:] == []
+    assert _memory_snapshot(profile) == before
 
 
 @pytest.mark.live_system_guard_bypass
@@ -571,9 +1434,152 @@ def test_spawned_serve_runs_the_real_desktop_websocket_transport_hermetically(
         stdout, stderr = _terminate_process(process)
         transcript.extend([stdout, stderr])
 
-    assert reply == {"jsonrpc": "2.0", "id": "task13-sessions", "result": {"sessions": []}}
+    assert reply == {
+        "jsonrpc": "2.0",
+        "id": "task13-sessions",
+        "result": {"sessions": []},
+    }
     assert process.returncode is not None
     assert "HERMES_DASHBOARD_READY port=" in "".join(transcript)
+
+
+@pytest.mark.live_system_guard_bypass
+@pytest.mark.parametrize("state", _MATRIX_STATES)
+def test_every_canonical_row_runs_spawned_desktop_websocket_lifecycle_without_backend(
+    tmp_path: Path,
+    fake_model_endpoint,
+    backend_fail_sentinel,
+    state: str,
+) -> None:
+    """Every opt-in row survives the real ``serve`` + Desktop lifecycle."""
+    model_url, model_requests = fake_model_endpoint
+    backend_url, backend_requests = backend_fail_sentinel
+    profile = tmp_path / "profile"
+    memory_provider = (
+        "holographic" if _MATRIX_STATES.index(state) % 2 == 0 else "builtin-only"
+    )
+    before = _write_lifecycle_matrix_profile(
+        profile,
+        state=state,
+        memory_provider=memory_provider,
+        model_url=model_url,
+        backend_url=backend_url,
+    )
+    workspace = tmp_path / "desktop-workspace"
+    workspace.mkdir()
+    process, transcript = _spawn_serve_process(tmp_path, profile)
+    backend_count = len(backend_requests)
+    model_count = len(model_requests)
+    try:
+        port = _wait_for_spawned_serve_port(process, transcript)
+        result = asyncio.run(
+            _desktop_lifecycle_over_websocket(
+                port,
+                "task13-desktop-websocket-token",
+                workspace=workspace,
+                expected_backend_visible=state.startswith("enabled"),
+            )
+        )
+    finally:
+        stdout, stderr = _terminate_process(process)
+        transcript.extend([stdout, stderr])
+
+    chat_requests = [
+        request
+        for request in model_requests[model_count:]
+        if request["path"] == "/v1/chat/completions"
+    ]
+    # The two streamed requests are the ordinary/resumed conversation. Title
+    # generation is asynchronous and may finish once or once per persisted turn.
+    assert (
+        len([request for request in chat_requests if request["payload"].get("stream")])
+        == 2
+    )
+    assert len(chat_requests) >= 3
+    assert {request["payload"]["model"] for request in chat_requests} == {"task13-fake"}
+    assert backend_requests[backend_count:] == []
+    assert _memory_snapshot(profile) == before
+    assert process.returncode is not None
+    assert "HERMES_DASHBOARD_READY port=" in "".join(transcript)
+    assert backend_url not in json.dumps(result["frames"])
+
+
+@pytest.mark.live_system_guard_bypass
+def test_spawned_desktop_keeps_holographic_and_builtin_profiles_isolated(
+    tmp_path: Path,
+    fake_model_endpoint,
+    backend_fail_sentinel,
+) -> None:
+    """One Desktop backend scopes real lifecycle state to two memory profiles."""
+    model_url, model_requests = fake_model_endpoint
+    backend_url, backend_requests = backend_fail_sentinel
+    launch_profile = tmp_path / "launch"
+    launch_before = _write_lifecycle_matrix_profile(
+        launch_profile,
+        state="absent",
+        memory_provider="builtin-only",
+        model_url=model_url,
+        backend_url=backend_url,
+    )
+    profiles = {
+        "task13-holographic": "holographic",
+        "task13-builtin": "builtin-only",
+    }
+    snapshots = {}
+    for name, memory_provider in profiles.items():
+        snapshots[name] = _write_lifecycle_matrix_profile(
+            launch_profile / "profiles" / name,
+            state="enabled-linked-a-and-b",
+            memory_provider=memory_provider,
+            model_url=model_url,
+            backend_url=backend_url,
+        )
+    workspaces = {name: tmp_path / f"desktop-{name}" for name in profiles}
+    for workspace in workspaces.values():
+        workspace.mkdir()
+
+    process, transcript = _spawn_serve_process(tmp_path, launch_profile)
+    backend_count = len(backend_requests)
+    model_count = len(model_requests)
+    results: dict[str, dict[str, Any]] = {}
+    try:
+        port = _wait_for_spawned_serve_port(process, transcript)
+        for name in profiles:
+            results[name] = asyncio.run(
+                _desktop_lifecycle_over_websocket(
+                    port,
+                    "task13-desktop-websocket-token",
+                    workspace=workspaces[name],
+                    expected_backend_visible=False,
+                    profile=name,
+                )
+            )
+    finally:
+        stdout, stderr = _terminate_process(process)
+        transcript.extend([stdout, stderr])
+
+    chat_requests = [
+        request
+        for request in model_requests[model_count:]
+        if request["path"] == "/v1/chat/completions"
+    ]
+    assert (
+        len([request for request in chat_requests if request["payload"].get("stream")])
+        == 4
+    )
+    assert len(chat_requests) >= 6
+    assert {request["payload"]["model"] for request in chat_requests} == {"task13-fake"}
+    assert backend_requests[backend_count:] == []
+    assert _memory_snapshot(launch_profile) == launch_before
+    for name in profiles:
+        profile = launch_profile / "profiles" / name
+        assert _memory_snapshot(profile) == snapshots[name]
+        assert (profile / "state.db").is_file()
+    assert (
+        results["task13-holographic"]["stored_session_id"]
+        != results["task13-builtin"]["stored_session_id"]
+    )
+    assert process.returncode is not None
 
 
 def test_external_backend_plugin_registration_contract_is_opt_in_and_narrow() -> None:
@@ -721,29 +1727,34 @@ def test_external_plugin_mcp_stdio_exposes_only_project_tools_when_unlinked(
         text=True,
     )
     try:
-        initialized = _mcp_stdio_request(process, {
-            "jsonrpc": "2.0",
-            "id": "initialize",
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2025-11-25",
-                "capabilities": {},
-                "clientInfo": {"name": "task13", "version": "1"},
+        initialized = _mcp_stdio_request(
+            process,
+            {
+                "jsonrpc": "2.0",
+                "id": "initialize",
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-11-25",
+                    "capabilities": {},
+                    "clientInfo": {"name": "task13", "version": "1"},
+                },
             },
-        })
+        )
         assert initialized["result"]["serverInfo"]["name"] == "hades-backend"
         assert process.stdin is not None
         process.stdin.write(
-            json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"})
-            + "\n"
+            json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n"
         )
         process.stdin.flush()
-        listed = _mcp_stdio_request(process, {
-            "jsonrpc": "2.0",
-            "id": "tools-list",
-            "method": "tools/list",
-            "params": {},
-        })
+        listed = _mcp_stdio_request(
+            process,
+            {
+                "jsonrpc": "2.0",
+                "id": "tools-list",
+                "method": "tools/list",
+                "params": {},
+            },
+        )
         names = {tool["name"] for tool in listed["result"]["tools"]}
         assert names == {
             "project_status",
@@ -758,15 +1769,18 @@ def test_external_plugin_mcp_stdio_exposes_only_project_tools_when_unlinked(
             "resolved_bug_promote",
         }
         assert not {name for name in names if "memory" in name or "sync" in name}
-        unlinked = _mcp_stdio_request(process, {
-            "jsonrpc": "2.0",
-            "id": "unlinked",
-            "method": "tools/call",
-            "params": {
-                "name": "project_status",
-                "arguments": {"workspace": str(workspace)},
+        unlinked = _mcp_stdio_request(
+            process,
+            {
+                "jsonrpc": "2.0",
+                "id": "unlinked",
+                "method": "tools/call",
+                "params": {
+                    "name": "project_status",
+                    "arguments": {"workspace": str(workspace)},
+                },
             },
-        })
+        )
         payload = json.loads(unlinked["result"]["content"][0]["text"])
         assert payload["network_attempted"] is False
     finally:
@@ -780,7 +1794,9 @@ def test_external_plugin_mcp_stdio_query_uses_the_linked_derived_credential(
     """A linked MCP project query resolves one persisted binding and its derived token."""
     root = _external_plugin_root_or_skip()
     entrypoint = _load_external_entrypoint(root)
-    pairing = importlib.import_module(f"{entrypoint.__name__}.hades_backend_plugin.pairing")
+    pairing = importlib.import_module(
+        f"{entrypoint.__name__}.hades_backend_plugin.pairing"
+    )
     profile, workspace = tmp_path / "profile", tmp_path / "linked-workspace"
     workspace.mkdir()
     calls: list[tuple[str, str]] = []
@@ -791,36 +1807,94 @@ def test_external_plugin_mcp_stdio_query_uses_the_linked_derived_credential(
             if self.path.endswith("token/verify"):
                 payload: dict[str, Any] = {"project_id": "project-a", "valid": True}
             elif self.path.endswith("agents/register"):
-                payload = {"agent_id": "agent-a", "agent_token": "DERIVED_MCP_A", "capabilities": dict.fromkeys(pairing.PROJECT_KNOWLEDGE_CAPABILITIES, True)}
+                payload = {
+                    "agent_id": "agent-a",
+                    "agent_token": "DERIVED_MCP_A",
+                    "capabilities": dict.fromkeys(
+                        pairing.PROJECT_KNOWLEDGE_CAPABILITIES, True
+                    ),
+                }
             elif self.path.endswith("workspaces/bind"):
                 payload = {"workspace_binding_id": "binding-a"}
             else:
                 self.send_error(404)
                 return
             encoded = json.dumps(payload).encode()
-            self.send_response(200); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(encoded))); self.end_headers(); self.wfile.write(encoded)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
 
         def do_GET(self) -> None:  # noqa: N802
             calls.append((self.path, self.headers.get("Authorization", "")))
             assert self.path.startswith("/api/hades/v1/memory/search?")
             encoded = json.dumps({"items": [], "count": 0}).encode()
-            self.send_response(200); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(encoded))); self.end_headers(); self.wfile.write(encoded)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
 
         def log_message(self, _format: str, *_args: Any) -> None:
             return None
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
     try:
-        pairing.pair_project(base_url=f"http://127.0.0.1:{server.server_port}", project_id="project-a", bootstrap_token="BOOTSTRAP_MCP_A", workspace=workspace, profile_home=profile)
-        process = subprocess.Popen([sys.executable, "-m", "hades_backend_plugin.mcp_server"], cwd=workspace, env={**os.environ, "HERMES_HOME": str(profile), "PYTHONPATH": str(root), "PYTHONDONTWRITEBYTECODE": "1"}, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        pairing.pair_project(
+            base_url=f"http://127.0.0.1:{server.server_port}",
+            project_id="project-a",
+            bootstrap_token="BOOTSTRAP_MCP_A",
+            workspace=workspace,
+            profile_home=profile,
+        )
+        process = subprocess.Popen(
+            [sys.executable, "-m", "hades_backend_plugin.mcp_server"],
+            cwd=workspace,
+            env={
+                **os.environ,
+                "HERMES_HOME": str(profile),
+                "PYTHONPATH": str(root),
+                "PYTHONDONTWRITEBYTECODE": "1",
+            },
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
         try:
-            _mcp_stdio_request(process, {"jsonrpc": "2.0", "id": "initialize", "method": "initialize", "params": {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "task13", "version": "1"}}})
-            response = _mcp_stdio_request(process, {"jsonrpc": "2.0", "id": "search", "method": "tools/call", "params": {"name": "project_search", "arguments": {"workspace": str(workspace), "query": "needle"}}})
+            _mcp_stdio_request(
+                process,
+                {
+                    "jsonrpc": "2.0",
+                    "id": "initialize",
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2025-11-25",
+                        "capabilities": {},
+                        "clientInfo": {"name": "task13", "version": "1"},
+                    },
+                },
+            )
+            response = _mcp_stdio_request(
+                process,
+                {
+                    "jsonrpc": "2.0",
+                    "id": "search",
+                    "method": "tools/call",
+                    "params": {
+                        "name": "project_search",
+                        "arguments": {"workspace": str(workspace), "query": "needle"},
+                    },
+                },
+            )
         finally:
             _terminate_process(process)
     finally:
-        server.shutdown(); thread.join(timeout=2)
+        server.shutdown()
+        thread.join(timeout=2)
 
     payload = json.loads(response["result"]["content"][0]["text"])
     assert payload["status"] == "ok"
@@ -832,7 +1906,9 @@ def test_external_plugin_mcp_stdio_query_uses_the_linked_derived_credential(
         "Bearer BOOTSTRAP_MCP_A",
     ]
     assert "BOOTSTRAP_MCP_A" not in (profile / ".env").read_text(encoding="utf-8")
-    assert "BOOTSTRAP_MCP_A" not in (profile / "hades_backend.db").read_text(errors="ignore")
+    assert "BOOTSTRAP_MCP_A" not in (profile / "hades_backend.db").read_text(
+        errors="ignore"
+    )
     assert "BOOTSTRAP_MCP_A" not in repr(response)
 
 
@@ -1009,37 +2085,85 @@ def test_external_default_service_client_uses_each_profile_derived_credential(
     package = f"{entrypoint.__name__}.hades_backend_plugin"
     pairing = importlib.import_module(f"{package}.pairing")
     service = importlib.import_module(f"{package}.service")
-    workspace = tmp_path / "workspace"; workspace.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
     profiles = {"a": tmp_path / "profile-a", "b": tmp_path / "profile-b"}
 
     class PairClient:
-        def __init__(self, label: str, token: str) -> None: self.label, self.token = label, token
+        def __init__(self, label: str, token: str) -> None:
+            self.label, self.token = label, token
+
         def verify_token(self, *, project_id: str) -> dict[str, Any]:
-            assert (project_id, self.token) == (f"project-{self.label}", f"BOOTSTRAP_{self.label.upper()}")
+            assert (project_id, self.token) == (
+                f"project-{self.label}",
+                f"BOOTSTRAP_{self.label.upper()}",
+            )
             return {"valid": True}
+
         def register_agent(self, **_kwargs: Any) -> dict[str, Any]:
-            return {"agent_id": f"agent-{self.label}", "agent_token": f"DERIVED_{self.label.upper()}", "capabilities": dict.fromkeys(pairing.PROJECT_KNOWLEDGE_CAPABILITIES, True)}
-        def bind_workspace(self, **_kwargs: Any) -> dict[str, Any]: return {"workspace_binding_id": f"binding-{self.label}"}
-        def close(self) -> None: return None
+            return {
+                "agent_id": f"agent-{self.label}",
+                "agent_token": f"DERIVED_{self.label.upper()}",
+                "capabilities": dict.fromkeys(
+                    pairing.PROJECT_KNOWLEDGE_CAPABILITIES, True
+                ),
+            }
+
+        def bind_workspace(self, **_kwargs: Any) -> dict[str, Any]:
+            return {"workspace_binding_id": f"binding-{self.label}"}
+
+        def close(self) -> None:
+            return None
 
     for label, profile in profiles.items():
-        pairing.pair_project(base_url=f"https://backend-{label}.invalid", project_id=f"project-{label}", bootstrap_token=f"BOOTSTRAP_{label.upper()}", workspace=workspace, profile_home=profile, client_factory=lambda _url, token, label=label: PairClient(label, token))
+        pairing.pair_project(
+            base_url=f"https://backend-{label}.invalid",
+            project_id=f"project-{label}",
+            bootstrap_token=f"BOOTSTRAP_{label.upper()}",
+            workspace=workspace,
+            profile_home=profile,
+            client_factory=lambda _url, token, label=label: PairClient(label, token),
+        )
 
     constructed: list[tuple[str, str]] = []
+
     class StrictClient:
-        def __init__(self, base_url: str, token: str) -> None: constructed.append((base_url, token))
-        def project_search(self, **payload: Any) -> dict[str, Any]: return {"items": [], **payload}
-        def close(self) -> None: return None
+        def __init__(self, base_url: str, token: str) -> None:
+            constructed.append((base_url, token))
+
+        def project_search(self, **payload: Any) -> dict[str, Any]:
+            return {"items": [], **payload}
+
+        def close(self) -> None:
+            return None
 
     monkeypatch.setattr(service, "BackendApiClient", StrictClient)
-    assert service.ProjectKnowledgeService(profile_home=profiles["a"]).project_search(workspace, "a")["project_id"] == "project-a"
-    assert service.ProjectKnowledgeService(profile_home=profiles["b"]).project_search(workspace, "b")["project_id"] == "project-b"
-    assert constructed == [("https://backend-a.invalid", "DERIVED_A"), ("https://backend-b.invalid", "DERIVED_B")]
+    assert (
+        service.ProjectKnowledgeService(profile_home=profiles["a"]).project_search(
+            workspace, "a"
+        )["project_id"]
+        == "project-a"
+    )
+    assert (
+        service.ProjectKnowledgeService(profile_home=profiles["b"]).project_search(
+            workspace, "b"
+        )["project_id"]
+        == "project-b"
+    )
+    assert constructed == [
+        ("https://backend-a.invalid", "DERIVED_A"),
+        ("https://backend-b.invalid", "DERIVED_B"),
+    ]
     with sqlite3.connect(profiles["a"] / "hades_backend.db") as connection:
         connection.execute("UPDATE workspace_bindings SET status = 'revoked'")
         connection.commit()
-    revoked = service.ProjectKnowledgeService(profile_home=profiles["a"]).project_search(workspace, "no-fallback")
-    assert revoked["status"] == "revoked_or_auth_failed" and revoked["network_attempted"] is False
+    revoked = service.ProjectKnowledgeService(
+        profile_home=profiles["a"]
+    ).project_search(workspace, "no-fallback")
+    assert (
+        revoked["status"] == "revoked_or_auth_failed"
+        and revoked["network_attempted"] is False
+    )
     assert len(constructed) == 2
 
 
@@ -1111,7 +2235,9 @@ def test_external_plugin_sync_is_one_scoped_project_transaction_only(
     summaries: list[dict[str, Any]] = []
     result = sync.sync_project_knowledge(
         sync.ProjectSyncRequest(workspace=workspace, domain="source_index"),
-        resolver=lambda _workspace: contracts.WorkspaceResolution(workspace, binding=binding),
+        resolver=lambda _workspace: contracts.WorkspaceResolution(
+            workspace, binding=binding
+        ),
         client_factory=lambda _binding: client,
         summary_writer=summaries.append,
     )
@@ -1163,7 +2289,9 @@ def test_external_pairing_cannot_mutate_a_live_agent_prompt_or_tool_schema(
             return {
                 "agent_id": "agent-a",
                 "agent_token": "DERIVED_STABLE",
-                "capabilities": dict.fromkeys(pairing.PROJECT_KNOWLEDGE_CAPABILITIES, True),
+                "capabilities": dict.fromkeys(
+                    pairing.PROJECT_KNOWLEDGE_CAPABILITIES, True
+                ),
             }
 
         def bind_workspace(self, **_kwargs: Any) -> dict[str, Any]:
@@ -1186,14 +2314,20 @@ def test_external_pairing_cannot_mutate_a_live_agent_prompt_or_tool_schema(
         get_tool_definitions(quiet_mode=True), sort_keys=True, separators=(",", ":")
     ).encode()
     assert schema_after == schema_before
-    assert b"BOOTSTRAP_STABLE_CANARY" not in prompt_before + schema_before + schema_after
+    assert (
+        b"BOOTSTRAP_STABLE_CANARY" not in prompt_before + schema_before + schema_after
+    )
 
 
 @pytest.mark.live_system_guard_bypass
-def test_external_pairing_keeps_live_agent_request_system_and_tools_byte_identical(monkeypatch, tmp_path: Path) -> None:
+def test_external_pairing_keeps_live_agent_request_system_and_tools_byte_identical(
+    monkeypatch, tmp_path: Path
+) -> None:
     """A live agent's request contract does not change when same-profile pairing completes."""
     entrypoint = _load_external_entrypoint(_external_plugin_root_or_skip())
-    pairing = importlib.import_module(f"{entrypoint.__name__}.hades_backend_plugin.pairing")
+    pairing = importlib.import_module(
+        f"{entrypoint.__name__}.hades_backend_plugin.pairing"
+    )
     profile, workspace = tmp_path / "profile", tmp_path / "workspace"
     workspace.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(profile))
@@ -1204,31 +2338,95 @@ def test_external_pairing_keeps_live_agent_request_system_and_tools_byte_identic
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             calls.append((self.path, body))
             assert self.path in {"/api/show", "/v1/chat/completions"}
-            response = json.dumps({"id": "fake", "object": "chat.completion", "choices": [{"index": 0, "message": {"role": "assistant", "content": "ordinary reply"}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}).encode()
-            self.send_response(200); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(response))); self.end_headers(); self.wfile.write(response)
-        def log_message(self, _format: str, *_args: Any) -> None: return None
+            response = json.dumps({
+                "id": "fake",
+                "object": "chat.completion",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ordinary reply"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 1,
+                    "total_tokens": 2,
+                },
+            }).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(response)))
+            self.end_headers()
+            self.wfile.write(response)
+
+        def log_message(self, _format: str, *_args: Any) -> None:
+            return None
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
     from run_agent import AIAgent
-    agent = AIAgent(model="deepseek-v4-flash", provider="opencode-go", base_url=f"http://127.0.0.1:{server.server_port}/v1", api_key="fake-key", api_mode="chat_completions", quiet_mode=True, skip_context_files=True, skip_memory=True)
+
+    agent = AIAgent(
+        model="deepseek-v4-flash",
+        provider="opencode-go",
+        base_url=f"http://127.0.0.1:{server.server_port}/v1",
+        api_key="fake-key",
+        api_mode="chat_completions",
+        quiet_mode=True,
+        skip_context_files=True,
+        skip_memory=True,
+    )
     agent._disable_streaming = True
 
     class PairingClient:
-        def verify_token(self, **_kwargs: Any) -> dict[str, Any]: return {"valid": True}
-        def register_agent(self, **_kwargs: Any) -> dict[str, Any]: return {"agent_id": "agent-a", "agent_token": "DERIVED_ONLY", "capabilities": dict.fromkeys(pairing.PROJECT_KNOWLEDGE_CAPABILITIES, True)}
-        def bind_workspace(self, **_kwargs: Any) -> dict[str, Any]: return {"workspace_binding_id": "binding-a"}
-        def close(self) -> None: return None
+        def verify_token(self, **_kwargs: Any) -> dict[str, Any]:
+            return {"valid": True}
+
+        def register_agent(self, **_kwargs: Any) -> dict[str, Any]:
+            return {
+                "agent_id": "agent-a",
+                "agent_token": "DERIVED_ONLY",
+                "capabilities": dict.fromkeys(
+                    pairing.PROJECT_KNOWLEDGE_CAPABILITIES, True
+                ),
+            }
+
+        def bind_workspace(self, **_kwargs: Any) -> dict[str, Any]:
+            return {"workspace_binding_id": "binding-a"}
+
+        def close(self) -> None:
+            return None
 
     try:
         first = agent.run_conversation("first")
-        pairing.pair_project(base_url="https://backend.invalid", project_id="project-a", bootstrap_token="BOOTSTRAP_ONLY", workspace=workspace, profile_home=profile, client_factory=lambda _url, _token: PairingClient())
+        pairing.pair_project(
+            base_url="https://backend.invalid",
+            project_id="project-a",
+            bootstrap_token="BOOTSTRAP_ONLY",
+            workspace=workspace,
+            profile_home=profile,
+            client_factory=lambda _url, _token: PairingClient(),
+        )
         agent.run_conversation("second", conversation_history=first["messages"])
     finally:
-        server.shutdown(); thread.join(timeout=2)
+        server.shutdown()
+        thread.join(timeout=2)
     requests = [body for path, body in calls if path == "/v1/chat/completions"]
     assert len(requests) == 2
-    shape = lambda request: json.dumps({"system": next(message for message in request["messages"] if message["role"] == "system"), "tools": request["tools"]}, sort_keys=True, separators=(",", ":")).encode()
+    shape = lambda request: json.dumps(
+        {
+            "system": next(
+                message
+                for message in request["messages"]
+                if message["role"] == "system"
+            ),
+            "tools": request["tools"],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
     assert shape(requests[1]) == shape(requests[0])
     assert "BOOTSTRAP_ONLY" not in repr(calls)
 
@@ -1294,6 +2492,247 @@ def test_external_plugin_is_discovered_by_real_manager_before_contextual_dispatc
             "workspace": workspace,
         }
     ]
+
+
+@pytest.mark.live_system_guard_bypass
+@pytest.mark.parametrize("memory_provider", ["holographic", "builtin-only"])
+def test_external_classic_masked_pair_cancel_success_query_and_sync_are_isolated(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+    external_backend_endpoint,
+    memory_provider: str,
+) -> None:
+    """The classic masked callback persists only a derived project credential."""
+    import argparse
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    root = _external_plugin_root_or_skip()
+    entrypoint = _load_external_entrypoint(root)
+    cli = importlib.import_module(f"{entrypoint.__name__}.hades_backend_plugin.cli")
+    backend_url, backend_calls = external_backend_endpoint
+    profile = tmp_path / f"classic-{memory_provider}"
+    before = _prepare_external_profile(profile, root, memory_provider=memory_provider)
+    workspace = tmp_path / f"classic-workspace-{memory_provider}"
+    (workspace / "src").mkdir(parents=True)
+    (workspace / "src" / "main.py").write_text("VALUE = 13\n", encoding="utf-8")
+    project = f"classic-{memory_provider}"
+    bootstrap = f"BOOTSTRAP_CLASSIC_{memory_provider.upper().replace('-', '_')}"
+    derived = f"DERIVED_{project.upper().replace('-', '_')}"
+    parser = argparse.ArgumentParser()
+    cli.build_backend_parser(parser)
+    args = parser.parse_args([
+        "set-token",
+        "--url",
+        backend_url,
+        "--project-id",
+        project,
+        "--workspace",
+        str(workspace),
+    ])
+    monkeypatch.setenv("HERMES_HOME", str(profile))
+    home_token = set_hermes_home_override(profile)
+    try:
+        monkeypatch.setattr(cli.getpass, "getpass", lambda _prompt: "")
+        assert cli.backend_command(args) == 2
+        cancelled = capsys.readouterr()
+        assert backend_calls == []
+        assert not (profile / ".env").exists()
+        assert not (profile / "hades_backend.db").exists()
+        assert _memory_snapshot(profile) == before
+
+        monkeypatch.setattr(cli.getpass, "getpass", lambda _prompt: bootstrap)
+        assert cli.backend_command(args) == 0
+        paired = capsys.readouterr()
+    finally:
+        reset_hermes_home_override(home_token)
+
+    query, synced = _exercise_external_query_and_sync(
+        root, profile=profile, workspace=workspace
+    )
+    assert [call["path"] for call in backend_calls[:3]] == [
+        "/api/hades/v1/token/verify",
+        "/api/hades/v1/agents/register",
+        "/api/hades/v1/workspaces/bind",
+    ]
+    assert [call["authorization"] for call in backend_calls[:3]] == [
+        f"Bearer {bootstrap}",
+        f"Bearer {bootstrap}",
+        f"Bearer {derived}",
+    ]
+    assert _memory_snapshot(profile) == before
+    _assert_external_secret_hygiene(
+        profile,
+        bootstrap=bootstrap,
+        derived=derived,
+        sinks={
+            "cancelled": cancelled,
+            "paired": paired,
+            "args": vars(args),
+            "query": query,
+            "sync": synced,
+            "environment": {
+                key: value
+                for key, value in os.environ.items()
+                if key.startswith(("HERMES_", "HADES_"))
+            },
+        },
+    )
+
+
+@pytest.mark.live_system_guard_bypass
+def test_external_tui_overlay_pair_cancel_success_is_persisted_and_secret_safe(
+    monkeypatch,
+    gateway_server,
+    tmp_path: Path,
+    external_backend_endpoint,
+) -> None:
+    """The actual external handler owns cancellation and success through TUI overlay."""
+    root = _external_plugin_root_or_skip()
+    manager = PluginManager()
+    manifest = PluginManifest(
+        name="hades-backend", source="user", path=str(root), key="hades-backend"
+    )
+    entrypoint = manager._load_directory_module(manifest)
+    entrypoint.register(PluginContext(manifest, manager))
+    monkeypatch.setattr("hermes_cli.plugins._plugin_manager", manager)
+    backend_url, backend_calls = external_backend_endpoint
+    profile = tmp_path / "tui-profile"
+    before = _prepare_external_profile(profile, root, memory_provider="builtin-only")
+    workspace = tmp_path / "tui-workspace"
+    (workspace / "src").mkdir(parents=True)
+    (workspace / "src" / "main.py").write_text("VALUE = 13\n", encoding="utf-8")
+    session_id = "task13-external-tui"
+    gateway_server._sessions[session_id] = {
+        "session_key": session_id,
+        "cwd": str(workspace),
+        "source": "tui",
+        "profile_home": str(profile),
+        "agent": None,
+    }
+    project = "tui-project"
+    bootstrap = "BOOTSTRAP_TUI_OVERLAY_CANARY"
+    derived = "DERIVED_TUI_PROJECT"
+    command = (
+        f"backend set-token --url {backend_url} --project-id {project} "
+        f"--workspace {workspace}"
+    )
+
+    def invoke(response: dict[str, Any], request_id: str) -> threading.Thread:
+        worker = threading.Thread(
+            target=lambda: response.update(
+                gateway_server.handle_request({
+                    "id": request_id,
+                    "method": "slash.exec",
+                    "params": {"command": command, "session_id": session_id},
+                })
+            )
+        )
+        worker.start()
+        return worker
+
+    cancelled: dict[str, Any] = {}
+    worker = invoke(cancelled, "task13-tui-cancel")
+    request_id = _wait_for_owned_secret_request(gateway_server, session_id)
+    gateway_server.handle_request({
+        "id": "task13-tui-cancel-secret",
+        "method": "secret.respond",
+        "params": {"request_id": request_id, "session_id": session_id, "value": ""},
+    })
+    worker.join(timeout=5)
+    assert cancelled["result"]["output"] == "Backend pairing cancelled."
+    assert backend_calls == []
+    assert not (profile / ".env").exists()
+    assert not (profile / "hades_backend.db").exists()
+
+    paired: dict[str, Any] = {}
+    worker = invoke(paired, "task13-tui-success")
+    request_id = _wait_for_owned_secret_request(gateway_server, session_id)
+    gateway_server.handle_request({
+        "id": "task13-tui-success-secret",
+        "method": "secret.respond",
+        "params": {
+            "request_id": request_id,
+            "session_id": session_id,
+            "value": bootstrap,
+        },
+    })
+    worker.join(timeout=10)
+    assert not worker.is_alive()
+    assert paired["result"]["output"] == "Backend project paired."
+    assert _memory_snapshot(profile) == before
+    _assert_external_secret_hygiene(
+        profile,
+        bootstrap=bootstrap,
+        derived=derived,
+        sinks={"cancelled": cancelled, "paired": paired, "command": command},
+    )
+
+
+@pytest.mark.live_system_guard_bypass
+def test_external_spawned_desktop_overlay_pair_cancel_success_is_persisted_and_safe(
+    tmp_path: Path,
+    fake_model_endpoint,
+    external_backend_endpoint,
+) -> None:
+    """The real Desktop WebSocket overlay composes with external persistence."""
+    root = _external_plugin_root_or_skip()
+    model_url, _model_calls = fake_model_endpoint
+    backend_url, backend_calls = external_backend_endpoint
+    profile = tmp_path / "desktop-external-profile"
+    before = _prepare_external_profile(
+        profile,
+        root,
+        memory_provider="holographic",
+        model_url=model_url,
+    )
+    workspace = tmp_path / "desktop-external-workspace"
+    (workspace / "src").mkdir(parents=True)
+    (workspace / "src" / "main.py").write_text("VALUE = 13\n", encoding="utf-8")
+    project = "desktop-project"
+    bootstrap = "BOOTSTRAP_DESKTOP_OVERLAY_CANARY"
+    derived = "DERIVED_DESKTOP_PROJECT"
+    process, transcript = _spawn_serve_process(tmp_path, profile)
+    try:
+        port = _wait_for_spawned_serve_port(process, transcript)
+        result = asyncio.run(
+            _desktop_pair_over_websocket(
+                port,
+                "task13-desktop-websocket-token",
+                workspace=workspace,
+                backend_url=backend_url,
+                project_id=project,
+                bootstrap=bootstrap,
+            )
+        )
+    finally:
+        stdout, stderr = _terminate_process(process)
+        transcript.extend([stdout, stderr])
+
+    query, synced = _exercise_external_query_and_sync(
+        root, profile=profile, workspace=workspace
+    )
+    assert result["cancelled"] == "Backend pairing cancelled."
+    assert result["paired"] == "Backend project paired."
+    assert [call["path"] for call in backend_calls[:3]] == [
+        "/api/hades/v1/token/verify",
+        "/api/hades/v1/agents/register",
+        "/api/hades/v1/workspaces/bind",
+    ]
+    assert _memory_snapshot(profile) == before
+    _assert_external_secret_hygiene(
+        profile,
+        bootstrap=bootstrap,
+        derived=derived,
+        sinks={
+            "frames": result["frames"],
+            "stdout_stderr": transcript,
+            "query": query,
+            "sync": synced,
+            "argv": ["serve", "--host", "127.0.0.1", "--port", "0"],
+        },
+    )
+    assert process.returncode is not None
 
 
 def test_external_plugin_terminal_pairing_uses_only_fake_verify_register_bind(
@@ -1448,6 +2887,43 @@ def _terminate_process(process: subprocess.Popen[str]) -> tuple[str, str]:
         return process.communicate(timeout=2)
 
 
+def _spawn_serve_process(
+    tmp_path: Path, profile: Path
+) -> tuple[subprocess.Popen[str], list[str]]:
+    dist = tmp_path / "web-dist"
+    (dist / "assets").mkdir(parents=True, exist_ok=True)
+    (dist / "index.html").write_text(
+        "<html><body>task13</body></html>", encoding="utf-8"
+    )
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-u",
+            "-m",
+            "hermes_cli.main",
+            "serve",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "0",
+            "--skip-build",
+        ],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "HERMES_HOME": str(profile),
+            "HERMES_WEB_DIST": str(dist),
+            "HERMES_DASHBOARD_SESSION_TOKEN": "task13-desktop-websocket-token",
+            "PYTHONPATH": str(Path(__file__).resolve().parents[2]),
+            "PYTHONUNBUFFERED": "1",
+        },
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    return process, []
+
+
 def _wait_for_spawned_serve_port(
     process: subprocess.Popen[str], transcript: list[str]
 ) -> int:
@@ -1478,16 +2954,241 @@ async def _desktop_session_list_over_websocket(port: int, token: str) -> dict[st
     ) as websocket:
         ready = json.loads(await asyncio.wait_for(websocket.recv(), timeout=10))
         assert ready["params"]["type"] == "gateway.ready"
-        await websocket.send(json.dumps({
-            "jsonrpc": "2.0",
-            "id": "task13-sessions",
-            "method": "session.list",
-            "params": {},
-        }))
+        await websocket.send(
+            json.dumps({
+                "jsonrpc": "2.0",
+                "id": "task13-sessions",
+                "method": "session.list",
+                "params": {},
+            })
+        )
         while True:
             message = json.loads(await asyncio.wait_for(websocket.recv(), timeout=10))
             if message.get("id") == "task13-sessions":
                 return message
+
+
+async def _desktop_pair_over_websocket(
+    port: int,
+    token: str,
+    *,
+    workspace: Path,
+    backend_url: str,
+    project_id: str,
+    bootstrap: str,
+) -> dict[str, Any]:
+    from websockets.asyncio.client import connect
+
+    frames: list[dict[str, Any]] = []
+    counter = 0
+    async with connect(
+        f"ws://127.0.0.1:{port}/api/ws?token={token}", open_timeout=10
+    ) as websocket:
+        frames.append(json.loads(await asyncio.wait_for(websocket.recv(), timeout=10)))
+
+        async def request(method: str, params: dict[str, Any]) -> dict[str, Any]:
+            nonlocal counter
+            counter += 1
+            request_id = f"task13-desktop-pair-{counter}"
+            await websocket.send(
+                json.dumps({
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "method": method,
+                    "params": params,
+                })
+            )
+            while True:
+                message = json.loads(
+                    await asyncio.wait_for(websocket.recv(), timeout=30)
+                )
+                frames.append(message)
+                if message.get("id") == request_id:
+                    return message
+
+        catalog = await request("commands.catalog", {})
+        assert "/backend" in dict(catalog["result"]["pairs"])
+        created = await request(
+            "session.create",
+            {
+                "cwd": str(workspace),
+                "source": "desktop",
+                "model": "task13-fake",
+                "provider": "custom",
+            },
+        )
+        session_id = created["result"]["session_id"]
+        command = (
+            f"backend set-token --url {backend_url} --project-id {project_id} "
+            f"--workspace {workspace}"
+        )
+
+        async def pair(value: str, label: str) -> str:
+            slash_id = f"task13-desktop-{label}"
+            secret_response_id = f"task13-desktop-{label}-secret"
+            await websocket.send(
+                json.dumps({
+                    "jsonrpc": "2.0",
+                    "id": slash_id,
+                    "method": "slash.exec",
+                    "params": {"command": command, "session_id": session_id},
+                })
+            )
+            secret_reply_seen = False
+            while True:
+                message = json.loads(
+                    await asyncio.wait_for(websocket.recv(), timeout=30)
+                )
+                frames.append(message)
+                params = message.get("params", {})
+                if params.get("type") == "secret.request":
+                    request_id = params["payload"]["request_id"]
+                    assert params["session_id"] == session_id
+                    await websocket.send(
+                        json.dumps({
+                            "jsonrpc": "2.0",
+                            "id": secret_response_id,
+                            "method": "secret.respond",
+                            "params": {
+                                "request_id": request_id,
+                                "session_id": session_id,
+                                "value": value,
+                            },
+                        })
+                    )
+                elif message.get("id") == secret_response_id:
+                    assert message["result"] == {"status": "ok"}
+                    secret_reply_seen = True
+                elif message.get("id") == slash_id:
+                    assert secret_reply_seen
+                    return message["result"]["output"]
+
+        cancelled = await pair("", "cancel")
+        paired = await pair(bootstrap, "success")
+        closed = await request("session.close", {"session_id": session_id})
+        assert closed["result"] == {"closed": True}
+
+    return {"frames": frames, "cancelled": cancelled, "paired": paired}
+
+
+async def _desktop_lifecycle_over_websocket(
+    port: int,
+    token: str,
+    *,
+    workspace: Path,
+    expected_backend_visible: bool,
+    profile: str | None = None,
+) -> dict[str, Any]:
+    """Drive the real Desktop create/turn/title/close/resume/shutdown contract."""
+    from websockets.asyncio.client import connect
+
+    frames: list[dict[str, Any]] = []
+    pending_events: list[dict[str, Any]] = []
+    counter = 0
+
+    async with connect(
+        f"ws://127.0.0.1:{port}/api/ws?token={token}", open_timeout=10
+    ) as websocket:
+        ready = json.loads(await asyncio.wait_for(websocket.recv(), timeout=10))
+        frames.append(ready)
+        assert ready["params"]["type"] == "gateway.ready"
+
+        async def request(method: str, params: dict[str, Any]) -> dict[str, Any]:
+            nonlocal counter
+            counter += 1
+            request_id = f"task13-{counter}-{method}"
+            await websocket.send(
+                json.dumps({
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "method": method,
+                    "params": params,
+                })
+            )
+            while True:
+                message = json.loads(
+                    await asyncio.wait_for(websocket.recv(), timeout=30)
+                )
+                frames.append(message)
+                if message.get("id") == request_id:
+                    return message
+                pending_events.append(message)
+
+        async def wait_event(event_type: str, session_id: str) -> dict[str, Any]:
+            for index, message in enumerate(pending_events):
+                params = message.get("params", {})
+                if (
+                    params.get("type") == event_type
+                    and params.get("session_id") == session_id
+                ):
+                    return pending_events.pop(index)
+            while True:
+                message = json.loads(
+                    await asyncio.wait_for(websocket.recv(), timeout=30)
+                )
+                frames.append(message)
+                params = message.get("params", {})
+                if (
+                    params.get("type") == event_type
+                    and params.get("session_id") == session_id
+                ):
+                    return message
+                pending_events.append(message)
+
+        catalog = await request("commands.catalog", {})
+        pairs = dict(catalog["result"]["pairs"])
+        assert ("/backend" in pairs) is expected_backend_visible
+        settings = await request("config.get", {"key": "full"})
+        assert settings["result"]["config"]["model"]["default"] == "task13-fake"
+        create_params: dict[str, Any] = {
+            "cwd": str(workspace),
+            "source": "desktop",
+            "model": "task13-fake",
+            "provider": "custom",
+        }
+        if profile:
+            create_params["profile"] = profile
+        created = await request("session.create", create_params)
+        live_id = created["result"]["session_id"]
+        stored_id = created["result"]["stored_session_id"]
+        first = await request(
+            "prompt.submit",
+            {"session_id": live_id, "text": "desktop ordinary"},
+        )
+        assert first["result"] == {"status": "streaming"}
+        first_complete = await wait_event("message.complete", live_id)
+        assert first_complete["params"]["payload"]["text"] == (
+            "ordinary fake-model response"
+        )
+        await wait_event("session.title", live_id)
+        closed_first = await request("session.close", {"session_id": live_id})
+        assert closed_first["result"] == {"closed": True}
+
+        resume_params: dict[str, Any] = {
+            "session_id": stored_id,
+            "eager_build": True,
+        }
+        if profile:
+            resume_params["profile"] = profile
+        resumed = await request("session.resume", resume_params)
+        resumed_id = resumed["result"]["session_id"]
+        assert resumed["result"]["message_count"] >= 2
+        second = await request(
+            "prompt.submit",
+            {"session_id": resumed_id, "text": "desktop resumed"},
+        )
+        assert second["result"] == {"status": "streaming"}
+        second_complete = await wait_event("message.complete", resumed_id)
+        assert second_complete["params"]["payload"]["text"] == (
+            "ordinary fake-model response"
+        )
+        closed_second = await request("session.close", {"session_id": resumed_id})
+        assert closed_second["result"] == {"closed": True}
+        if profile is None:
+            listed = await request("session.list", {})
+            assert any(row["id"] == stored_id for row in listed["result"]["sessions"])
+
+    return {"frames": frames, "stored_session_id": stored_id}
 
 
 def _external_plugin_root_or_skip() -> Path:
