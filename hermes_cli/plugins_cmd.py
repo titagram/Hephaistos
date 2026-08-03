@@ -22,6 +22,11 @@ from typing import Any, Optional
 
 from hermes_constants import get_hermes_home
 from hermes_cli.config import cfg_get
+from hermes_cli.plugin_transactions import (
+    PluginTransactionError,
+    is_reserved_plugin_transaction_directory,
+    reconcile_plugin_transaction,
+)
 from hermes_cli.secret_prompt import masked_secret_prompt
 
 logger = logging.getLogger(__name__)
@@ -503,6 +508,10 @@ def _install_plugin_core(identifier: str, *, force: bool) -> tuple[Path, dict, s
             target = _sanitize_plugin_name(plugin_name, plugins_dir)
         except ValueError as e:
             raise PluginOperationError(str(e)) from e
+        try:
+            reconcile_plugin_transaction(plugins_dir, target.name)
+        except PluginTransactionError as e:
+            raise PluginOperationError(str(e)) from e
 
         mv = manifest.get("manifest_version")
         if mv is not None:
@@ -715,23 +724,23 @@ def cmd_remove(name: str) -> None:
         console.print(f"[red]Error:[/red] {e}")
         sys.exit(1)
 
-    _disable_removed_plugin_discovery(name)
+    _disable_removed_plugin_discovery(target)
     shutil.rmtree(target)
     _display_removed(name, plugins_dir)
 
 
-def _disable_removed_plugin_discovery(name: str) -> None:
+def _disable_removed_plugin_discovery(target: Path) -> None:
     """Prevent a removed plugin from silently becoming active when reinstalled."""
-    key = _resolve_plugin_key(name) or name
-    aliases = {name, key, name.split("/")[-1], key.split("/")[-1]}
-    aliases.update({alias.replace("-", "_") for alias in tuple(aliases)})
-    aliases.update({alias.replace("_", "-") for alias in tuple(aliases)})
+    identities = {target.name}
+    for name, _version, _description, _source, path, key in _discover_all_plugins():
+        if path.resolve() == target.resolve():
+            identities.update({name, key})
 
     enabled = _get_enabled_set()
     disabled = _get_disabled_set()
-    enabled.difference_update(aliases)
-    disabled.difference_update(aliases)
-    disabled.add(key)
+    enabled.difference_update(identities)
+    disabled.difference_update(identities)
+    disabled.add(next(iter(sorted(identities))))
 
     from hermes_cli.config import load_config, save_config
 
@@ -940,7 +949,7 @@ def _scan_level(
     if not base.is_dir():
         return
     for d in sorted(base.iterdir()):
-        if not d.is_dir():
+        if not d.is_dir() or is_reserved_plugin_transaction_directory(d.name):
             continue
         if depth == 0 and skip_names and d.name in skip_names:
             continue
@@ -1864,6 +1873,7 @@ def dashboard_remove_user_plugin(name: str) -> dict[str, Any]:
             "error": f"Plugin '{name}' was not found under {plugins_dir}.",
         }
 
+    _disable_removed_plugin_discovery(target)
     shutil.rmtree(target)
     return {"ok": True, "name": name}
 

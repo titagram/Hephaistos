@@ -342,3 +342,66 @@ def test_core_update_noop_preserves_plugin_and_profile_canaries(tmp_path, monkey
         == plugin_before
     )
     _assert_canary_unchanged(config_path, external_before)
+
+
+def test_remove_keeps_distinct_plugin_identities_and_dashboard_disarms_target(
+    tmp_path, monkeypatch
+):
+    hermes_home, config_path, external_before = _write_canary_profile(
+        tmp_path, monkeypatch
+    )
+    from hermes_cli import plugins_cmd
+
+    plugins_dir = hermes_home / "plugins"
+    for name in ("foo-bar", "foo_bar", "hades-backend"):
+        plugin_dir = plugins_dir / name
+        plugin_dir.mkdir(parents=True)
+        (plugin_dir / "plugin.yaml").write_text(
+            f"name: {name}\nmanifest_version: 1\n", encoding="utf-8"
+        )
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["plugins"]["enabled"] = ["foo-bar", "foo_bar", "hades-backend"]
+    config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+
+    plugins_cmd.cmd_remove("foo-bar")
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert config["plugins"]["enabled"] == ["foo_bar", "hades-backend"]
+    assert config["plugins"]["disabled"] == ["foo-bar"]
+
+    result = plugins_cmd.dashboard_remove_user_plugin("hades-backend")
+    assert result == {"ok": True, "name": "hades-backend"}
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert config["plugins"]["enabled"] == ["foo_bar"]
+    assert config["plugins"]["disabled"] == ["foo-bar", "hades-backend"]
+    _assert_canary_unchanged(config_path, external_before)
+
+
+def test_transaction_residue_is_ignored_and_reconciled_target_locally(
+    tmp_path, monkeypatch
+):
+    hermes_home, _config_path, _external_before = _write_canary_profile(
+        tmp_path, monkeypatch
+    )
+    plugins_dir = hermes_home / "plugins"
+    backup = plugins_dir / ".hades-backend.backup-dead"
+    staging = plugins_dir / ".hades-backend.staging-dead"
+    for path, payload in ((backup, "backup"), (staging, "staging")):
+        path.mkdir(parents=True)
+        (path / "plugin.yaml").write_text(
+            "name: hades-backend\nmanifest_version: 1\n", encoding="utf-8"
+        )
+        (path / "payload.txt").write_text(payload, encoding="utf-8")
+
+    from hermes_cli import plugins_cmd
+    from hermes_cli.plugin_transactions import reconcile_plugin_transaction
+    from hermes_cli.plugins import PluginManager
+
+    assert "hades-backend" not in [
+        entry[0] for entry in plugins_cmd._discover_all_plugins()
+    ]
+    assert PluginManager()._scan_directory(plugins_dir, "user") == []
+    target = reconcile_plugin_transaction(plugins_dir, "hades-backend")
+    assert target == plugins_dir / "hades-backend"
+    assert (target / "payload.txt").read_text(encoding="utf-8") == "backup"
+    assert not staging.exists()
+    assert not backup.exists()

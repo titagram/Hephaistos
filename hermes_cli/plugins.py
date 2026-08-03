@@ -70,6 +70,8 @@ try:
 except ImportError:  # pragma: no cover – yaml is optional at import time
     yaml = None  # type: ignore[assignment]
 
+from hermes_cli.plugin_transactions import is_reserved_plugin_transaction_directory
+
 logger = logging.getLogger(__name__)
 
 
@@ -1449,7 +1451,7 @@ class PluginManager:
             return manifests
 
         for child in sorted(path.iterdir()):
-            if not child.is_dir():
+            if not child.is_dir() or is_reserved_plugin_transaction_directory(child.name):
                 continue
             if depth == 0 and skip_names and child.name in skip_names:
                 continue
