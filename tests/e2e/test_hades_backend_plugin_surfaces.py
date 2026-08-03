@@ -22,6 +22,7 @@ import time
 from types import ModuleType
 from typing import Any
 from unittest.mock import patch
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
@@ -192,6 +193,63 @@ def test_plugin_command_context_cannot_mutate_an_inflight_prompt_or_tool_schema(
         context.render(f"token={context.request_secret('Bootstrap token')}")
         == "token=[secret]"
     )
+
+
+def test_desktop_plugin_invocations_keep_profiles_scoped_across_success_and_cancel(
+    monkeypatch, gateway_server, tmp_path: Path
+) -> None:
+    """Direct plugin commands bind one Desktop profile for their whole secret lifecycle."""
+    from hermes_constants import get_hermes_home
+
+    launch_home = tmp_path / "launch-profile"
+    profiles = {"success": tmp_path / "profile-success", "cancel": tmp_path / "profile-cancel"}
+    for profile in (launch_home, *profiles.values()):
+        profile.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(launch_home))
+    observed: list[tuple[str, str]] = []
+
+    def profile_handler(_raw_args: str, context) -> str:
+        before = str(get_hermes_home())
+        token = context.request_secret("Profile-scoped token")
+        after = str(get_hermes_home())
+        observed.append((before, after))
+        return "cancelled" if not token else "completed"
+
+    manager = PluginManager()
+    context = PluginContext(PluginManifest(name="profile-probe", source="user"), manager)
+    context.register_command("profile-probe", profile_handler, "Profile probe")
+    monkeypatch.setattr("hermes_cli.plugins._plugin_manager", manager)
+    for label, profile in profiles.items():
+        gateway_server._sessions[f"desktop-{label}"] = {
+            "agent": None, "cwd": str(tmp_path), "profile_home": str(profile),
+            "session_key": f"desktop-{label}", "source": "desktop",
+        }
+
+    responses: dict[str, dict[str, Any]] = {}
+    workers = [threading.Thread(target=lambda label=label: responses.setdefault(label, gateway_server.handle_request({
+        "id": f"{label}-command", "method": "slash.exec",
+        "params": {"session_id": f"desktop-{label}", "command": "profile-probe"},
+    }))) for label in profiles]
+    for worker in workers:
+        worker.start()
+    request_ids = {label: _wait_for_owned_secret_request(gateway_server, f"desktop-{label}") for label in profiles}
+    for label, value in (("success", "DERIVED_SUCCESS_ONLY"), ("cancel", "")):
+        gateway_server.handle_request({
+            "id": f"{label}-secret", "method": "secret.respond",
+            "params": {"request_id": request_ids[label], "session_id": f"desktop-{label}", "value": value},
+        })
+    for worker in workers:
+        worker.join(timeout=2)
+        assert not worker.is_alive()
+
+    assert responses["success"]["result"]["output"] == "completed"
+    assert responses["cancel"]["result"]["output"] == "cancelled"
+    assert set(observed) == {
+        (str(profiles["success"]), str(profiles["success"])),
+        (str(profiles["cancel"]), str(profiles["cancel"])),
+    }
+    assert str(get_hermes_home()) == str(launch_home)
+    assert "DERIVED_SUCCESS_ONLY" not in repr(responses)
 
 
 def test_fake_model_factory_preserves_the_configured_opencode_runtime(
@@ -1024,6 +1082,50 @@ def test_external_pairing_cannot_mutate_a_live_agent_prompt_or_tool_schema(
     ).encode()
     assert schema_after == schema_before
     assert b"BOOTSTRAP_STABLE_CANARY" not in prompt_before + schema_before + schema_after
+
+
+@pytest.mark.live_system_guard_bypass
+def test_external_pairing_keeps_live_agent_request_system_and_tools_byte_identical(monkeypatch, tmp_path: Path) -> None:
+    """A live agent's request contract does not change when same-profile pairing completes."""
+    entrypoint = _load_external_entrypoint(_external_plugin_root_or_skip())
+    pairing = importlib.import_module(f"{entrypoint.__name__}.hades_backend_plugin.pairing")
+    profile, workspace = tmp_path / "profile", tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(profile))
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            calls.append((self.path, body))
+            assert self.path in {"/api/show", "/v1/chat/completions"}
+            response = json.dumps({"id": "fake", "object": "chat.completion", "choices": [{"index": 0, "message": {"role": "assistant", "content": "ordinary reply"}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}).encode()
+            self.send_response(200); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(response))); self.end_headers(); self.wfile.write(response)
+        def log_message(self, _format: str, *_args: Any) -> None: return None
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
+    from run_agent import AIAgent
+    agent = AIAgent(model="deepseek-v4-flash", provider="opencode-go", base_url=f"http://127.0.0.1:{server.server_port}/v1", api_key="fake-key", api_mode="chat_completions", quiet_mode=True, skip_context_files=True, skip_memory=True)
+    agent._disable_streaming = True
+
+    class PairingClient:
+        def verify_token(self, **_kwargs: Any) -> dict[str, Any]: return {"valid": True}
+        def register_agent(self, **_kwargs: Any) -> dict[str, Any]: return {"agent_id": "agent-a", "agent_token": "DERIVED_ONLY", "capabilities": dict.fromkeys(pairing.PROJECT_KNOWLEDGE_CAPABILITIES, True)}
+        def bind_workspace(self, **_kwargs: Any) -> dict[str, Any]: return {"workspace_binding_id": "binding-a"}
+        def close(self) -> None: return None
+
+    try:
+        first = agent.run_conversation("first")
+        pairing.pair_project(base_url="https://backend.invalid", project_id="project-a", bootstrap_token="BOOTSTRAP_ONLY", workspace=workspace, profile_home=profile, client_factory=lambda _url, _token: PairingClient())
+        agent.run_conversation("second", conversation_history=first["messages"])
+    finally:
+        server.shutdown(); thread.join(timeout=2)
+    requests = [body for path, body in calls if path == "/v1/chat/completions"]
+    assert len(requests) == 2
+    shape = lambda request: json.dumps({"system": next(message for message in request["messages"] if message["role"] == "system"), "tools": request["tools"]}, sort_keys=True, separators=(",", ":")).encode()
+    assert shape(requests[1]) == shape(requests[0])
+    assert "BOOTSTRAP_ONLY" not in repr(calls)
 
 
 @pytest.mark.parametrize("surface", ["tui", "desktop"])

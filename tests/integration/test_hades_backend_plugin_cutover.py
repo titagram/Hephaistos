@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -88,12 +89,13 @@ def _matrix_state(home: Path) -> tuple[bool, bool, bool, tuple[str, ...]]:
         tokens = tuple(
             row[0]
             for row in connection.execute(
-                "SELECT token_env_key FROM backend_agents ORDER BY token_env_key"
+                "SELECT backend_agents.token_env_key FROM workspace_bindings "
+                "JOIN backend_agents USING (agent_id) "
+                "WHERE workspace_bindings.status = 'linked' "
+                "ORDER BY workspace_bindings.repo_root"
             )
         )
-    assert tokens == tuple(
-        f"HADES_BACKEND_TOKEN_{name.upper().replace('-', '_')}" for name in bindings
-    )
+    assert tokens == tuple(_derived_token_key(name) for name in bindings)
     return installed, enabled, configured, bindings
 
 
@@ -112,7 +114,7 @@ def _write_canonical_backend_state(home: Path, bindings: list[str]) -> None:
             "git_remote_hash TEXT, head_commit TEXT, status TEXT NOT NULL);"
         )
         for name in bindings:
-            token_key = f"HADES_BACKEND_TOKEN_{name.upper().replace('-', '_')}"
+            token_key = _derived_token_key(name)
             connection.execute(
                 "INSERT INTO backend_agents VALUES (?, ?, ?, ?, ?, ?)",
                 (
@@ -141,11 +143,16 @@ def _write_canonical_backend_state(home: Path, bindings: list[str]) -> None:
                 ),
             )
     (home / ".env").write_text(
-        "".join(
-            f"HADES_BACKEND_TOKEN_{name.upper().replace('-', '_')}=DERIVED_{name}\n"
-            for name in bindings
-        ),
+        "".join(f"{_derived_token_key(name)}=DERIVED_{name}\n" for name in bindings),
         encoding="utf-8",
+    )
+
+
+def _derived_token_key(name: str) -> str:
+    material = f"https://fake.invalid|project-{name}|agent-{name}"
+    return (
+        "HADES_BACKEND_AGENT_TOKEN_"
+        + hashlib.sha256(material.encode()).hexdigest()[:16].upper()
     )
 
 
