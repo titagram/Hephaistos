@@ -243,7 +243,11 @@ def external_backend_endpoint():
                     "capabilities": capabilities,
                 })
             elif route == "workspaces/bind":
-                self._reply({"workspace_binding_id": f"binding-{project}"})
+                binding_id = {
+                    "01ARZ3NDEKTSV4RRFFQ69G5FAV": "01ARZ3NDEKTSV4RRFFQ69G5FAW",
+                    "01ARZ3NDEKTSV4RRFFQ69G5FAX": "01ARZ3NDEKTSV4RRFFQ69G5FAY",
+                }.get(project, f"binding-{project}")
+                self._reply({"workspace_binding_id": binding_id})
             elif route == "artifacts":
                 self._reply({"ok": True})
             else:  # pragma: no cover - protocol diagnostic
@@ -2733,6 +2737,189 @@ def test_external_spawned_desktop_overlay_pair_cancel_success_is_persisted_and_s
         },
     )
     assert process.returncode is not None
+
+
+@pytest.mark.live_system_guard_bypass
+def test_external_a_b_terminal_and_slash_sync_use_exact_strict_boundary_once(
+    monkeypatch,
+    gateway_server,
+    tmp_path: Path,
+    capsys,
+    external_backend_endpoint,
+) -> None:
+    """CLI sync A and actual ``/backend sync`` B never cross project routes."""
+    import argparse
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    root = _external_plugin_root_or_skip()
+    # The graph contract intentionally resolves package data by its installed
+    # canonical name, as it does under the real plugin loader.
+    monkeypatch.syspath_prepend(str(root))
+    entrypoint = importlib.import_module("hades_backend_plugin")
+    package = "hades_backend_plugin"
+    pairing = importlib.import_module(f"{package}.pairing")
+    plugin_cli = importlib.import_module(f"{package}.cli")
+    client_module = importlib.import_module(f"{package}.client")
+    backend_url, pairing_calls = external_backend_endpoint
+    profile = tmp_path / "ab-profile"
+    before = _prepare_external_profile(profile, root, memory_provider="holographic")
+    project_ids = {
+        "a": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "b": "01ARZ3NDEKTSV4RRFFQ69G5FAX",
+    }
+    binding_ids = {
+        "a": "01ARZ3NDEKTSV4RRFFQ69G5FAW",
+        "b": "01ARZ3NDEKTSV4RRFFQ69G5FAY",
+    }
+    workspaces = {label: tmp_path / f"workspace-{label}" for label in project_ids}
+    for label, workspace in workspaces.items():
+        (workspace / "src").mkdir(parents=True)
+        (workspace / "src" / "main.py").write_text(
+            f"PROJECT = {label!r}\n", encoding="utf-8"
+        )
+        pairing.pair_project(
+            base_url=backend_url,
+            project_id=project_ids[label],
+            bootstrap_token=f"BOOTSTRAP_SYNC_{label.upper()}",
+            workspace=workspace,
+            profile_home=profile,
+        )
+
+    expected = {
+        f"DERIVED_{project_ids[label]}": (
+            project_ids[label],
+            f"agent-{project_ids[label]}",
+            binding_ids[label],
+        )
+        for label in project_ids
+    }
+    clients: list[Any] = []
+    forbidden = {
+        "memory_snapshot",
+        "submit_memory_proposal",
+        "pull_jobs",
+        "list_inbox",
+        "append_logbook",
+        "persephone_poll",
+    }
+
+    class StrictBoundaryClient:
+        def __init__(self, base_url: str, token: str) -> None:
+            assert base_url == backend_url
+            assert token in expected
+            self.token = token
+            self.project_id, self.agent_id, self.binding_id = expected[token]
+            self.calls: list[tuple[str, dict[str, Any]]] = []
+            self.closed = 0
+            clients.append(self)
+
+        def __getattr__(self, name: str) -> Any:
+            if name in forbidden:
+                raise AssertionError(f"forbidden Backend boundary call: {name}")
+            raise AttributeError(name)
+
+        def _check(self, name: str, payload: dict[str, Any]) -> None:
+            assert payload["project_id"] == self.project_id
+            if name != "bind_workspace":
+                assert payload["workspace_binding_id"] == self.binding_id
+            if "agent_id" in payload:
+                assert payload["agent_id"] == self.agent_id
+            self.calls.append((name, payload))
+
+        def bind_workspace(self, **payload: Any) -> dict[str, str]:
+            self._check("bind_workspace", payload)
+            return {"workspace_binding_id": self.binding_id}
+
+        def artifact_lookup(self, **payload: Any) -> dict[str, bool]:
+            self._check("artifact_lookup", payload)
+            return {"exists": False}
+
+        def upload_artifact(self, **payload: Any) -> dict[str, bool]:
+            self._check("upload_artifact", payload)
+            return {"ok": True}
+
+        def create_graph_import(self, manifest: dict[str, Any]) -> dict[str, Any]:
+            self.calls.append(("create_graph_import", manifest))
+            return {
+                "import_id": f"import-{self.project_id}",
+                "missing_chunk_indexes": [],
+                "validation_status": "validated",
+                "publication_status": "ready",
+                "projection_version": "0" * 64,
+            }
+
+        def close(self) -> None:
+            self.closed += 1
+            self.token = ""
+
+    monkeypatch.setattr(client_module, "BackendApiClient", StrictBoundaryClient)
+    monkeypatch.setenv("HERMES_HOME", str(profile))
+    home_token = set_hermes_home_override(profile)
+    try:
+        parser = argparse.ArgumentParser()
+        plugin_cli.build_backend_parser(parser)
+        terminal_args = parser.parse_args([
+            "sync",
+            "--workspace",
+            str(workspaces["a"]),
+            "--domain",
+            "source_index",
+            "--json",
+        ])
+        assert plugin_cli.backend_command(terminal_args) == 0
+        terminal_output = capsys.readouterr()
+
+        manager = PluginManager()
+        manifest = PluginManifest(
+            name="hades-backend", source="user", path=str(root), key="hades-backend"
+        )
+        entrypoint.register(PluginContext(manifest, manager))
+        monkeypatch.setattr("hermes_cli.plugins._plugin_manager", manager)
+        session_id = "task13-sync-b"
+        gateway_server._sessions[session_id] = {
+            "session_key": session_id,
+            "cwd": str(workspaces["b"]),
+            "source": "tui",
+            "profile_home": str(profile),
+            "agent": None,
+        }
+        slash_b = gateway_server.handle_request({
+            "id": "task13-sync-b",
+            "method": "slash.exec",
+            "params": {"command": "backend sync", "session_id": session_id},
+        })
+        assert slash_b["result"]["output"] == "ok"
+
+        with sqlite3.connect(profile / "hades_backend.db") as connection:
+            connection.execute(
+                "UPDATE workspace_bindings SET status = 'revoked' WHERE project_id = ?",
+                (project_ids["b"],),
+            )
+            connection.commit()
+        revoked_b = gateway_server.handle_request({
+            "id": "task13-sync-b-revoked",
+            "method": "slash.exec",
+            "params": {"command": "backend sync", "session_id": session_id},
+        })
+    finally:
+        reset_hermes_home_override(home_token)
+
+    assert revoked_b["result"]["output"] == "revoked_or_auth_failed"
+    assert len(clients) == 2
+    assert [client.project_id for client in clients] == [
+        project_ids["a"],
+        project_ids["b"],
+    ]
+    assert [client.closed for client in clients] == [1, 1]
+    assert all(client.calls[0][0] == "bind_workspace" for client in clients)
+    assert all(
+        not any(name in forbidden for name, _payload in client.calls)
+        for client in clients
+    )
+    assert len(pairing_calls) == 6
+    assert _memory_snapshot(profile) == before
+    assert project_ids["a"] in terminal_output.out
+    assert project_ids["b"] not in terminal_output.out
 
 
 def test_external_plugin_terminal_pairing_uses_only_fake_verify_register_bind(
