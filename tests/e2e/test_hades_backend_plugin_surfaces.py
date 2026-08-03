@@ -7,11 +7,15 @@ released plugin checkout without making a sibling repository a CI dependency.
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import io
+import json
 import os
 from pathlib import Path
+import select
 import sqlite3
+import subprocess
 import sys
 import threading
 import time
@@ -187,6 +191,63 @@ def test_plugin_command_context_cannot_mutate_an_inflight_prompt_or_tool_schema(
         context.render(f"token={context.request_secret('Bootstrap token')}")
         == "token=[secret]"
     )
+
+
+def test_spawned_serve_runs_the_real_desktop_websocket_transport_hermetically(
+    tmp_path: Path,
+) -> None:
+    """``hades serve`` exposes the Desktop JSON-RPC gateway without a web build.
+
+    The temporary dist deliberately contains no user artifact: it verifies the
+    supported ``HERMES_WEB_DIST`` + ``--skip-build`` seam while exercising the
+    same spawned server and WebSocket route the Electron app uses.
+    """
+    dist = tmp_path / "web-dist"
+    (dist / "assets").mkdir(parents=True)
+    (dist / "index.html").write_text("<html><body>test</body></html>", encoding="utf-8")
+    profile = tmp_path / "profile"
+    token = "task13-desktop-websocket-token"
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "hermes_cli.main",
+            "serve",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "0",
+            "--skip-build",
+        ],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "HERMES_HOME": str(profile),
+            "HERMES_WEB_DIST": str(dist),
+            "HERMES_DASHBOARD_SESSION_TOKEN": token,
+            "PYTHONPATH": str(Path(__file__).resolve().parents[2]),
+        },
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    transcript: list[str] = []
+    try:
+        port = _wait_for_spawned_serve_port(process, transcript)
+        reply = asyncio.run(_desktop_catalog_over_websocket(port, token))
+    finally:
+        process.terminate()
+        try:
+            stdout, stderr = process.communicate(timeout=10)
+        except subprocess.TimeoutExpired:  # pragma: no cover - failure cleanup
+            process.kill()
+            stdout, stderr = process.communicate(timeout=10)
+        transcript.extend([stdout, stderr])
+
+    assert reply["id"] == "task13-catalog"
+    assert "result" in reply
+    assert process.returncode == 0
+    assert "HERMES_DASHBOARD_READY port=" in "".join(transcript)
 
 
 def test_external_backend_plugin_registration_contract_is_opt_in_and_narrow() -> None:
@@ -535,6 +596,115 @@ def test_external_plugin_is_discovered_by_real_manager_before_contextual_dispatc
     ]
 
 
+def test_external_plugin_terminal_pairing_uses_only_fake_verify_register_bind(
+    tmp_path: Path,
+) -> None:
+    """A real host subprocess may pair only through stdin and the three explicit HTTP calls."""
+    root = _external_plugin_root_or_skip()
+    profile = tmp_path / "profile"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    plugin_dir = profile / "plugins"
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / "hades-backend").symlink_to(root, target_is_directory=True)
+    (profile / "config.yaml").write_text(
+        "plugins:\n  enabled: [hades-backend]\n", encoding="utf-8"
+    )
+    calls: list[tuple[str, str]] = []
+
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            calls.append((self.path, self.headers.get("Authorization", "")))
+            if self.path.endswith("token/verify"):
+                response: dict[str, Any] = {
+                    "project_id": body["project_id"],
+                    "valid": True,
+                }
+            elif self.path.endswith("agents/register"):
+                response = {
+                    "agent_id": "agent-a",
+                    "agent_token": "DERIVED_TERMINAL_A",
+                    "capabilities": {
+                        key: True
+                        for key in (
+                            "read_files",
+                            "read_source_slice",
+                            "project_inspection",
+                            "sync_git_tree",
+                            "populate_backend_ast",
+                            "populate_project_wiki",
+                            "verify_project_wiki",
+                            "write_project_logbook",
+                        )
+                    },
+                }
+            elif self.path.endswith("workspaces/bind"):
+                response = {"workspace_binding_id": "binding-a"}
+            else:  # pragma: no cover - protocol diagnostic
+                self.send_error(404)
+                return
+            encoded = json.dumps(response).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
+
+        def log_message(self, _format: str, *_args: Any) -> None:
+            return None
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    bootstrap = "BOOTSTRAP_TERMINAL_PROCESS_CANARY"
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "hermes_cli.main",
+                "backend",
+                "set-token",
+                "--url",
+                f"http://127.0.0.1:{server.server_port}",
+                "--project-id",
+                "project-a",
+                "--workspace",
+                str(workspace),
+                "--token-stdin",
+            ],
+            cwd=workspace,
+            env={
+                **os.environ,
+                "HERMES_HOME": str(profile),
+                "PYTHONPATH": str(Path(__file__).resolve().parents[2]),
+            },
+            input=f"{bootstrap}\n",
+            text=True,
+            capture_output=True,
+            timeout=20,
+            check=False,
+        )
+    finally:
+        server.shutdown()
+        thread.join(timeout=2)
+
+    assert result.returncode == 0, result.stderr
+    assert bootstrap not in (result.stdout + result.stderr)
+    assert calls == [
+        ("/api/hades/v1/token/verify", f"Bearer {bootstrap}"),
+        ("/api/hades/v1/agents/register", f"Bearer {bootstrap}"),
+        ("/api/hades/v1/workspaces/bind", "Bearer DERIVED_TERMINAL_A"),
+    ]
+    assert (profile / ".env").read_text(encoding="utf-8").count(
+        "DERIVED_TERMINAL_A"
+    ) == 1
+    assert bootstrap not in (profile / "hades_backend.db").read_text(errors="ignore")
+
+
 def _wait_for_owned_secret_request(server: ModuleType, session_id: str) -> str:
     for _ in range(200):
         with server._prompt_lock:
@@ -547,6 +717,47 @@ def _wait_for_owned_secret_request(server: ModuleType, session_id: str) -> str:
             return requests[0]
         time.sleep(0.01)
     pytest.fail(f"secret.request was not emitted for {session_id}")
+
+
+def _wait_for_spawned_serve_port(
+    process: subprocess.Popen[str], transcript: list[str]
+) -> int:
+    assert process.stdout is not None
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        ready, _, _ = select.select([process.stdout], [], [], 0.1)
+        if ready:
+            line = process.stdout.readline()
+            transcript.append(line)
+            if line.startswith("HERMES_DASHBOARD_READY port="):
+                return int(line.rsplit("=", 1)[1])
+        if process.poll() is not None:
+            break
+    stderr = process.stderr.read() if process.stderr is not None else ""
+    pytest.fail(
+        "hades serve did not announce a ready port; output: "
+        f"{''.join(transcript)} stderr: {stderr}"
+    )
+
+
+async def _desktop_catalog_over_websocket(port: int, token: str) -> dict[str, Any]:
+    from websockets.asyncio.client import connect
+
+    async with connect(
+        f"ws://127.0.0.1:{port}/api/ws?token={token}", open_timeout=10
+    ) as websocket:
+        ready = json.loads(await asyncio.wait_for(websocket.recv(), timeout=10))
+        assert ready["params"]["type"] == "gateway.ready"
+        await websocket.send(json.dumps({
+            "jsonrpc": "2.0",
+            "id": "task13-catalog",
+            "method": "commands.catalog",
+            "params": {},
+        }))
+        while True:
+            message = json.loads(await asyncio.wait_for(websocket.recv(), timeout=10))
+            if message.get("id") == "task13-catalog":
+                return message
 
 
 def _external_plugin_root_or_skip() -> Path:
