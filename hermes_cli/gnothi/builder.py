@@ -15,18 +15,11 @@ from hermes_cli.gnothi.collectors.dependencies import DependencyCollector
 from hermes_cli.gnothi.collectors.experience import ExperienceCollector
 from hermes_cli.gnothi.collectors.runtime import RuntimeCollector, _git_generation
 from hermes_cli.gnothi.collectors.source import SourceCollector
+from hermes_cli.gnothi.collector_order import COLLECTOR_ORDER
 from hermes_cli.gnothi.contract import new_artifact, validate_artifact
 from hermes_cli.gnothi.redaction import redact_value, safe_exception_class
 from hermes_cli.gnothi.store import OrganismRevisionStore
 
-COLLECTOR_ORDER = (
-    "source",
-    "capabilities",
-    "runtime",
-    "contracts",
-    "dependencies",
-    "experience",
-)
 REQUIRED_COLLECTORS = frozenset({"source", "capabilities", "runtime", "contracts"})
 
 

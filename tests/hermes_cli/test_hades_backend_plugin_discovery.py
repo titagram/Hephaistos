@@ -5,16 +5,10 @@ from __future__ import annotations
 import os
 import json
 from pathlib import Path
-import shutil
 import subprocess
 import sys
 
 import yaml
-
-
-PLUGIN_REPOSITORY = (
-    Path(__file__).resolve().parents[2].parent / "hades-backend-plugin-repo"
-)
 
 
 def _run_backend_help(home: Path) -> subprocess.CompletedProcess[str]:
@@ -55,9 +49,37 @@ def _run_tui_catalog(home: Path) -> dict:
 
 
 def _install_plugin(home: Path, *, enabled: bool) -> None:
-    if not PLUGIN_REPOSITORY.is_dir():
-        raise AssertionError(f"missing standalone plugin fixture: {PLUGIN_REPOSITORY}")
-    shutil.copytree(PLUGIN_REPOSITORY, home / "plugins" / "hades-backend")
+    """Install the smallest real directory plugin needed to exercise the host ABI."""
+    plugin = home / "plugins" / "hades-backend"
+    plugin.mkdir(parents=True)
+    (plugin / "plugin.yaml").write_text(
+        "name: hades-backend\nkind: standalone\nversion: 0.0.0-test\n",
+        encoding="utf-8",
+    )
+    (plugin / "__init__.py").write_text(
+        """
+def _setup(parser):
+    actions = parser.add_subparsers(dest=\"backend_action\", required=True)
+    for name in (\"set-token\", \"status\", \"sync\"):
+        actions.add_parser(name)
+
+
+def _run(_args):
+    return 0
+
+
+def _slash(_raw_args, _context=None):
+    return \"ok\"
+
+
+def register(ctx):
+    ctx.register_cli_command(\"backend\", \"Test optional backend\", _setup, _run)
+    ctx.register_command(
+        \"backend\", _slash, \"Test optional backend\", \"set-token|status|sync\"
+    )
+""".lstrip(),
+        encoding="utf-8",
+    )
     (home / "config.yaml").write_text(
         yaml.safe_dump({"plugins": {"enabled": ["hades-backend"] if enabled else []}}),
         encoding="utf-8",

@@ -58,3 +58,32 @@ registered Backend command or UI surfaces:
 Their former startup path is avoided: Kanban swarm and Gnothi heavyweight
 collectors now import lazily, so an absent `/backend` command does not pull this
 infrastructure during CLI parser construction.
+
+## Review round 2
+
+- Replaced the discovery test's sibling-worktree copy with a minimal directory
+  plugin written under each test's `tmp_path`.  Its manifest and `__init__.py`
+  exercise the real generic registration ABI for the CLI parser and slash
+  catalog, with only `set-token`, `status`, and `sync`; it has no machine-local
+  repository path or standalone-plugin checkout dependency.
+- Moved `COLLECTOR_ORDER` to the lightweight
+  `hermes_cli.gnothi.collector_order` module, imported by both the command
+  parser and builder.  This removes the duplicate command snapshot without
+  importing collectors at startup.
+- Restored the public, monkeypatchable `drift_status` and
+  `build_organism_revision` symbols as module-level lazy wrappers.  The command
+  calls those wrappers, so existing patches still control status/rebuild while
+  fresh parser imports remain free of `hades_backend_*` modules.
+- RED/GREEN evidence: the new shared-order/patchability test initially failed
+  on the absent lightweight module; the prior review reproduction and existing
+  status/rebuild tests failed on the removed wrapper symbols.  After the small
+  implementation, `tests/hermes_cli/test_hades_gnothi_cmd.py` plus the hermetic
+  plugin discovery tests passed: **10 passed**.  The Gnothi/coordination/Kanban
+  bounded batch passed: **76 passed, 11 deselected**.
+- Cross-surface regression: Desktop typecheck; Desktop slash test **16
+  passed**; TUI typecheck; TUI slash test **66 passed**; web Vitest **92
+  passed**.  Static route/RPC/legacy-command/credential gates and installer
+  shell syntax passed.
+- A fresh `git archive HEAD` extracted under `/private/tmp` ran the hermetic
+  discovery file successfully: **3 passed**.  This archive contains no sibling
+  standalone-plugin checkout.

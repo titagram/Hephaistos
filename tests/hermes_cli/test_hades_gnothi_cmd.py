@@ -1,6 +1,9 @@
 import argparse
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 
 from hermes_cli.gnothi.builder import build_organism_revision
 from hermes_cli.gnothi.collectors.base import CollectorResult
@@ -33,6 +36,44 @@ def test_parser_accepts_every_local_surface():
         "status", "rebuild", "inspect", "explain", "diff", "wiki"
     ]
     assert parser.parse_args(cases[1]).collectors == ["source", "runtime"]
+
+
+def test_gnothi_parser_uses_shared_order_and_keeps_lazy_collaborators_patchable():
+    """Parser startup stays backend-free while command collaborators remain replaceable."""
+    from hermes_cli.gnothi.collector_order import COLLECTOR_ORDER
+    from hermes_cli import hades_gnothi_cmd as command
+
+    parser = _parser()
+    collector_action = next(
+        action
+        for action in parser._actions
+        if getattr(action, "dest", None) == "command"
+    ).choices["gnothi-seauton"]._subparsers._group_actions[0].choices["rebuild"]._option_string_actions["--collector"]
+
+    assert tuple(collector_action.choices) == COLLECTOR_ORDER
+    assert callable(command.drift_status)
+    assert callable(command.build_organism_revision)
+
+
+
+def test_gnothi_command_module_import_is_backend_free(tmp_path):
+    """Command/parser import must not construct Gnothi's backend collectors."""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; import hermes_cli.hades_gnothi_cmd; "
+                "raise SystemExit(any(name.startswith('hermes_cli.hades_backend_') for name in sys.modules))"
+            ),
+        ],
+        cwd=tmp_path,
+        env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[2])},
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_missing_status_is_actionable_and_returns_one(tmp_path, monkeypatch, capsys):

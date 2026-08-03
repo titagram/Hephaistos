@@ -7,16 +7,21 @@ from pathlib import Path
 from typing import Any
 
 from utils import atomic_replace
+from hermes_cli.gnothi.collector_order import COLLECTOR_ORDER
 
 
-COLLECTOR_ORDER = (
-    "source",
-    "capabilities",
-    "runtime",
-    "contracts",
-    "dependencies",
-    "experience",
-)
+def drift_status(*args, **kwargs):
+    """Load the heavyweight Gnothi builder only when status needs drift data."""
+    from hermes_cli.gnothi.builder import drift_status as implementation
+
+    return implementation(*args, **kwargs)
+
+
+def build_organism_revision(*args, **kwargs):
+    """Load the heavyweight Gnothi builder only when a rebuild is requested."""
+    from hermes_cli.gnothi.builder import build_organism_revision as implementation
+
+    return implementation(*args, **kwargs)
 
 
 def _emit(value: Any, as_json: bool = False) -> None:
@@ -44,7 +49,6 @@ def _write_output(path: Path, content: str) -> None:
 
 
 def gnothi_command(args) -> int:
-    from hermes_cli.gnothi.builder import build_organism_revision, drift_status
     from hermes_cli.gnothi.query import OrganismQuery
     from hermes_cli.gnothi.store import OrganismRevisionStore
     from hermes_cli.gnothi.wiki import render_wiki
