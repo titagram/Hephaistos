@@ -1226,7 +1226,10 @@ def init_agent(
     agent._memory_manager = None
     if not skip_memory:
         try:
-            _mem_provider_name = mem_config.get("provider", "") if mem_config else ""
+            from hermes_cli.retired_memory_providers import resolve_effective_memory_provider
+
+            _memory_provider_resolution = resolve_effective_memory_provider(_agent_cfg)
+            _mem_provider_name = _memory_provider_resolution.effective
 
             if _mem_provider_name and _mem_provider_name.strip():
                 from agent.memory_manager import MemoryManager as _MemoryManager

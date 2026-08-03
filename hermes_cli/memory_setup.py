@@ -434,24 +434,33 @@ def _write_env_vars(env_path: Path, env_writes: dict) -> None:
 def cmd_status(args) -> None:
     """Show current memory provider config."""
     from hermes_cli.config import load_config
+    from hermes_cli.retired_memory_providers import resolve_effective_memory_provider
 
     config = load_config()
     mem_config = config.get("memory", {})
-    provider_name = mem_config.get("provider", "")
+    if not isinstance(mem_config, dict):
+        mem_config = {}
+    resolution = resolve_effective_memory_provider(config)
+    provider_name = resolution.configured
+    effective_provider_name = resolution.effective
 
     print(f"\nMemory status\n" + "─" * 40)
     print(f"  Built-in:  always active")
-    print(f"  Provider:  {provider_name or '(none — built-in only)'}")
+    print(f"  Configured: {provider_name or '(none — built-in only)'}")
+    print(f"  Effective:  {effective_provider_name or '(none — built-in only)'}")
+    print(f"  Retired:    {'yes' if resolution.retired else 'no'}")
+    if resolution.message:
+        print(f"  Note:       {resolution.message}")
 
     providers = _get_available_providers()
     provider = None
     for pname, _, candidate in providers:
-        if pname == provider_name:
+        if pname == effective_provider_name:
             provider = candidate
             break
 
-    if provider_name:
-        provider_config = mem_config.get(provider_name, {})
+    if effective_provider_name:
+        provider_config = mem_config.get(effective_provider_name, {})
         display_config = provider_config
         if provider and hasattr(provider, "get_status_config"):
             try:
@@ -462,7 +471,7 @@ def cmd_status(args) -> None:
                     display_config["status_config_error"] = str(e)
 
         if display_config:
-            print(f"\n  {provider_name} config:")
+            print(f"\n  {effective_provider_name} config:")
             for key, val in display_config.items():
                 print(f"    {key}: {val}")
 
@@ -488,12 +497,12 @@ def cmd_status(args) -> None:
                         print(line)
         else:
             print(f"\n  Plugin:    NOT installed ✗")
-            print(f"  Install the '{provider_name}' memory plugin to ~/.hermes/plugins/")
+            print(f"  Install the '{effective_provider_name}' memory plugin to ~/.hermes/plugins/")
 
     if providers:
         print(f"\n  Installed plugins:")
         for pname, desc, _ in providers:
-            active = " ← active" if pname == provider_name else ""
+            active = " ← active" if pname == effective_provider_name else ""
             print(f"    • {pname}  ({desc}){active}")
 
     print()
