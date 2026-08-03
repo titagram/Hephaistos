@@ -21,6 +21,7 @@ test("loads safe defaults", () => {
     timeoutMs: 120_000,
     maxBodyBytes: 2_097_152,
     maxConcurrency: 2,
+    maxQueueDepth: 8,
   });
 });
 
@@ -29,6 +30,10 @@ test("rejects invalid required values and concurrency", () => {
   assert.throws(() => loadConfig({ ...validEnv, CODEX_MODEL: "" }), /CODEX_MODEL/);
   assert.throws(
     () => loadConfig({ ...validEnv, BRIDGE_MAX_CONCURRENCY: "0" }),
+    /positive integer/,
+  );
+  assert.throws(
+    () => loadConfig({ ...validEnv, BRIDGE_MAX_QUEUE_DEPTH: "0" }),
     /positive integer/,
   );
 });

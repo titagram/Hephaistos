@@ -127,6 +127,7 @@ const config: BridgeConfig = {
   timeoutMs: 120_000,
   maxBodyBytes: 2_097_152,
   maxConcurrency: 2,
+  maxQueueDepth: 8,
 };
 
 interface HarnessOptions extends CodexAppServerOptions {

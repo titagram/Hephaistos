@@ -9,6 +9,7 @@ export interface BridgeConfig {
   timeoutMs: number;
   maxBodyBytes: number;
   maxConcurrency: number;
+  maxQueueDepth: number;
 }
 
 export class ConfigurationError extends Error {
@@ -65,5 +66,6 @@ export function loadConfig(env: NodeJS.ProcessEnv): BridgeConfig {
     timeoutMs: positiveInteger("BRIDGE_TIMEOUT_MS", 120_000),
     maxBodyBytes: positiveInteger("BRIDGE_MAX_BODY_BYTES", 2_097_152),
     maxConcurrency: positiveInteger("BRIDGE_MAX_CONCURRENCY", 2),
+    maxQueueDepth: positiveInteger("BRIDGE_MAX_QUEUE_DEPTH", 8),
   };
 }

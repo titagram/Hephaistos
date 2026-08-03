@@ -90,6 +90,7 @@ assert.equal(
   "server must process ingestion directly without the unavailable Rivet runtime",
 );
 assert.equal(bridge.environment.BRIDGE_API_KEY, "bridge-test-key");
+assert.equal(bridge.environment.BRIDGE_MAX_QUEUE_DEPTH, "8");
 assert.equal(bridge.environment.CODEX_MODEL, "gpt-5.6-sol");
 assert.ok(!Object.hasOwn(bridge.environment, "OPENAI_API_KEY"), "bridge must not receive OPENAI_API_KEY");
 

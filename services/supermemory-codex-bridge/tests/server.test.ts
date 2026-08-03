@@ -20,6 +20,7 @@ const config: BridgeConfig = {
   timeoutMs: 100,
   maxBodyBytes: 1_024,
   maxConcurrency: 2,
+  maxQueueDepth: 8,
 };
 
 interface RunCall {
@@ -446,6 +447,52 @@ test("the concurrency semaphore is FIFO and queued acquisition is abortable", as
     pending[1]!.resolve({ text: "two" });
     pending[2]!.resolve({ text: "three" });
     assert.deepEqual(await Promise.all(calls).then((responses) => responses.map((response) => response.status)), [200, 200, 200]);
+  } finally {
+    await harness.close();
+  }
+});
+
+test("rejects overload before retaining another request body", async () => {
+  const runner = new FakeRunner();
+  const pending: Array<Deferred<CodexResult>> = [];
+  runner.runImplementation = async () => {
+    const result = deferred<CodexResult>();
+    pending.push(result);
+    return result.promise;
+  };
+  const harness = await listen(runner, {
+    timeoutMs: 1_000,
+    maxConcurrency: 1,
+    maxQueueDepth: 1,
+  });
+  try {
+    const first = fetch(`${harness.origin}/v1/chat/completions`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: chatBody("first occupies the permit"),
+    });
+    await waitFor(() => runner.runs.length === 1);
+
+    const second = fetch(`${harness.origin}/v1/chat/completions`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: chatBody("second occupies the bounded queue"),
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    const overloaded = await fetch(`${harness.origin}/v1/chat/completions`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({ private: "x".repeat(2_048) }),
+    });
+    assert.equal(overloaded.status, 503);
+    assert.equal((await overloaded.json() as any).error.code, "bridge_overloaded");
+    assert.equal(runner.runs.length, 1);
+
+    pending[0]!.resolve({ text: "first completed" });
+    await waitFor(() => runner.runs.length === 2);
+    pending[1]!.resolve({ text: "second completed" });
+    assert.deepEqual([(await first).status, (await second).status], [200, 200]);
   } finally {
     await harness.close();
   }

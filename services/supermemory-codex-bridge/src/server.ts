@@ -108,11 +108,18 @@ class RequestAbortedError extends Error {
   }
 }
 
+class BridgeOverloadedError extends Error {
+  constructor() {
+    super("Bridge request queue is full");
+    this.name = "BridgeOverloadedError";
+  }
+}
+
 class FifoSemaphore {
   private permits: number;
   private readonly queue: Waiter[] = [];
 
-  constructor(permits: number) {
+  constructor(permits: number, private readonly maxQueueDepth: number) {
     this.permits = permits;
   }
 
@@ -121,6 +128,9 @@ class FifoSemaphore {
     if (this.permits > 0) {
       this.permits -= 1;
       return Promise.resolve(this.releaseOnce());
+    }
+    if (this.queue.length >= this.maxQueueDepth) {
+      return Promise.reject(new BridgeOverloadedError());
     }
 
     return new Promise((resolve, reject) => {
@@ -207,11 +217,12 @@ const genericErrors = {
   methodNotAllowed: { status: 405, code: "method_not_allowed", message: "The request method is not allowed." },
   invalidJson: { status: 400, code: "invalid_json", message: "The request body is not valid JSON." },
   bodyTooLarge: { status: 413, code: "body_too_large", message: "The request body is too large." },
+  overloaded: { status: 503, code: "bridge_overloaded", message: "The bridge is temporarily overloaded." },
   upstream: upstreamErrors.upstream,
 } satisfies Record<string, MappedError>;
 
 export function createBridgeServer(config: BridgeConfig, codex: CodexRunner): http.Server {
-  const semaphore = new FifoSemaphore(config.maxConcurrency);
+  const semaphore = new FifoSemaphore(config.maxConcurrency, config.maxQueueDepth);
   const startup = codex.start();
 
   const server = http.createServer((request, response) => {
@@ -280,6 +291,12 @@ async function handleRequest(
     const timer = setTimeout(() => controller.abort("deadline"), config.timeoutMs);
     let release: (() => void) | undefined;
     try {
+      try {
+        release = await semaphore.acquire(controller.signal);
+      } catch (error) {
+        request.resume();
+        throw error;
+      }
       const rawBody = await readBody(request, config.maxBodyBytes, controller.signal);
       let parsedBody: unknown;
       try {
@@ -289,7 +306,6 @@ async function handleRequest(
       }
       requestShape = describeRequestShape(parsedBody);
       const parsed = parseChatCompletionRequest(parsedBody, config.publicModel);
-      release = await semaphore.acquire(controller.signal);
       const result = await abortable(codex.run(buildCodexInvocation(parsed), controller.signal), controller.signal);
       if (disconnected || response.destroyed) return;
       status = 200;
@@ -439,6 +455,7 @@ function mappedApiError(mapped: MappedError): ApiError {
 
 function mapError(error: unknown, signal: AbortSignal): MappedError {
   if (signal.aborted && signal.reason === "deadline") return upstreamErrors.timeout;
+  if (error instanceof BridgeOverloadedError) return genericErrors.overloaded;
   if (error instanceof ApiError) {
     return { status: error.status, code: error.code, message: error.message };
   }
