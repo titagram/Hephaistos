@@ -53,6 +53,9 @@ def reconcile_plugin_transaction(plugins_dir: Path, name: str) -> Path:
     if invalid:
         raise PluginTransactionError("incomplete plugin transaction residue preserved")
     backups = [path for path in residues if path.name.startswith(f".{name}.backup-")]
+    stagings = [path for path in residues if path.name.startswith(f".{name}.staging-")]
+    if len(backups) > 1 or len(stagings) > 1:
+        raise PluginTransactionError("ambiguous plugin transaction residue preserved")
     if target.exists():
         if not _is_complete_plugin(target, name):
             raise PluginTransactionError("invalid canonical plugin preserved")

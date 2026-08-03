@@ -498,20 +498,29 @@ class TestCmdUpdate:
 class TestCmdRemove:
     """Test the remove command."""
 
-    @patch("hermes_cli.plugins_cmd._sanitize_plugin_name")
-    @patch("hermes_cli.plugins_cmd._plugins_dir")
-    @patch("hermes_cli.plugins_cmd.shutil.rmtree")
-    def test_remove_deletes_plugin(self, mock_rmtree, mock_plugins_dir, mock_sanitize):
+    def test_remove_deletes_plugin(self, tmp_path, monkeypatch):
         from hermes_cli.plugins_cmd import cmd_remove
 
-        mock_plugins_dir.return_value = MagicMock()
-        mock_target = MagicMock()
-        mock_target.exists.return_value = True
-        mock_sanitize.return_value = mock_target
+        hermes_home = tmp_path / ".hermes"
+        target = hermes_home / "plugins" / "test-plugin"
+        target.mkdir(parents=True)
+        (target / "plugin.yaml").write_text(
+            "name: test-plugin\nmanifest_version: 1\n", encoding="utf-8"
+        )
+        config_path = hermes_home / "config.yaml"
+        config_path.write_text(
+            "plugins:\n  enabled:\n    - test-plugin\n  disabled: []\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
 
         cmd_remove("test-plugin")
 
-        mock_rmtree.assert_called_once_with(mock_target)
+        assert not target.exists()
+        assert yaml.safe_load(config_path.read_text(encoding="utf-8"))["plugins"] == {
+            "enabled": [],
+            "disabled": ["test-plugin"],
+        }
 
     @patch("hermes_cli.plugins_cmd._sanitize_plugin_name")
     @patch("hermes_cli.plugins_cmd._plugins_dir")

@@ -148,6 +148,15 @@ def _local_plugin_repo(tmp_path: Path) -> Path:
     return repo
 
 
+def _write_manifest_plugin(path: Path, name: str, payload: str = "payload\n") -> Path:
+    path.mkdir(parents=True)
+    (path / "plugin.yaml").write_text(
+        f"name: {name}\nmanifest_version: 1\n", encoding="utf-8"
+    )
+    (path / "payload.txt").write_text(payload, encoding="utf-8")
+    return path
+
+
 def test_real_plugin_install_and_update_preserve_canary_state(tmp_path, monkeypatch):
     """A local Git install/update never performs Backend work or rewrites profile state."""
     hermes_home, config_path, external_before = _write_canary_profile(
@@ -405,3 +414,186 @@ def test_transaction_residue_is_ignored_and_reconciled_target_locally(
     assert (target / "payload.txt").read_text(encoding="utf-8") == "backup"
     assert not staging.exists()
     assert not backup.exists()
+
+
+@pytest.mark.parametrize("surface", ["cli", "dashboard"])
+@pytest.mark.parametrize("nested_manifest", ["nested-observer", "nemo"])
+def test_remove_uses_exact_nested_registry_identity_and_preserves_flat_plugin(
+    tmp_path, monkeypatch, surface, nested_manifest
+):
+    hermes_home, config_path, external_before = _write_canary_profile(
+        tmp_path, monkeypatch
+    )
+    plugins_dir = hermes_home / "plugins"
+    nested = _write_manifest_plugin(
+        plugins_dir / "observability" / "nemo", nested_manifest
+    )
+    flat = _write_manifest_plugin(plugins_dir / "nemo", "nemo")
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["plugins"]["enabled"] = ["observability/nemo", "nemo"]
+    config["plugins"]["disabled"] = []
+    config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+
+    from hermes_cli import plugins_cmd
+
+    if surface == "cli":
+        plugins_cmd.cmd_remove("observability/nemo")
+    else:
+        assert plugins_cmd.dashboard_remove_user_plugin("observability/nemo") == {
+            "ok": True,
+            "name": "observability/nemo",
+        }
+
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert config["plugins"]["enabled"] == ["nemo"]
+    assert config["plugins"]["disabled"] == ["observability/nemo"]
+    assert not nested.exists()
+    assert flat.is_dir()
+    _assert_canary_unchanged(config_path, external_before)
+
+
+def test_remove_preserves_ambiguous_manifest_name_activation(tmp_path, monkeypatch):
+    hermes_home, config_path, external_before = _write_canary_profile(
+        tmp_path, monkeypatch
+    )
+    plugins_dir = hermes_home / "plugins"
+    first = _write_manifest_plugin(plugins_dir / "alpha" / "one", "shared-name")
+    second = _write_manifest_plugin(plugins_dir / "beta" / "two", "shared-name")
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["plugins"]["enabled"] = ["alpha/one", "beta/two", "shared-name"]
+    config["plugins"]["disabled"] = []
+    config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+
+    from hermes_cli import plugins_cmd
+
+    plugins_cmd.cmd_remove("alpha/one")
+
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert config["plugins"]["enabled"] == ["beta/two", "shared-name"]
+    assert config["plugins"]["disabled"] == ["alpha/one"]
+    assert not first.exists()
+    assert second.is_dir()
+    _assert_canary_unchanged(config_path, external_before)
+
+
+def test_remove_preserves_identity_shared_by_manifest_name_and_other_leaf(
+    tmp_path, monkeypatch
+):
+    hermes_home, config_path, external_before = _write_canary_profile(
+        tmp_path, monkeypatch
+    )
+    plugins_dir = hermes_home / "plugins"
+    target = _write_manifest_plugin(plugins_dir / "alpha" / "one", "shared-alias")
+    sibling = _write_manifest_plugin(
+        plugins_dir / "beta" / "shared-alias", "different-name"
+    )
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["plugins"]["enabled"] = ["alpha/one", "beta/shared-alias", "shared-alias"]
+    config["plugins"]["disabled"] = []
+    config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+
+    from hermes_cli import plugins_cmd
+
+    plugins_cmd.cmd_remove("alpha/one")
+
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert config["plugins"]["enabled"] == ["beta/shared-alias", "shared-alias"]
+    assert config["plugins"]["disabled"] == ["alpha/one"]
+    assert not target.exists()
+    assert sibling.is_dir()
+    _assert_canary_unchanged(config_path, external_before)
+
+
+@pytest.mark.parametrize("surface", ["cli", "dashboard"])
+def test_remove_cleans_valid_transaction_residue_before_reinstall(
+    tmp_path, monkeypatch, surface
+):
+    hermes_home, config_path, external_before = _write_canary_profile(
+        tmp_path, monkeypatch
+    )
+    source = _local_plugin_repo(tmp_path)
+    plugins_dir = hermes_home / "plugins"
+    target = _write_manifest_plugin(
+        plugins_dir / "hades-backend", "hades-backend", "published\n"
+    )
+    backup = _write_manifest_plugin(
+        plugins_dir / ".hades-backend.backup-dead", "hades-backend", "removed-old\n"
+    )
+    staging = _write_manifest_plugin(
+        plugins_dir / ".hades-backend.staging-beef",
+        "hades-backend",
+        "abandoned-candidate\n",
+    )
+    foreign = _write_manifest_plugin(
+        plugins_dir / ".other-plugin.backup-dead", "other-plugin", "foreign\n"
+    )
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["plugins"]["enabled"] = ["hades-backend"]
+    config["plugins"]["disabled"] = []
+    config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+
+    from hermes_cli import plugins_cmd
+
+    if surface == "cli":
+        plugins_cmd.cmd_remove("hades-backend")
+    else:
+        assert plugins_cmd.dashboard_remove_user_plugin("hades-backend") == {
+            "ok": True,
+            "name": "hades-backend",
+        }
+
+    assert not target.exists()
+    assert not backup.exists()
+    assert not staging.exists()
+    assert foreign.is_dir()
+    plugins_cmd.cmd_install(f"file://{source}", enable=False)
+    assert (target / "payload.txt").read_text(encoding="utf-8") == "version one\n"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert config["plugins"]["enabled"] == []
+    assert config["plugins"]["disabled"] == ["hades-backend"]
+    _assert_canary_unchanged(config_path, external_before)
+
+
+@pytest.mark.parametrize("surface", ["cli", "dashboard"])
+@pytest.mark.parametrize("residue_state", ["incomplete", "ambiguous", "invalid"])
+def test_remove_fails_closed_on_unproven_transaction_residue(
+    tmp_path, monkeypatch, surface, residue_state
+):
+    hermes_home, config_path, external_before = _write_canary_profile(
+        tmp_path, monkeypatch
+    )
+    plugins_dir = hermes_home / "plugins"
+    target_name = "wrong-plugin" if residue_state == "invalid" else "hades-backend"
+    target = _write_manifest_plugin(plugins_dir / "hades-backend", target_name)
+    residue = plugins_dir / ".hades-backend.backup-dead"
+    if residue_state == "incomplete":
+        residue.mkdir()
+    else:
+        _write_manifest_plugin(residue, "hades-backend")
+    extra_residue = None
+    if residue_state == "ambiguous":
+        extra_residue = _write_manifest_plugin(
+            plugins_dir / ".hades-backend.backup-beef", "hades-backend"
+        )
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["plugins"]["enabled"] = ["hades-backend"]
+    config["plugins"]["disabled"] = []
+    config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+    config_before = config_path.read_bytes()
+
+    from hermes_cli import plugins_cmd
+
+    if surface == "cli":
+        with pytest.raises(SystemExit):
+            plugins_cmd.cmd_remove("hades-backend")
+    else:
+        result = plugins_cmd.dashboard_remove_user_plugin("hades-backend")
+        assert result["ok"] is False
+        assert "transaction" in result["error"].lower()
+
+    assert target.is_dir()
+    assert residue.is_dir()
+    if extra_residue is not None:
+        assert extra_residue.is_dir()
+    assert config_path.read_bytes() == config_before
+    _assert_canary_unchanged(config_path, external_before)

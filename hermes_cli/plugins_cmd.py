@@ -720,27 +720,56 @@ def cmd_remove(name: str) -> None:
 
     try:
         target = _require_installed_plugin(name, plugins_dir, console)
+        _remove_user_plugin(target)
+    except PluginOperationError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        sys.exit(1)
     except ValueError as e:
         console.print(f"[red]Error:[/red] {e}")
         sys.exit(1)
 
-    _disable_removed_plugin_discovery(target)
-    shutil.rmtree(target)
     _display_removed(name, plugins_dir)
 
 
-def _disable_removed_plugin_discovery(target: Path) -> None:
+def _resolve_configured_plugin_identity(
+    identity: str, entries: list
+) -> Optional[tuple]:
+    """Resolve a config identity to one discovery record without guessing."""
+    key_matches = [entry for entry in entries if identity == entry[5]]
+    if key_matches:
+        return key_matches[0] if len(key_matches) == 1 else None
+    alias_matches = [
+        entry
+        for entry in entries
+        if identity == entry[0] or identity == entry[5].split("/")[-1]
+    ]
+    return alias_matches[0] if len(alias_matches) == 1 else None
+
+
+def _discovery_entry_for_target(target: Path, entries: list) -> tuple:
+    target_resolved = target.resolve()
+    matches = [entry for entry in entries if entry[4].resolve() == target_resolved]
+    if len(matches) != 1:
+        raise PluginOperationError(
+            f"Plugin removal requires one canonical discovery record for '{target}'."
+        )
+    return matches[0]
+
+
+def _disable_removed_plugin_discovery(target: Path, entries: list) -> None:
     """Prevent a removed plugin from silently becoming active when reinstalled."""
-    identities = {target.name}
-    for name, _version, _description, _source, path, key in _discover_all_plugins():
-        if path.resolve() == target.resolve():
-            identities.update({name, key})
+    target_entry = _discovery_entry_for_target(target, entries)
+    target_resolved = target.resolve()
+
+    def belongs_to_target(identity: str) -> bool:
+        entry = _resolve_configured_plugin_identity(identity, entries)
+        return entry is not None and entry[4].resolve() == target_resolved
 
     enabled = _get_enabled_set()
     disabled = _get_disabled_set()
-    enabled.difference_update(identities)
-    disabled.difference_update(identities)
-    disabled.add(next(iter(sorted(identities))))
+    enabled = {identity for identity in enabled if not belongs_to_target(identity)}
+    disabled = {identity for identity in disabled if not belongs_to_target(identity)}
+    disabled.add(target_entry[5])
 
     from hermes_cli.config import load_config, save_config
 
@@ -752,6 +781,24 @@ def _disable_removed_plugin_discovery(target: Path) -> None:
     plugins_config["enabled"] = sorted(enabled)
     plugins_config["disabled"] = sorted(disabled)
     save_config(config)
+
+
+def _remove_user_plugin(target: Path) -> None:
+    """Reconcile and remove one exact discovered user-plugin target."""
+    entries = _discover_all_plugins()
+    _discovery_entry_for_target(target, entries)
+    try:
+        reconciled = reconcile_plugin_transaction(target.parent, target.name)
+    except PluginTransactionError as e:
+        raise PluginOperationError(
+            f"Plugin removal blocked by transaction residue: {e}"
+        ) from e
+    if reconciled.resolve() != target.resolve():
+        raise PluginOperationError(
+            "Plugin removal resolved a different transaction target."
+        )
+    _disable_removed_plugin_discovery(target, entries)
+    shutil.rmtree(target)
 
 
 def _get_disabled_set() -> set:
@@ -1862,19 +1909,23 @@ def _git_pull_plugin_dir(target: Path) -> tuple[bool, str]:
 def dashboard_remove_user_plugin(name: str) -> dict[str, Any]:
     """Delete a plugin tree under ``~/.hermes/plugins/`` only."""
     plugins_dir = _plugins_dir()
-    for n, _ver, _d, src, _path, _key in _discover_all_plugins():
-        if n == name and src == "bundled":
-            return {"ok": False, "error": "Bundled plugins cannot be removed from the dashboard."}
-
     target = _user_installed_plugin_dir(name)
     if target is None:
+        entry = _resolve_configured_plugin_identity(name, _discover_all_plugins())
+        if entry is not None and entry[3] == "bundled":
+            return {
+                "ok": False,
+                "error": "Bundled plugins cannot be removed from the dashboard.",
+            }
         return {
             "ok": False,
             "error": f"Plugin '{name}' was not found under {plugins_dir}.",
         }
 
-    _disable_removed_plugin_discovery(target)
-    shutil.rmtree(target)
+    try:
+        _remove_user_plugin(target)
+    except PluginOperationError as e:
+        return {"ok": False, "error": str(e)}
     return {"ok": True, "name": name}
 
 
