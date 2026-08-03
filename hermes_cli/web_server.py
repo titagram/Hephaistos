@@ -9578,7 +9578,9 @@ async def get_memory_status():
         files[key] = path.stat().st_size if path.exists() else 0
 
     return {
-        "active": resolution.effective,
+        # ``active`` predates retired-provider resolution and is consumed as
+        # the editable selection by existing desktop/dashboard clients.
+        "active": resolution.configured,
         "configured": resolution.configured,
         "effective": resolution.effective,
         "retired": resolution.retired,

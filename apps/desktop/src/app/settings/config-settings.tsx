@@ -71,12 +71,15 @@ function memoryProviderSelectData(
   }
 
   if (current && !options.includes(current)) {
-    options.push(current)
     labels[current] = prettyName(current)
-    details[current] = {
-      status: discoveryFailed
-        ? 'Availability unknown · Current / configured'
-        : 'Unavailable (not discovered) · Current / configured'
+
+    if (!status?.retired || status.configured !== current) {
+      options.push(current)
+      details[current] = {
+        status: discoveryFailed
+          ? 'Availability unknown · Current / configured'
+          : 'Unavailable (not discovered) · Current / configured'
+      }
     }
   }
 
@@ -344,8 +347,8 @@ export function ConfigSettings({
         }
 
         const loadedConfig =
-          memory.status && typeof memory.status.active === 'string'
-            ? setNested(c, 'memory.provider', memory.status.active)
+          memory.status && typeof (memory.status.configured ?? memory.status.active) === 'string'
+            ? setNested(c, 'memory.provider', memory.status.configured ?? memory.status.active)
             : c
 
         setConfig(loadedConfig)
@@ -529,7 +532,10 @@ export function ConfigSettings({
                       {memoryDiscoveryFailed ? (
                         <span>Provider discovery unavailable; keeping the current selection.</span>
                       ) : null}
-                      {getNested(config, key) ? (
+                      {memoryStatus?.retired && memoryStatus.message ? (
+                        <span>{memoryStatus.message}</span>
+                      ) : null}
+                      {getNested(config, key) && !memoryStatus?.retired ? (
                         <MemoryConnect provider={String(getNested(config, key))} />
                       ) : null}
                     </>
@@ -555,7 +561,7 @@ export function ConfigSettings({
                 schemaKey={key}
                 value={getNested(config, key)}
               />
-              {key === 'memory.provider' && typeof getNested(config, key) === 'string' && getNested(config, key) ? (
+              {key === 'memory.provider' && typeof getNested(config, key) === 'string' && getNested(config, key) && !memoryStatus?.retired ? (
                 <ProviderConfigPanel provider={String(getNested(config, key))} />
               ) : null}
             </div>

@@ -118,8 +118,16 @@ export interface MemoryProviderDiscovery {
 }
 
 export interface MemoryStatusResponse {
-  /** Optional for compatibility with older/custom backends. */
+  /** Legacy editable selection; newer backends keep this raw/configured. */
   active?: string
+  /** Raw value persisted in memory.provider. Optional for older backends. */
+  configured?: string
+  /** Runtime provider after retired-provider resolution. */
+  effective?: string
+  /** Whether configured is retained for compatibility but inactive. */
+  retired?: boolean
+  /** Neutral user guidance for a retired selection. */
+  message?: string
   builtin_files: {
     memory: number
     user: number

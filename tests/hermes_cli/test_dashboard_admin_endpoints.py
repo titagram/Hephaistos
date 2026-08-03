@@ -182,6 +182,22 @@ class TestMemoryEndpoints:
         )
         assert r.status_code == 400
 
+    def test_status_preserves_legacy_active_while_reporting_retired_resolution(self):
+        from hermes_cli.config import load_config, save_config
+
+        config = load_config()
+        config["memory"] = {"provider": "hades_backend", "unknown": "preserve"}
+        save_config(config)
+
+        data = self.client.get("/api/memory").json()
+
+        assert data["active"] == "hades_backend"
+        assert data["configured"] == "hades_backend"
+        assert data["effective"] == ""
+        assert data["retired"] is True
+        assert "hades memory setup" in data["message"]
+        assert "hades_backend" not in [provider["name"] for provider in data["providers"]]
+
     def test_status_exposes_discovered_provider_availability_compatibly(
         self, monkeypatch
     ):

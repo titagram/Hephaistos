@@ -1511,6 +1511,10 @@ export interface MemoryProviderInfo {
 
 export interface MemoryStatus {
   active: string;
+  configured?: string;
+  effective?: string;
+  retired?: boolean;
+  message?: string;
   providers: MemoryProviderInfo[];
   builtin_files: { memory: number; user: number };
 }

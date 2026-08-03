@@ -1061,9 +1061,10 @@ export default function SystemPage() {
               <span>
                 External provider:{" "}
                 <span className="font-mono text-foreground">
-                  {memory?.active || "built-in only"}
+                  {memory?.effective || "built-in only"}
                 </span>
               </span>
+              {memory?.retired && memory.message ? <span>{memory.message}</span> : null}
               <Link to="/plugins" className="underline">
                 Change in Plugins →
               </Link>

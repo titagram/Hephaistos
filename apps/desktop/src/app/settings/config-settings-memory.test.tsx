@@ -195,6 +195,42 @@ describe('ConfigSettings memory provider discovery', () => {
     expect(screen.queryByText('Hades Backend')).toBeNull()
   })
 
+  it('preserves a retired configured provider when an unrelated memory setting autosaves', async () => {
+    getHermesConfigRecord.mockResolvedValueOnce({
+      memory: { memory_char_limit: 2200, provider: 'hades_backend' }
+    })
+    getHermesConfigSchema.mockResolvedValueOnce({
+      fields: {
+        'memory.memory_char_limit': { type: 'number', description: 'Memory character limit' },
+        'memory.provider': { type: 'string', description: 'Memory provider plugin' }
+      }
+    })
+    getMemoryStatus.mockResolvedValueOnce({
+      active: '',
+      configured: 'hades_backend',
+      effective: '',
+      retired: true,
+      message: 'This retired memory selection is inactive. Run interactive `hades memory setup` to choose a provider.',
+      providers: [{ name: 'honcho', description: 'Honcho memory.', configured: true, available: true }],
+      builtin_files: { memory: 0, user: 0 }
+    })
+
+    await renderMemorySettings()
+    fireEvent.change(await screen.findByDisplayValue('2200'), { target: { value: '2300' } })
+
+    await waitFor(
+      () =>
+        expect(saveHermesConfig).toHaveBeenCalledWith({
+          memory: { memory_char_limit: 2300, provider: 'hades_backend' }
+        }),
+      { timeout: 1500 }
+    )
+    const selector = await openProviderSelector()
+    expect(selector.textContent).toContain('Hades Backend')
+    expect(screen.getByText(/retired.*inactive/i)).toBeTruthy()
+    expect(screen.queryByRole('option', { name: /Hades Backend/ })).toBeNull()
+  })
+
   it('saves a dynamically discovered selection through the debounced config path', async () => {
     getMemoryStatus.mockResolvedValueOnce({
       active: 'honcho',
