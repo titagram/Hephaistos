@@ -1,12 +1,15 @@
 import json
 import os
 import stat
+import sys
 import threading
+import types
 
 import pytest
 
 from plugins.memory.supermemory import (
     SupermemoryMemoryProvider,
+    _SupermemoryClient,
     _clean_text_for_capture,
     _format_connection_summary,
     _format_prefetch_context,
@@ -17,11 +20,19 @@ from plugins.memory.supermemory import (
 
 
 class FakeClient:
-    def __init__(self, api_key: str, timeout: float, container_tag: str, search_mode: str = "hybrid"):
+    def __init__(
+        self,
+        api_key: str,
+        timeout: float,
+        container_tag: str,
+        search_mode: str = "hybrid",
+        base_url: str | None = None,
+    ):
         self.api_key = api_key
         self.timeout = timeout
         self.container_tag = container_tag
         self.search_mode = search_mode
+        self.base_url = base_url
         self.add_calls = []
         self.search_results = []
         self.profile_response = {"static": [], "dynamic": [], "search_results": []}
@@ -107,6 +118,127 @@ def test_load_and_save_config_round_trip(tmp_path):
     assert cfg["container_tag"] == "demo-tag"
     assert cfg["auto_capture"] is False
     assert cfg["auto_recall"] is True
+
+
+def test_missing_base_url_uses_cloud_default(tmp_path):
+    cfg = _load_supermemory_config(str(tmp_path))
+
+    assert cfg["base_url"] == "https://api.supermemory.ai"
+
+
+def test_custom_base_url_is_normalized_and_passed_to_provider_client(monkeypatch, tmp_path):
+    """Dropping base_url propagation would route provider calls back to the cloud."""
+    monkeypatch.setenv("SUPERMEMORY_API_KEY", "test-key")
+    monkeypatch.setattr("plugins.memory.supermemory._SupermemoryClient", FakeClient)
+    _save_supermemory_config({"base_url": "https://memory.example.test/"}, str(tmp_path))
+
+    provider = SupermemoryMemoryProvider()
+    provider.initialize("s1", hermes_home=str(tmp_path), platform="cli")
+
+    assert provider._active is True
+    assert provider._client.base_url == "https://memory.example.test"
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "",
+        "   ",
+        None,
+        False,
+        0,
+        "http://memory.example.test",
+        "https://user:password@memory.example.test",
+        "https://memory.example.test/v4",
+        "https://memory.example.test?tenant=other",
+        "https://memory.example.test#fragment",
+        "https://memory.example.test?",
+        "https://memory.example.test#",
+        "https://memory.example.test:",
+        "https://memory .example.test",
+        "https://memory.example.test\\evil",
+    ],
+)
+def test_invalid_custom_base_url_fails_closed(tmp_path, base_url):
+    """An invalid explicit endpoint must not silently fall back to the cloud."""
+    with pytest.raises(ValueError, match="base_url"):
+        _save_supermemory_config({"base_url": base_url}, str(tmp_path))
+
+    (tmp_path / "supermemory.json").write_text(
+        json.dumps({"base_url": base_url}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="base_url"):
+        _load_supermemory_config(str(tmp_path))
+
+
+@pytest.mark.parametrize("contents", ["{", "[]", "null", '"not-an-object"'])
+def test_malformed_or_non_object_config_fails_closed(tmp_path, contents):
+    (tmp_path / "supermemory.json").write_text(contents, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="configuration"):
+        _load_supermemory_config(str(tmp_path))
+
+
+def test_invalid_explicit_base_url_never_constructs_client(monkeypatch, tmp_path):
+    monkeypatch.setenv("SUPERMEMORY_API_KEY", "test-key")
+    (tmp_path / "supermemory.json").write_text(
+        json.dumps({"base_url": None}),
+        encoding="utf-8",
+    )
+    constructed = False
+
+    class UnexpectedClient(FakeClient):
+        def __init__(self, *args, **kwargs):
+            nonlocal constructed
+            constructed = True
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr("plugins.memory.supermemory._SupermemoryClient", UnexpectedClient)
+
+    provider = SupermemoryMemoryProvider()
+    with pytest.raises(ValueError, match="base_url"):
+        provider.initialize("s1", hermes_home=str(tmp_path), platform="cli")
+
+    assert constructed is False
+
+
+def test_client_routes_sdk_and_conversation_ingest_to_same_custom_base(monkeypatch):
+    """SDK calls and full-session ingest must never split across two backends."""
+    sdk_options = {}
+    requested_urls = []
+
+    class CapturingSDK:
+        def __init__(self, **kwargs):
+            sdk_options.update(kwargs)
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def capture_urlopen(request, timeout):
+        requested_urls.append((request.full_url, timeout))
+        return Response()
+
+    monkeypatch.setitem(sys.modules, "supermemory", types.SimpleNamespace(Supermemory=CapturingSDK))
+    monkeypatch.setattr("urllib.request.urlopen", capture_urlopen)
+
+    client = _SupermemoryClient(
+        api_key="test-key",
+        timeout=5.0,
+        container_tag="hermes",
+        base_url="https://memory.example.test",
+    )
+    client.ingest_conversation(
+        "session-1",
+        [{"role": "user", "content": "remember this"}],
+    )
+
+    assert sdk_options["base_url"] == "https://memory.example.test"
+    assert requested_urls == [("https://memory.example.test/v4/conversations", 8.0)]
 
 
 def test_clean_text_for_capture_strips_injected_context():
@@ -548,6 +680,25 @@ def test_probe_supermemory_connection_success(monkeypatch, tmp_path):
     assert status["ok"] is True
     assert status["profile_facts"] == 2
     assert status["auto_recall"] is True
+
+
+def test_probe_supermemory_connection_uses_custom_base_url(monkeypatch, tmp_path):
+    """Dropping probe propagation would validate the cloud instead of the configured VPS."""
+    _stub_supermemory_importable(monkeypatch)
+    observed_base_urls = []
+
+    class CapturingClient(FakeClient):
+        def __init__(self, *args, base_url=None, **kwargs):
+            super().__init__(*args, base_url=base_url, **kwargs)
+            observed_base_urls.append(base_url)
+
+    monkeypatch.setattr("plugins.memory.supermemory._SupermemoryClient", CapturingClient)
+    _save_supermemory_config({"base_url": "https://memory.example.test"}, str(tmp_path))
+
+    status = _probe_supermemory_connection("test-key", str(tmp_path))
+
+    assert status["ok"] is True
+    assert observed_base_urls == ["https://memory.example.test"]
 
 
 def test_probe_supermemory_connection_client_error(monkeypatch, tmp_path):

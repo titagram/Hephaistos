@@ -124,6 +124,98 @@ send in support logs.
 
 ---
 
+## Self-hosted Supermemory with Codex
+
+Hades can use a private Supermemory deployment as its semantic long-term
+memory. Supermemory remains a separate service: Hades calls its native API,
+while a private bridge inside the Supermemory stack uses a dedicated Codex
+login for memory extraction. This does **not** change the model provider used
+by Hades itself.
+
+Repositories and authoritative documentation:
+
+- Hades/Hephaistos: [github.com/titagram/Hephaistos](https://github.com/titagram/Hephaistos)
+- Standalone Supermemory fork: [github.com/titagram/supermemory](https://github.com/titagram/supermemory)
+- Complete deployment, backup, migration, and rollback runbook:
+  [`deploy/codex/README.md`](https://github.com/titagram/supermemory/blob/main/deploy/codex/README.md)
+
+The current private-host example is `https://persephone.cc` (IPv4
+`162.19.229.31`). It is an example configuration, not the provider default.
+
+### Deploy Supermemory on a VPS
+
+The supported deployment targets an amd64 Linux VPS and requires Docker
+Engine, Docker Compose v2, Node.js 22/npm, public DNS, and an existing Traefik
+instance. Traefik must expose the `web` and `websecure` entrypoints, use an
+ACME resolver named `le`, and join the external `traefik_default` network.
+
+```bash
+git clone https://github.com/titagram/supermemory.git
+cd supermemory/deploy/codex
+./scripts/bootstrap.sh
+```
+
+Bootstrap prompts for the hostname, expected IPv4, UI/docs password, and the
+dedicated Codex device login. It creates the ignored mode-`0600`
+`.env.runtime`, builds the pinned server and bridge, and starts the Compose
+project `supermemory`. After DNS and TLS have propagated:
+
+```bash
+./scripts/smoke.sh --local
+./scripts/smoke.sh --public
+```
+
+Before any upgrade, use `scripts/backup.sh` with an absolute mode-`0700`
+directory outside the Git checkout. Preserve the exact Docker volumes
+`supermemory_supermemory_data` and `supermemory_codex_home`. Never run
+`docker compose down -v`. Follow the linked runbook for upgrade, migration,
+rollback, and sanitized diagnostics rather than copying credentials or raw
+logs into a terminal transcript.
+
+### Point Hades at the self-hosted API
+
+First activate the provider and enter the Supermemory API key through the
+interactive secret prompt. For a self-hosted deployment, this is the API
+credential generated and retained by that server; transfer it through a
+private secret channel and never commit it.
+
+```bash
+hades memory setup    # select "supermemory"
+```
+
+Then add the non-secret API origin to the profile-scoped
+`$HERMES_HOME/supermemory.json`. Merge this key into any existing settings;
+do not add `/v4` or another path:
+
+```json
+{
+  "base_url": "https://persephone.cc",
+  "container_tag": "hades-{identity}"
+}
+```
+
+`base_url` defaults to `https://api.supermemory.ai` when omitted. A custom
+value must be a credential-free HTTPS origin with no path, query, or fragment.
+The provider sends SDK operations, connection probes, and full-session ingest
+to that same origin, so a configured VPS never mixes memory traffic with the
+cloud service.
+
+Verify the configuration, then start a new Hades session:
+
+```bash
+hades memory status
+hades
+```
+
+When active, Hades automatically recalls relevant context, captures completed
+turns, and ingests each completed session. It also exposes
+`supermemory-save`, `supermemory-search`, `supermemory-forget`, and
+`supermemory-profile`. The browser UI and API docs use Traefik BasicAuth; API
+clients, including Hades, use `Authorization: Bearer <Supermemory API key>`.
+BasicAuth is intentionally not accepted as API authentication.
+
+---
+
 ## Skip the API-key collection — Nous Portal
 
 Hades works with whatever provider you want — that's not changing. But if you'd rather not collect five separate API keys for the model, web search, image generation, TTS, and a cloud browser, **[Nous Portal](https://portal.hades-agent.local)** covers all of them under one subscription:

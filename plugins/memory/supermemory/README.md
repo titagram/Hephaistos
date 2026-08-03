@@ -35,6 +35,7 @@ Config file: `$HERMES_HOME/supermemory.json`
 | `search_mode` | `hybrid` | Search mode: `hybrid` (profile + memories), `memories` (memories only), `documents` (documents only) |
 | `entity_context` | built-in default | Extraction guidance passed to Supermemory |
 | `api_timeout` | `5.0` | Timeout for SDK and ingest requests |
+| `base_url` | `https://api.supermemory.ai` | API origin used by SDK calls, connection probes, and full-session ingest |
 
 ### Environment Variables
 
@@ -42,6 +43,31 @@ Config file: `$HERMES_HOME/supermemory.json`
 |----------|-------------|
 | `SUPERMEMORY_API_KEY` | API key (required) |
 | `SUPERMEMORY_CONTAINER_TAG` | Override container tag (takes priority over config file) |
+
+### Self-hosted backend
+
+Set `base_url` in the profile-scoped `$HERMES_HOME/supermemory.json` to use a
+self-hosted Supermemory API. Keep the API key in `$HERMES_HOME/.env`; the URL
+is non-secret configuration and does not belong in the environment file.
+
+```json
+{
+  "base_url": "https://persephone.cc",
+  "container_tag": "hermes-{identity}"
+}
+```
+
+Use only the HTTPS origin: do not append `/v4`, credentials, a query, or a
+fragment. The provider normalizes one trailing slash and fails closed on an
+invalid explicit URL rather than silently sending traffic to the cloud. The
+same configured origin is used for SDK operations and `/v4/conversations`.
+
+For the standalone Codex-backed server, clone
+[github.com/titagram/supermemory](https://github.com/titagram/supermemory) and
+follow its
+[`deploy/codex` runbook](https://github.com/titagram/supermemory/blob/main/deploy/codex/README.md).
+The private bridge supplies Supermemory's extraction LLM only; it does not
+replace or reconfigure the model provider used by Hermes/Hades.
 
 ## Tools
 
