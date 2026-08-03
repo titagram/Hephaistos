@@ -2897,7 +2897,7 @@ def run_setup_wizard(args):
             "How would you like to set up Hades?",
             [
                 "Full setup — configure every provider, tool & option yourself (recommended)",
-                "Blank Slate — everything off except the bare minimum; opt in to each capability",
+                "Blank Slate — minimal tools with built-in memory; opt in to each capability",
             ],
             0,
         )
@@ -3068,20 +3068,21 @@ def _blank_slate_minimal_toolsets(config: dict):
 
 
 def _blank_slate_minimize_config(config: dict):
-    """Turn OFF the optional config features for a Blank Slate install.
+    """Apply the minimal config features for a Blank Slate install.
 
     Everything here is opt-in afterwards via ``hades setup agent`` /
-    ``hades config set``. We keep only what's needed to run.
+    ``hades config set``, except the built-in MEMORY.md and USER.md context,
+    which follows the product default and stays enabled.
     """
     config.setdefault("agent", {})["max_turns"] = 90
 
     # Compression off — minimal footprint; user opts in if they want long sessions.
     config.setdefault("compression", {})["enabled"] = False
 
-    # No automatic memory / user-profile capture.
+    # Built-in memory and user context are core defaults, even on Blank Slate.
     mem = config.setdefault("memory", {})
-    mem["memory_enabled"] = False
-    mem["user_profile_enabled"] = False
+    mem["memory_enabled"] = True
+    mem["user_profile_enabled"] = True
 
     # No filesystem checkpoints, no smart model routing, no auto session reset.
     config.setdefault("checkpoints", {})["enabled"] = False
@@ -3093,14 +3094,14 @@ def _blank_slate_minimize_config(config: dict):
 
 
 def _run_blank_slate_setup(config: dict, hermes_home, is_existing: bool):
-    """Blank Slate setup — start with everything off except the bare minimum.
+    """Blank Slate setup — minimal tools with built-in memory context enabled.
 
     Forces only the essentials to run an agent (provider + model, the file and
-    terminal toolsets) and turns every other tool/skill/plugin/MCP/config
-    feature OFF. After applying that minimal baseline, the user chooses one of
-    two paths:
+    terminal toolsets), keeps MEMORY.md and USER.md active, and turns every
+    other tool/skill/plugin/MCP/config feature OFF. After applying that minimal
+    baseline, the user chooses one of two paths:
 
-      1. Start with everything disabled — finish now with the minimal agent.
+      1. Keep the minimal tools plus built-in memory — finish now.
       2. Walk through every configuration — opt each capability back in.
 
     Either way nothing is enabled that the user did not explicitly choose.
@@ -3109,12 +3110,13 @@ def _run_blank_slate_setup(config: dict, hermes_home, is_existing: bool):
 
     print()
     print_header("Blank Slate Setup")
-    print_info("Everything starts OFF. First we force-enable only what's required")
+    print_info("Tools start OFF. First we enable only what's required")
     print_info("to run an agent, then you choose whether to stop there or walk")
     print_info("through enabling more — opting in to exactly what you want.")
     print_info("")
-    print_info("Forced on: Provider & Model, File Operations, Terminal.")
-    print_info("Everything else (web, browser, code exec, vision, memory,")
+    print_info("Forced on: Provider & Model, File Operations, Terminal,")
+    print_info("and built-in MEMORY.md / USER.md context.")
+    print_info("Everything else (web, browser, code exec, vision,")
     print_info("delegation, cron, skills, plugins, MCP, …) starts disabled.")
     print()
 
@@ -3134,7 +3136,8 @@ def _run_blank_slate_setup(config: dict, hermes_home, is_existing: bool):
     print()
     print_success("Minimal baseline applied:")
     print_info("  Toolsets: file, terminal (everything else off)")
-    print_info("  Compression, memory, checkpoints, smart routing: off")
+    print_info("  Built-in MEMORY.md and USER.md context: on")
+    print_info("  Compression, checkpoints, smart routing: off")
 
     # ── The fork: stop here, or walk through enabling things ──
     print()
@@ -3142,7 +3145,7 @@ def _run_blank_slate_setup(config: dict, hermes_home, is_existing: bool):
     path = prompt_choice(
         "Your minimal agent is ready. What next?",
         [
-            "Start with everything disabled — finish now (most minimal)",
+            "Keep minimal tools + built-in memory — finish now",
             "Walk through all configurations — opt in to tools, skills, plugins, MCP",
         ],
         0,

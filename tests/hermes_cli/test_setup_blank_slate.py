@@ -1,9 +1,9 @@
 """Tests for Blank Slate setup mode (hermes_cli/setup.py).
 
-Blank Slate is the third first-time setup option: everything off except the
-bare minimum needed to run an agent (provider/model + file + terminal). These
-tests pin the config the writers produce and the invariant that the toolset
-resolver + tool-schema builder yield exactly the file/terminal tools.
+Blank Slate is the third first-time setup option: minimal tools plus built-in
+MEMORY.md and USER.md context. These tests pin the config the writers produce
+and the invariant that the toolset resolver + tool-schema builder yield exactly
+the file/terminal tools.
 """
 
 import pytest
@@ -61,12 +61,12 @@ class TestBlankSlateMinimalToolsets:
 
 
 class TestBlankSlateMinimizeConfig:
-    def test_optional_features_turned_off(self):
+    def test_builtin_memory_stays_on_while_other_optional_features_are_off(self):
         cfg = {}
         _blank_slate_minimize_config(cfg)
         assert cfg["compression"]["enabled"] is False
-        assert cfg["memory"]["memory_enabled"] is False
-        assert cfg["memory"]["user_profile_enabled"] is False
+        assert cfg["memory"]["memory_enabled"] is True
+        assert cfg["memory"]["user_profile_enabled"] is True
         assert cfg["checkpoints"]["enabled"] is False
         assert cfg["smart_model_routing"]["enabled"] is False
         assert cfg["session_reset"]["mode"] == "none"
