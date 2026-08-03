@@ -9048,7 +9048,7 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
                 and text.strip()
             ):
                 try:
-                    from agent.title_generator import maybe_auto_title
+                    from agent.title_generator import main_runtime_from_agent, maybe_auto_title
 
                     _title_key = session.get("session_key") or sid
                     maybe_auto_title(
@@ -9057,6 +9057,7 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
                         text,
                         raw,
                         session.get("history", []),
+                        main_runtime=main_runtime_from_agent(agent),
                         # Push the generated title live so the sidebar renames
                         # without waiting for the next list refresh (the titler
                         # runs async, after this turn's refresh already fired).

@@ -267,6 +267,7 @@ def test_fake_model_turn_routes_title_after_an_ordinary_surface_conversation(
         provider = "opencode-go"
         base_url = "http://fake.invalid/v1"
         api_key = "fake-key"
+        api_mode = "chat_completions"
 
         def run_conversation(
             self,
@@ -351,6 +352,13 @@ def test_fake_model_turn_routes_title_after_an_ordinary_surface_conversation(
         "ordinary question",
         "ordinary fake-model response",
     )
+    assert title.call_args.kwargs["main_runtime"] == {
+        "model": "deepseek-v4-flash",
+        "provider": "opencode-go",
+        "base_url": "http://fake.invalid/v1",
+        "api_key": "fake-key",
+        "api_mode": "chat_completions",
+    }
 
 
 def test_classic_fake_model_turn_and_resume_keep_one_runtime_and_title(

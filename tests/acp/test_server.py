@@ -1344,6 +1344,13 @@ class TestPrompt:
         assert mock_title.call_args.args[2] == "fix the broken ACP history"
         assert mock_title.call_args.args[3] == "Here is the fix."
         assert callable(mock_title.call_args.kwargs["title_callback"])
+        assert mock_title.call_args.kwargs["main_runtime"] == {
+            "model": state.agent.model,
+            "provider": state.agent.provider,
+            "base_url": state.agent.base_url,
+            "api_key": state.agent.api_key,
+            "api_mode": state.agent.api_mode,
+        }
 
     @pytest.mark.asyncio
     async def test_prompt_sends_session_info_update_after_auto_title(self, agent):

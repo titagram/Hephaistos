@@ -6,7 +6,7 @@ adds latency to the user-facing reply.
 
 import logging
 import threading
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from agent.auxiliary_client import call_llm
 
@@ -18,6 +18,22 @@ logger = logging.getLogger(__name__)
 # become visible instead of piling up as NULL session titles.
 FailureCallback = Callable[[str, BaseException], None]
 TitleCallback = Callable[[str], None]
+
+
+def main_runtime_from_agent(agent: Any) -> dict[str, Any]:
+    """Return the live agent runtime for an auxiliary title request.
+
+    Title generation must follow the already-selected session runtime rather
+    than resolving ambient config again: a TUI, Desktop, or ACP session may
+    have a model/provider override that differs from the profile default.
+    """
+    return {
+        "model": getattr(agent, "model", None),
+        "provider": getattr(agent, "provider", None),
+        "base_url": getattr(agent, "base_url", None),
+        "api_key": getattr(agent, "api_key", None),
+        "api_mode": getattr(agent, "api_mode", None),
+    }
 
 _TITLE_PROMPT = (
     "Generate a short, descriptive title (3-7 words) for a conversation that starts with the "
