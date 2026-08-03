@@ -108,7 +108,7 @@ def plugin_device_secret() -> str:
 def client_from_config(*, timeout: float = 15.0) -> HadesBackendClient:
     agent = current_agent()
     if agent is None:
-        raise RuntimeError("Hades backend is not configured; run `hades backend setup` first")
+        raise RuntimeError("Hades backend is not configured; configure a backend project link first")
     return client_for_agent(agent, timeout=timeout)
 
 
@@ -122,7 +122,7 @@ def client_for_agent(agent: db.BackendAgent, *, timeout: float = 15.0) -> HadesB
 def plugin_work_items_client_from_config() -> HadesPluginWorkItemsClient:
     agent = current_agent()
     if agent is None:
-        raise RuntimeError("Hades backend is not configured; run `hades backend setup` first")
+        raise RuntimeError("Hades backend is not configured; configure a backend project link first")
     token = plugin_work_items_token(agent)
     if not token:
         raise RuntimeError(

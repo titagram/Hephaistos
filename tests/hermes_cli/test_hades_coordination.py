@@ -43,20 +43,6 @@ def test_hades_coordination_profiles_are_copy_safe():
     assert "mutated" not in fresh[0]["toolsets"]
 
 
-def test_hades_backend_profiles_json(capsys):
-    import hermes_cli.hades_backend_cmd as cmd
-
-    rc = cmd.hades_backend_command(SimpleNamespace(backend_action="profiles", json=True))
-
-    payload = json.loads(capsys.readouterr().out)
-
-    assert rc == 0
-    assert payload["local_only"] is True
-    assert payload["backend_visible"] is False
-    assert payload["config_source"] == "config.yaml"
-    assert payload["skill"] == "autonomous-ai-agents/hades-coordination"
-    assert payload["profiles"][0]["model_routing"]["provider_source"] == "config.yaml"
-
 from hermes_cli import kanban_db as kb
 from hermes_cli.hades_coordination import (
     claim_org_run_remote_task_outcome,

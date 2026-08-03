@@ -26,7 +26,6 @@ from typing import Any, Optional
 from urllib.parse import quote
 
 from hermes_cli import kanban_db as kb
-from hermes_cli import kanban_swarm as ks
 from hermes_cli.profiles import get_active_profile_name
 
 
@@ -1439,6 +1438,8 @@ def _cmd_create(args: argparse.Namespace) -> int:
 
 
 def _cmd_swarm(args: argparse.Namespace) -> int:
+    from hermes_cli import kanban_swarm as ks
+
     try:
         workers = [ks.parse_worker_arg(raw) for raw in (args.worker or [])]
     except ValueError as exc:

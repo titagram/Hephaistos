@@ -455,7 +455,7 @@ def _default_backend_agent():
 
     agent = current_agent()
     if agent is None:
-        raise RuntimeError("Hades backend is not configured; run `hades backend setup` first")
+        raise RuntimeError("Hades backend is not configured; configure a backend project link first")
     return agent
 
 

@@ -29,6 +29,26 @@ describe('desktop slash command curation', () => {
     expect(isDesktopSlashCommand('/my-skill')).toBe(true)
   })
 
+  it('surfaces registered plugin extensions without a product-specific allow-list', () => {
+    const filtered = filterDesktopCommandsCatalog({
+      categories: [
+        {
+          name: 'Plugin commands',
+          pairs: [['/backend', 'Pair project knowledge [set-token|status|sync]']]
+        }
+      ]
+    })
+
+    expect(isDesktopSlashSuggestion('/backend')).toBe(true)
+    expect(isDesktopSlashCommand('/backend')).toBe(true)
+    expect(filtered.categories).toEqual([
+      {
+        name: 'Plugin commands',
+        pairs: [['/backend', 'Pair project knowledge [set-token|status|sync]']]
+      }
+    ])
+  })
+
   it('hides terminal, messaging, and dedicated-UI commands from suggestions', () => {
     expect(isDesktopSlashSuggestion('/clear')).toBe(false)
     expect(isDesktopSlashSuggestion('/compact')).toBe(false)
@@ -71,16 +91,6 @@ describe('desktop slash command curation', () => {
     expect(resolveDesktopCommand('/browser')?.surface).toEqual({ kind: 'action', action: 'browser' })
     // Bare /browser expands to its sub-action options in the popover.
     expect(resolveDesktopCommand('/browser')?.args).toBe(true)
-  })
-
-  it('opens the Hades bug intake wizard as a desktop action', () => {
-    expect(isDesktopSlashCommand('/bug-intake')).toBe(true)
-    expect(isDesktopSlashSuggestion('/bug-intake')).toBe(true)
-    expect(isDesktopSlashCommand('/bug')).toBe(true)
-    expect(isDesktopSlashSuggestion('/bug')).toBe(false)
-    expect(desktopSlashUnavailableMessage('/bug-intake')).toBeNull()
-    expect(resolveDesktopCommand('/bug-intake')?.surface).toEqual({ kind: 'action', action: 'bug-intake' })
-    expect(resolveDesktopCommand('/bug')?.surface).toEqual({ kind: 'action', action: 'bug-intake' })
   })
 
   it('allows aliases to execute without cluttering the popover', () => {

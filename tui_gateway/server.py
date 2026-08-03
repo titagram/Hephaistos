@@ -10795,60 +10795,6 @@ def _(rid, params, pdb, conn) -> dict:
     return _ok(rid, {"project": proj.to_dict() if proj else None, "cwd": cwd, "branch": _git_branch_for_cwd(cwd)})
 
 
-@method("backend.status")
-def _(rid, params) -> dict:
-    try:
-        from hermes_cli.hades_backend_status import load_backend_status_payload
-
-        payload = load_backend_status_payload(live=params.get("live") is True)
-    except Exception as exc:
-        return _err(rid, -32090, f"backend status failed: {exc}")
-
-    return _ok(rid, payload)
-
-
-@method("backend.bug_intake")
-def _(rid, params) -> dict:
-    try:
-        from hermes_cli.hades_backend_actions import create_bug_intake
-
-        raw_response_status = params.get("response_status")
-        response_status = None
-        if raw_response_status not in {None, ""}:
-            response_status = int(raw_response_status)
-
-        result = create_bug_intake(
-            title=str(params.get("title") or ""),
-            symptom=str(params.get("symptom") or ""),
-            workspace_binding_id=params.get("workspace_binding_id"),
-            steps=params.get("steps"),
-            expected=params.get("expected"),
-            actual=params.get("actual"),
-            severity=params.get("severity"),
-            environment=params.get("environment"),
-            failing_test=params.get("failing_test"),
-            runtime_log=params.get("runtime_log"),
-            deploy_commit=params.get("deploy_commit"),
-            workspace_head=params.get("workspace_head"),
-            request_url=params.get("request_url"),
-            request_method=params.get("request_method"),
-            response_status=response_status,
-            source="desktop",
-        )
-    except Exception as exc:
-        return _err(rid, -32091, f"backend bug intake failed: {exc}")
-
-    return _ok(
-        rid,
-        {
-            "ok": result.ok,
-            "status": result.status,
-            "summary": result.summary,
-            **result.payload,
-        },
-    )
-
-
 def _is_repo_junk(root: str) -> bool:
     """A git root we never auto-surface as a project: the bare home dir or
     anything under HERMES_HOME (~/.hermes by default) — config/sessions/skills,
@@ -11633,6 +11579,29 @@ def _(rid, params: dict) -> dict:
         except Exception as e:
             if not warning:
                 warning = f"quick_commands discovery unavailable: {e}"
+
+        try:
+            from hermes_cli.plugins import get_plugin_commands
+
+            plugin_commands = get_plugin_commands()
+            if plugin_commands:
+                bucket = "Plugin commands"
+                if bucket not in cat_map:
+                    cat_map[bucket] = []
+                    cat_order.append(bucket)
+                for name, entry in sorted(plugin_commands.items()):
+                    key = f"/{name}"
+                    description = str(entry.get("description") or "Plugin command")
+                    args_hint = str(entry.get("args_hint") or "").strip()
+                    if args_hint:
+                        description = f"{description} [{args_hint}]"
+                    description = description[:120] + ("…" if len(description) > 120 else "")
+                    canon[key.lower()] = key
+                    all_pairs.append([key, description])
+                    cat_map[bucket].append([key, description])
+        except Exception as e:
+            if not warning:
+                warning = f"plugin command discovery unavailable: {e}"
 
         skill_count = 0
         try:
@@ -12700,6 +12669,22 @@ def _(rid, params: dict) -> dict:
             for c in completer.get_completions(doc, None)
         ][:30]
         text_lower = text.lower()
+        try:
+            from hermes_cli.plugins import get_plugin_commands
+
+            for name, entry in sorted(get_plugin_commands().items()):
+                command = f"/{name}"
+                if not command.startswith(text_lower) or any(
+                    item["text"] == command for item in items
+                ):
+                    continue
+                meta = str(entry.get("description") or "Plugin command")
+                args_hint = str(entry.get("args_hint") or "").strip()
+                if args_hint:
+                    meta = f"{meta} [{args_hint}]"
+                items.append({"text": command, "display": command, "meta": meta})
+        except Exception:
+            pass
         extras = [
             {
                 "text": "/compact",

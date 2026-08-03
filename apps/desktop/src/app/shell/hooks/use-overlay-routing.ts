@@ -5,7 +5,6 @@ import { type CommandCenterSection } from '@/app/command-center'
 import {
   AGENTS_ROUTE,
   appViewForPath,
-  BUG_INTAKE_ROUTE,
   COMMAND_CENTER_ROUTE,
   isOverlayView,
   NEW_CHAT_ROUTE
@@ -21,7 +20,6 @@ export function useOverlayRouting() {
   const settingsOpen = currentView === 'settings'
   const commandCenterOpen = currentView === 'command-center'
   const agentsOpen = currentView === 'agents'
-  const bugIntakeOpen = currentView === 'bug-intake'
   const cronOpen = currentView === 'cron'
   const profilesOpen = currentView === 'profiles'
   const chatOpen = currentView === 'chat'
@@ -61,11 +59,9 @@ export function useOverlayRouting() {
   }, [closeOverlayToPreviousRoute, commandCenterOpen, navigate])
 
   const openAgents = useCallback(() => navigate(AGENTS_ROUTE), [navigate])
-  const openBugIntake = useCallback(() => navigate(BUG_INTAKE_ROUTE), [navigate])
 
   return {
     agentsOpen,
-    bugIntakeOpen,
     chatOpen,
     closeOverlayToPreviousRoute,
     commandCenterInitialSection,
@@ -73,7 +69,6 @@ export function useOverlayRouting() {
     cronOpen,
     currentView,
     openAgents,
-    openBugIntake,
     openCommandCenterSection,
     profilesOpen,
     settingsOpen,

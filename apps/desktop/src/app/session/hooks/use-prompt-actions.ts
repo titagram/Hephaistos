@@ -3,7 +3,6 @@ import { useStore } from '@nanostores/react'
 import { type MutableRefObject, useCallback, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 
-import { BUG_INTAKE_ROUTE } from '@/app/routes'
 import { getProfiles, transcribeAudio } from '@/hermes'
 import { translateNow, type Translations, useI18n } from '@/i18n'
 import { stripAnsi } from '@/lib/ansi'
@@ -1369,9 +1368,6 @@ export function usePromptActions({
             renderSlashOutput(`error: ${err instanceof Error ? err.message : String(err)}`)
           }
         },
-        'bug-intake': async () => {
-          navigate(BUG_INTAKE_ROUTE)
-        }
       }
 
       // Picker commands open a desktop overlay; a typed arg is resolved by that

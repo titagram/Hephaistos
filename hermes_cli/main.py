@@ -4309,16 +4309,6 @@ def cmd_project(args):
     return projects_command(args)
 
 
-def cmd_backend(args):
-    """Configure Hades shared backend."""
-    from hermes_cli.hades_backend_cmd import hades_backend_command
-
-    exit_code = hades_backend_command(args)
-    if exit_code:
-        raise SystemExit(exit_code)
-    return exit_code
-
-
 def cmd_gnothi(args):
     from hermes_cli.hades_gnothi_cmd import gnothi_command
 
@@ -12044,7 +12034,7 @@ def _build_provider_choices() -> list[str]:
 # to parse.
 _BUILTIN_SUBCOMMANDS = frozenset(
     {
-        "acp", "auth", "backend", "backup", "bundles", "checkpoints", "claw", "completion",
+        "acp", "auth", "backup", "bundles", "checkpoints", "claw", "completion",
         "computer-use",
         "config", "cron", "curator", "dashboard", "serve", "debug", "delegation", "doctor",
         "dump", "fallback", "gateway", "hooks", "import", "insights",
@@ -12830,12 +12820,6 @@ def main():
 
     _build_delegation_parser(subparsers, cmd_delegation=cmd_delegation)
 
-    # =========================================================================
-    # backend command — Hades shared Laravel backend setup/status
-    # =========================================================================
-    from hermes_cli.hades_backend_cmd import build_backend_parser
-
-    build_backend_parser(subparsers, cmd_backend=cmd_backend)
     from hermes_cli.hades_gnothi_cmd import build_gnothi_parser
 
     build_gnothi_parser(subparsers, cmd_gnothi=cmd_gnothi)

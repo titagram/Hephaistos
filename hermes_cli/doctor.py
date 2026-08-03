@@ -511,12 +511,12 @@ def _check_hades_backend(issues: list[str]) -> None:
             last_error = hdb.get_sync_state(conn, "last_sync_error") if agent else None
     except Exception as exc:
         check_warn("Hades backend state unreadable", f"({exc})")
-        issues.append("Repair Hades backend state or rerun `hades backend setup`")
+        issues.append("Repair Hades backend state or configure a backend project link")
         return
 
     if agent is None:
-        check_warn("Hades backend not configured", "(run: hades backend setup)")
-        issues.append("Run `hades backend setup` to connect this profile to Laravel")
+        check_warn("Hades backend not configured", "(configure a backend project link)")
+        issues.append("Configure a backend project link to connect this profile to Laravel")
         return
 
     check_ok("Hades backend configured", f"({agent.project_id}, {agent.agent_id})")
@@ -525,7 +525,7 @@ def _check_hades_backend(issues: list[str]) -> None:
         check_ok("Hades backend agent token present", f"({agent.token_env_key})")
     else:
         check_warn("Hades backend agent token missing", f"({agent.token_env_key})")
-        issues.append(f"Restore {agent.token_env_key} in .env or rerun `hades backend setup`")
+        issues.append(f"Restore {agent.token_env_key} in .env or reconfigure the backend project link")
 
     if bindings:
         check_ok("Linked backend workspaces", f"({len(bindings)})")
@@ -553,7 +553,7 @@ def _check_hades_backend(issues: list[str]) -> None:
         check_ok("Hades backend capabilities", f"({capabilities.get('capabilities', capabilities)})")
     except Exception as exc:
         check_warn("Hades backend remote check failed", f"({exc})")
-        issues.append("Check backend URL/token/network or rerun `hades backend setup`")
+        issues.append("Check backend URL/token/network or reconfigure the backend project link")
 
 
 def _run_hades_doctor_cleanup(args) -> None:

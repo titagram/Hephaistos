@@ -39,7 +39,7 @@ def setup_plugin_worker(
             _error(
                 "not_configured",
                 "Hades backend is not configured.",
-                "Run `hades backend setup` or `hades backend bootstrap` first.",
+                "Configure a backend project link before retrying.",
             ),
             1,
         )
@@ -141,7 +141,7 @@ def list_plugin_tasks(
         return _error(
             "not_configured",
             "Hades backend is not configured.",
-            "Run `hades backend setup` or `hades backend bootstrap` first.",
+            "Configure a backend project link before retrying.",
         )
 
     selected_project_id = str(project_id or agent.project_id).strip()
@@ -189,7 +189,7 @@ def plugin_tasks_status(*, project_id: str | None = None) -> dict[str, Any]:
         return _error(
             "not_configured",
             "Hades backend is not configured.",
-            "Run `hades backend setup` or pass --project-id to inspect cached task work.",
+            "Configure a backend project link or pass --project-id to inspect cached task work.",
         )
 
     with db.connect_closing() as conn:

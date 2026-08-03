@@ -26,11 +26,6 @@ param(
     [string]$Tag = "",
     [string]$HermesHome = $(if ($env:HERMES_HOME) { $env:HERMES_HOME } elseif ($env:HADES_HOME) { $env:HADES_HOME } else { "$env:LOCALAPPDATA\hermes" }),
     [string]$InstallDir = "",
-    [string]$BackendUrl = "",
-    [string]$BackendProjectId = "",
-    [string]$BackendProjectToken = "",
-    [string]$BackendWorkspace = "",
-    [string]$BackendProjectName = "",
 
     # --- Stage protocol (additive; default invocation behaves as before) ----
     # See the "Stage protocol" section near the bottom of the file for the
@@ -2950,53 +2945,6 @@ function Invoke-SetupWizard {
     Pop-Location
 }
 
-function Invoke-BackendBootstrap {
-    $hasBackendArgs = -not [string]::IsNullOrWhiteSpace($BackendUrl) -or
-        -not [string]::IsNullOrWhiteSpace($BackendProjectId) -or
-        -not [string]::IsNullOrWhiteSpace($BackendProjectToken)
-    if (-not $hasBackendArgs) {
-        return
-    }
-    if ([string]::IsNullOrWhiteSpace($BackendUrl) -or
-        [string]::IsNullOrWhiteSpace($BackendProjectId) -or
-        [string]::IsNullOrWhiteSpace($BackendProjectToken)) {
-        throw "Backend bootstrap requires -BackendUrl, -BackendProjectId, and -BackendProjectToken."
-    }
-
-    Write-Info "Configuring Hades backend project link..."
-    $args = @(
-        "backend", "bootstrap",
-        "--url", $BackendUrl,
-        "--project-id", $BackendProjectId,
-        "--project-token", $BackendProjectToken,
-        "--non-interactive"
-    )
-    $effectiveBackendWorkspace = $BackendWorkspace
-    if ([string]::IsNullOrWhiteSpace($effectiveBackendWorkspace)) {
-        $effectiveBackendWorkspace = $InstallerStartDir
-    }
-    if (-not [string]::IsNullOrWhiteSpace($effectiveBackendWorkspace)) {
-        $args += @("--workspace", $effectiveBackendWorkspace)
-    }
-    if (-not [string]::IsNullOrWhiteSpace($BackendProjectName)) {
-        $args += @("--project-name", $BackendProjectName)
-    }
-
-    Push-Location $InstallDir
-    try {
-        if (-not $NoVenv) {
-            & ".\venv\Scripts\python.exe" -m hermes_cli.main @args
-        } else {
-            python -m hermes_cli.main @args
-        }
-        if ($LASTEXITCODE -ne 0) {
-            throw "hades backend bootstrap failed with exit code $LASTEXITCODE"
-        }
-    } finally {
-        Pop-Location
-    }
-}
-
 function Start-GatewayIfConfigured {
     $envPath = "$HermesHome\.env"
     if (-not (Test-Path $envPath)) { return }
@@ -3413,7 +3361,6 @@ function Invoke-PostInstallMode {
 function Main {
     Write-Banner
     Invoke-AllStages
-    Invoke-BackendBootstrap
     if (-not $Json) {
         Write-Completion
     } else {

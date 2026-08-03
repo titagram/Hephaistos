@@ -4174,6 +4174,57 @@ def test_commands_catalog_surfaces_quick_commands(monkeypatch):
     assert resp["result"]["canon"]["/notes"] == "/notes"
 
 
+def test_commands_catalog_surfaces_registered_plugin_commands(monkeypatch):
+    """Plugin command discovery feeds the catalog without a product allow-list."""
+    from hermes_cli import plugins
+
+    monkeypatch.setattr(
+        plugins,
+        "get_plugin_commands",
+        lambda: {
+            "backend": {
+                "description": "Pair, inspect, or explicitly synchronize linked project knowledge.",
+                "plugin": "hades-backend",
+                "args_hint": "set-token|status|sync",
+            }
+        },
+    )
+
+    resp = server.handle_request(
+        {"id": "1", "method": "commands.catalog", "params": {}}
+    )
+
+    pairs = dict(resp["result"]["pairs"])
+    plugin_cat = next(c for c in resp["result"]["categories"] if c["name"] == "Plugin commands")
+    assert pairs["/backend"] == "Pair, inspect, or explicitly synchronize linked project knowledge. [set-token|status|sync]"
+    assert dict(plugin_cat["pairs"])["/backend"] == pairs["/backend"]
+    assert resp["result"]["canon"]["/backend"] == "/backend"
+
+
+def test_complete_slash_surfaces_registered_plugin_commands(monkeypatch):
+    """Completion relies on the same plugin registry as the catalog."""
+    from hermes_cli import plugins
+
+    monkeypatch.setattr(
+        plugins,
+        "get_plugin_commands",
+        lambda: {
+            "backend": {
+                "description": "Pair project knowledge.",
+                "plugin": "hades-backend",
+                "args_hint": "set-token|status|sync",
+            }
+        },
+    )
+
+    resp = server.handle_request(
+        {"id": "1", "method": "complete.slash", "params": {"text": "/back"}}
+    )
+
+    item = next(item for item in resp["result"]["items"] if item["text"] == "/backend")
+    assert item["meta"] == "Pair project knowledge. [set-token|status|sync]"
+
+
 def test_commands_catalog_includes_tui_mouse_command():
     resp = server.handle_request(
         {"id": "1", "method": "commands.catalog", "params": {}}
@@ -4372,47 +4423,6 @@ def test_input_detect_drop_attaches_image(monkeypatch):
     assert resp["result"]["matched"] is True
     assert resp["result"]["is_image"] is True
     assert resp["result"]["text"] == "[User attached image: cat.png]"
-
-
-def test_backend_bug_intake_rpc_calls_shared_action(monkeypatch):
-    calls = {}
-
-    def fake_create_bug_intake(**payload):
-        calls.update(payload)
-        return types.SimpleNamespace(
-            ok=True,
-            status="created",
-            summary="Bug report created",
-            payload={
-                "bug_report_id": "bug_1",
-                "project_id": "proj_1",
-                "workspace_binding_id": "wb_1",
-                "evidence_ids": ["ev_1"],
-            },
-        )
-
-    import hermes_cli.hades_backend_actions as actions
-
-    monkeypatch.setattr(actions, "create_bug_intake", fake_create_bug_intake)
-
-    resp = server._methods["backend.bug_intake"](
-        "r1",
-        {
-            "title": "Checkout 500",
-            "symptom": "POST /checkout fails",
-            "workspace_binding_id": "wb_1",
-            "failing_test": "FAILED tests/test_checkout.py",
-            "runtime_log": "Bearer secret-token-123456",
-            "response_status": "500",
-        },
-    )
-
-    assert resp["result"]["ok"] is True
-    assert resp["result"]["bug_report_id"] == "bug_1"
-    assert calls["title"] == "Checkout 500"
-    assert calls["workspace_binding_id"] == "wb_1"
-    assert calls["response_status"] == 500
-    assert calls["source"] == "desktop"
 
 
 def test_input_detect_drop_path_with_spaces(tmp_path):

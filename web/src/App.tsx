@@ -25,7 +25,6 @@ import {
   Clock,
   Code,
   Cpu,
-  Database,
   Download,
   Eye,
   FolderOpen,
@@ -79,7 +78,6 @@ import FilesPage from "@/pages/FilesPage";
 import SessionsPage from "@/pages/SessionsPage";
 import LogsPage from "@/pages/LogsPage";
 import AnalyticsPage from "@/pages/AnalyticsPage";
-import BackendPage from "@/pages/BackendPage";
 import ModelsPage from "@/pages/ModelsPage";
 import CronPage from "@/pages/CronPage";
 import ProfilesPage from "@/pages/ProfilesPage";
@@ -135,7 +133,6 @@ const BUILTIN_ROUTES_CORE: Record<string, ComponentType> = {
   "/": RootRedirect,
   "/sessions": SessionsPage,
   "/files": FilesPage,
-  "/backend": BackendPage,
   "/analytics": AnalyticsPage,
   "/models": ModelsPage,
   "/logs": LogsPage,
@@ -169,7 +166,6 @@ const BUILTIN_NAV_REST: NavItem[] = [
     label: "Sessions",
     icon: MessageSquare,
   },
-  { path: "/backend", label: "Backend", icon: Database },
   { path: "/files", label: "Files", icon: FolderOpen },
   {
     path: "/analytics",
@@ -218,7 +214,6 @@ const ICON_MAP: Record<string, ComponentType<{ className?: string }>> = {
   Sparkles,
   Terminal,
   Globe,
-  Database,
   Shield,
   Users,
   Wrench,

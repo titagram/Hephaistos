@@ -31,7 +31,6 @@ export interface DesktopThemeCommandOption {
 export type DesktopActionId =
   | 'branch'
   | 'browser'
-  | 'bug-intake'
   | 'handoff'
   | 'hatch'
   | 'help'
@@ -123,13 +122,6 @@ const DESKTOP_COMMAND_SPECS: readonly DesktopCommandSpec[] = [
     surface: action('browser'),
     args: true
   },
-  {
-    name: '/bug-intake',
-    description: 'Create a Hades backend bug report with evidence',
-    aliases: ['/bug'],
-    surface: action('bug-intake')
-  },
-
   // Overlay pickers
   { name: '/model', description: 'Switch the model for this session', surface: picker('model'), hidden: true },
   {

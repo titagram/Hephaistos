@@ -6,15 +6,17 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from hermes_cli.gnothi.builder import (
-    COLLECTOR_ORDER,
-    build_organism_revision,
-    drift_status,
-)
-from hermes_cli.gnothi.query import OrganismQuery
-from hermes_cli.gnothi.store import OrganismRevisionStore
-from hermes_cli.gnothi.wiki import render_wiki
 from utils import atomic_replace
+
+
+COLLECTOR_ORDER = (
+    "source",
+    "capabilities",
+    "runtime",
+    "contracts",
+    "dependencies",
+    "experience",
+)
 
 
 def _emit(value: Any, as_json: bool = False) -> None:
@@ -42,6 +44,11 @@ def _write_output(path: Path, content: str) -> None:
 
 
 def gnothi_command(args) -> int:
+    from hermes_cli.gnothi.builder import build_organism_revision, drift_status
+    from hermes_cli.gnothi.query import OrganismQuery
+    from hermes_cli.gnothi.store import OrganismRevisionStore
+    from hermes_cli.gnothi.wiki import render_wiki
+
     store = OrganismRevisionStore()
     query = OrganismQuery(store)
     action = args.gnothi_action

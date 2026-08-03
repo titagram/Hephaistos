@@ -368,17 +368,16 @@ def backend_status_payload(
     actions: list[str] = []
     if auth_quarantine_state["routes"]:
         actions.append(
-            "Re-authenticate quarantined Hades routes with `hades backend "
-            "bootstrap` from each affected checkout."
+            "Re-authenticate quarantined Hades routes from each affected checkout."
         )
     if waiting:
         actions.append(f"Review {waiting} backend job(s) waiting for confirmation.")
     if refused:
         actions.append(f"Review {refused} refused/conflicted memory proposal(s).")
     if last_error:
-        actions.append("Inspect last backend sync error and rerun `hades backend sync`.")
+        actions.append("Inspect the last backend sync error and retry the synchronization.")
     elif background_failed:
-        actions.append("Background backend sync is backing off; run `hades backend sync` to retry now.")
+        actions.append("Background backend sync is backing off; retry the synchronization now.")
     summary_scope = "binding" if len(bindings) == 1 else "aggregate"
     binding_payloads = [
         _binding_payload(
@@ -857,11 +856,11 @@ def _identity_next_action(
     current_source_free_ready: bool,
 ) -> str:
     if not configured:
-        return "Run `hades backend bootstrap ...` with a project bootstrap token on this device."
+        return "Configure a backend connection for this device."
     if current_binding is None:
-        return "Link this workspace with `hades backend bootstrap ...` or `hades project link <project>`, then run `hades backend sync`."
+        return "Link this workspace to a project, then synchronize its project knowledge."
     if not current_source_free_ready:
-        return "Run `hades backend sync`, then capture current bug evidence and source slices before source-free diagnosis."
+        return "Synchronize project knowledge, then capture current bug evidence and source slices before source-free diagnosis."
     return "Project memory and source-free diagnosis are ready on this device."
 
 

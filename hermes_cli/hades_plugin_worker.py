@@ -59,7 +59,7 @@ def run_plugin_worker_once(
             _error_summary(
                 "not_configured",
                 "Hades backend is not configured.",
-                "Run `hades backend setup` or `hades backend bootstrap` first.",
+                "Configure a backend project link before retrying.",
             ),
             1,
         )
