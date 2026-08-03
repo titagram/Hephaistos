@@ -5654,6 +5654,7 @@ def cmd_gui(args: argparse.Namespace):
 
     # with_hermes_node_path() copies os.environ when called with no arg.
     env = with_hermes_node_path()
+    env.setdefault("HERMES_DESKTOP_PYTHON", sys.executable)
     if getattr(args, "fake_boot", False):
         env["HERMES_DESKTOP_BOOT_FAKE"] = "1"
     if getattr(args, "ignore_existing", False):

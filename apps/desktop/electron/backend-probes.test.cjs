@@ -20,6 +20,24 @@ const { canImportHermesCli, hermesRuntimeImportProbe, verifyHermesCli } = requir
 // (a tiny script we write to disk that exits 0 on --version).
 const NODE_BIN = process.execPath
 
+function loadFindPythonForRoot() {
+  const mainSource = fs.readFileSync(path.join(__dirname, 'main.cjs'), 'utf8')
+  const start = mainSource.indexOf('function findPythonForRoot(root)')
+  const end = mainSource.indexOf('\nfunction findSystemPython()', start)
+  assert.notEqual(start, -1, 'main.cjs must define findPythonForRoot')
+  assert.notEqual(end, -1, 'main.cjs must define findSystemPython after findPythonForRoot')
+  const functionSource = mainSource.slice(start, end)
+
+  return new Function(
+    'process',
+    'fileExists',
+    'IS_WINDOWS',
+    'path',
+    'findSystemPython',
+    `${functionSource}; return findPythonForRoot`
+  )
+}
+
 test('canImportHermesCli returns false when path is falsy', () => {
   assert.equal(canImportHermesCli(''), false)
   assert.equal(canImportHermesCli(null), false)
@@ -38,6 +56,29 @@ test('canImportHermesCli returns false when interpreter cannot run -c', () => {
 test('canImportHermesCli returns false when binary does not exist', () => {
   const ghost = path.join(os.tmpdir(), 'hermes-probes-ghost-' + Date.now() + '.exe')
   assert.equal(canImportHermesCli(ghost), false)
+})
+
+test('source backend runtime prefers the explicit desktop Python over a checkout venv', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hades-source-python-'))
+  const checkoutPython = path.join(root, '.venv', 'bin', 'python')
+  const invokingPython = path.join(root, 'shared-venv', 'bin', 'python')
+  fs.mkdirSync(path.dirname(checkoutPython), { recursive: true })
+  fs.mkdirSync(path.dirname(invokingPython), { recursive: true })
+  fs.writeFileSync(checkoutPython, '')
+  fs.writeFileSync(invokingPython, '')
+
+  try {
+    const findPythonForRoot = loadFindPythonForRoot()(
+      { env: { HERMES_DESKTOP_PYTHON: invokingPython } },
+      fs.existsSync,
+      false,
+      path,
+      () => '/system/python'
+    )
+    assert.equal(findPythonForRoot(root), invokingPython)
+  } finally {
+    fs.rmSync(root, { force: true, recursive: true })
+  }
 })
 
 test('hermes runtime import probe checks config dependencies', () => {

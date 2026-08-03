@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -107,6 +108,50 @@ def test_gui_forwards_desktop_environment_overrides(tmp_path, monkeypatch):
     assert launch_env["HERMES_DESKTOP_IGNORE_EXISTING"] == "1"
     assert launch_env["HERMES_DESKTOP_HERMES_ROOT"] == str(hermes_root)
     assert launch_env["HERMES_DESKTOP_CWD"] == str(cwd)
+
+
+def test_gui_source_mode_uses_invoking_python_for_backend_and_preserves_runtime_env(
+    tmp_path, monkeypatch
+):
+    root = _make_desktop_tree(tmp_path)
+    monkeypatch.setattr(cli_main, "PROJECT_ROOT", root)
+    monkeypatch.setattr(cli_main.sys, "executable", "/opt/hades-venv/bin/python")
+    monkeypatch.delenv("HERMES_DESKTOP_PYTHON", raising=False)
+    monkeypatch.setenv("HERMES_MODEL", "nous/hermes-test")
+    monkeypatch.setenv("HERMES_INFERENCE_PROVIDER", "test-provider")
+
+    ok = subprocess.CompletedProcess([], 0)
+
+    with patch("hermes_cli.main.shutil.which", return_value="/usr/bin/npm"), \
+         patch("hermes_cli.main._run_npm_install_deterministic", return_value=ok), \
+         patch("hermes_cli.main._desktop_build_needed", return_value=True), \
+         patch("hermes_cli.main._write_desktop_build_stamp"), \
+         patch("hermes_cli.main.subprocess.run", side_effect=[ok, ok]) as mock_run, \
+         pytest.raises(SystemExit):
+        cli_main.cmd_gui(_ns(source=True))
+
+    launch_env = mock_run.call_args_list[1].kwargs["env"]
+    assert launch_env["HERMES_DESKTOP_PYTHON"] == "/opt/hades-venv/bin/python"
+    assert launch_env["HERMES_MODEL"] == "nous/hermes-test"
+    assert launch_env["HERMES_INFERENCE_PROVIDER"] == "test-provider"
+    assert "HERMES_DESKTOP_PYTHON" not in os.environ
+
+
+def test_gui_preserves_explicit_desktop_python_override(tmp_path, monkeypatch):
+    root = _make_desktop_tree(tmp_path)
+    monkeypatch.setattr(cli_main, "PROJECT_ROOT", root)
+    _make_packaged_executable(root, monkeypatch)
+    monkeypatch.setattr(cli_main.sys, "executable", "/opt/invoking-venv/bin/python")
+    monkeypatch.setenv("HERMES_DESKTOP_PYTHON", "/opt/explicit-venv/bin/python")
+
+    ok = subprocess.CompletedProcess([], 0)
+
+    with patch("hermes_cli.main.subprocess.run", return_value=ok) as mock_run, \
+         pytest.raises(SystemExit):
+        cli_main.cmd_gui(_ns(skip_build=True))
+
+    launch_env = mock_run.call_args.kwargs["env"]
+    assert launch_env["HERMES_DESKTOP_PYTHON"] == "/opt/explicit-venv/bin/python"
 
 
 def test_gui_exits_when_npm_missing(tmp_path, monkeypatch, capsys):
