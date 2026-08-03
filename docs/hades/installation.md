@@ -1,32 +1,21 @@
 # Hades Installation
 
-## Tokenized One-Liner
+## Install Hades
 
-The preferred MVP install path is a dashboard-generated one-liner. The command
-contains the backend URL, backend project id, and project-scoped bootstrap
-token. The bootstrap token is used once locally to register an agent and is not
-persisted after registration; Hades stores the derived agent token instead.
+Install Hades with the normal platform installer. It is deliberately generic:
+it does not configure a project, contact a Backend service, create a pairing,
+or accept project credentials.
 
 POSIX:
 
 ```bash
-curl -fsSL https://home-sweet-home.cloud/install.sh | bash -s -- \
-  --backend-url https://home-sweet-home.cloud \
-  --backend-project-id <project-id> \
-  --backend-project-token <bootstrap-token> \
-  --backend-workspace "$PWD" \
-  --backend-project-name "My Project"
+curl -fsSL https://home-sweet-home.cloud/install.sh | bash
 ```
 
 Windows:
 
 ```powershell
 irm https://home-sweet-home.cloud/install.ps1 | iex
-.\install.ps1 -BackendUrl https://home-sweet-home.cloud `
-  -BackendProjectId <project-id> `
-  -BackendProjectToken <bootstrap-token> `
-  -BackendWorkspace $PWD `
-  -BackendProjectName "My Project"
 ```
 
 The installer defaults to the public `main` channel. Beta, release-candidate,
@@ -34,10 +23,7 @@ and branch-specific validation must pin the source explicitly:
 
 ```bash
 curl -fsSL https://home-sweet-home.cloud/install.sh | bash -s -- \
-  --branch <branch-or-tag> \
-  --backend-url https://home-sweet-home.cloud \
-  --backend-project-id <project-id> \
-  --backend-project-token <bootstrap-token>
+  --branch <branch-or-tag>
 ```
 
 ```powershell
@@ -45,30 +31,31 @@ $env:HADES_INSTALL_BRANCH = "<branch-or-tag>"
 irm https://home-sweet-home.cloud/install.ps1 | iex
 ```
 
-## Backend Bootstrap
+## Optional project knowledge plugin
 
-Installers call `hades backend bootstrap` after runtime setup when backend
-flags are present. The command performs:
-
-1. `hades backend setup`
-2. local project creation or reuse
-3. workspace link
-4. initial `hades backend sync`
-
-Manual equivalent:
+Project knowledge is an explicit, per-project plugin. Once the standalone
+release is published, install and activate it, then pair from the repository
+that should use it:
 
 ```bash
-hades backend bootstrap \
-  --url https://home-sweet-home.cloud \
-  --project-id <project-id> \
-  --project-token <bootstrap-token> \
-  --workspace "$PWD" \
-  --project-name "My Project" \
-  --non-interactive
+hades plugins install titagram/hades-backend-plugin --enable
+cd /path/to/the/project
+hades backend set-token --url https://backend.example.test --project-id project-test
 ```
 
-## Fallback Manual Setup
+The standalone plugin is not yet published from this checkout, so the command
+above documents the release identity rather than claiming that it is currently
+available. `set-token` prompts for the credential; do not put credentials on
+the command line or in installer arguments.
 
-If the one-liner is unavailable, install Hades normally, then run the manual
-bootstrap command above. If backend setup fails, local Hades still works without
-shared backend memory.
+Updates remain explicit too:
+
+```bash
+hades update
+hades plugins update hades-backend
+```
+
+The first command updates Hades core only. The second updates the installed
+plugin when the user requests it. Disabling or removing the plugin changes
+only active plugin discovery; it does not erase existing project settings,
+sessions, credentials, or local project state.

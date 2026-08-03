@@ -1,62 +1,68 @@
 ---
 sidebar_position: 2.8
-title: "Backend Setup"
-description: "Connect Hades Agent to the Hades backend for shared project memory, bounded jobs, artifacts, and inbox events."
+title: "Backend Plugin Setup"
+description: "Explicitly install and pair the optional Hades Backend project-knowledge plugin."
 ---
 
-# Backend Setup
+# Backend Plugin Setup
 
-Hades Agent works locally without the hosted backend. The backend adds shared
-project memory, workspace binding, bounded project jobs, artifact upload,
-doctor reports, and Persephone inbox events.
+Hades works locally without the Backend plugin. Project knowledge, workspace
+binding, bounded project jobs, artifacts, and inbox events are available only
+after a user explicitly installs and pairs the standalone plugin.
 
-## Bootstrap From A Project
+## Install and pair from a project
 
-The fastest path is the project dashboard one-liner. It installs Hades if
-needed, registers this local agent, links the current workspace, and runs the
-first sync.
-
-Manual equivalent:
+Once the standalone release is published, run the following from the project
+that should use Backend project knowledge:
 
 ```bash
-hades backend bootstrap \
-  --url https://home-sweet-home.cloud \
-  --project-id <project-id> \
-  --project-token <bootstrap-token> \
-  --workspace "$PWD" \
-  --project-name "My Project" \
-  --non-interactive
+hades plugins install titagram/hades-backend-plugin --enable
+cd /path/to/the/project
+hades backend set-token --url https://backend.example.test --project-id project-test
 ```
 
-The project token is single-use bootstrap material. Hades stores the derived
-agent token as a profile secret in `.env`; behavior settings stay in
-`config.yaml`.
+The standalone plugin is not yet published from this checkout. The install
+line records the frozen release identity; it does not claim the package is
+currently available. The pairing command requests the credential interactively,
+so credentials never appear in shell history, installer arguments, or logs.
 
-## Verify Status
+## Update, disable, or remove
 
-Run these from the linked workspace:
+```bash
+hades update
+hades plugins update hades-backend
+hades plugins disable hades-backend
+hades plugins remove hades-backend
+```
+
+Core updates do not install, update, enable, pair, or synchronize the plugin.
+Plugin changes are explicit. Disabling or removing it only changes active
+plugin discovery: existing project state, sessions, local credentials, and
+configuration remain in place.
+
+## Verify status
+
+Run these from a paired workspace:
 
 ```bash
 hades doctor
 hades backend status --json
-hades backend sync
 ```
 
-The JSON status should show a linked workspace, recent sync state, and no
-pending actions. If it reports waiting jobs, refused memory proposals, stale
-shared-memory cache, or inbox errors, follow the action text before continuing.
+The JSON status should show a linked workspace and recent plugin-controlled
+state. Follow its safe action text before continuing.
 
-## Privacy Boundaries
+## Privacy boundaries
 
-- The backend does not choose your model, provider, subagent routing, budgets,
+- The plugin does not choose your model, provider, subagent routing, budgets,
   or local tool settings.
-- Shared-memory writes are proposals. The backend accepts, refuses, or marks
-  conflicts; the local agent does not directly delete shared backend memory.
+- Shared-memory writes are proposals. The Backend accepts, refuses, or marks
+  conflicts; the local agent does not directly delete shared Backend memory.
 - Broad or policy-gated jobs wait for local confirmation.
 - Artifact jobs skip secrets, ignored paths, generated dependency directories,
   symlinks, binary/archive files, and oversized files.
-- Logs and doctor reports must not include backend tokens, bootstrap tokens,
-  raw job payloads, raw source files, or local absolute paths.
+- Logs and doctor reports must not include Backend credentials, raw job
+  payloads, raw source files, or local absolute paths.
 
 ## Troubleshooting
 
@@ -68,8 +74,5 @@ hades backend status --json
 hades logs --level WARNING --session latest
 ```
 
-Do not send `.env`, API keys, backend tokens, raw artifacts, local SQLite
-databases, raw source files, or screenshots that show tokenized commands.
-
-For local source checkouts, the detailed launch and support docs are in
-`docs/hades/launch.md` and `docs/hades/support-runbook.md`.
+Do not send `.env`, API keys, Backend credentials, raw artifacts, local SQLite
+databases, raw source files, or screenshots that show credentials.
