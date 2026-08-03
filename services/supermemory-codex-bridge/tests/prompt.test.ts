@@ -59,7 +59,7 @@ test("builds a symbolic tool prompt and a bounded per-tool output schema", () =>
     tools: [{ type: "function", function: {
       name: "add_memory",
       description: "Store <memory>",
-      strict: true,
+      strict: false,
       parameters: {
         type: "object",
         properties: { memory: { type: "string" } },
@@ -73,7 +73,8 @@ test("builds a symbolic tool prompt and a bounded per-tool output schema", () =>
 
   assert.match(invocation.prompt, /symbolic tool calls only/i);
   assert.match(invocation.prompt, /tool_calls=\[\].*final answer in content/i);
-  assert.match(invocation.prompt, /<strict>true<\/strict>/i);
+  assert.match(invocation.prompt, /<strict>false<\/strict>/i);
+  assert.doesNotMatch(invocation.prompt, /<strict>true<\/strict>/i);
   assert.match(invocation.prompt, /add_memory/);
   assert.match(invocation.prompt, /Store &lt;memory&gt;/);
   assert.match(invocation.prompt, /Store &lt;Ada&gt;/);

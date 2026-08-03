@@ -72,6 +72,7 @@ test("accepts documented compatibility hints without forwarding them", () => {
     max_completion_tokens: 50,
     n: 1,
     serviceTier: "flex",
+    service_tier: "flex",
   }, alias);
 
   assert.deepEqual(parsed, {
@@ -104,7 +105,7 @@ test("parses symbolic tools and correlated assistant/tool history", () => {
       function: {
         name: "add_memory",
         description: "Store a memory",
-        strict: true,
+        strict: false,
         parameters: {
           type: "object",
           properties: { memory: { type: "string" } },
@@ -118,7 +119,7 @@ test("parses symbolic tools and correlated assistant/tool history", () => {
 
   assert.equal(parsed.toolChoice, "auto");
   assert.equal(parsed.tools[0]?.name, "add_memory");
-  assert.equal(parsed.tools[0]?.strict, true);
+  assert.equal(parsed.tools[0]?.strict, false);
   assert.equal(parsed.messages[1]?.role, "assistant");
   assert.equal(parsed.messages[2]?.role, "tool");
 });
@@ -154,6 +155,38 @@ test("rejects malformed tool protocol without silently dropping fields", () => {
     messages: [],
     serviceTier: "priority",
   }, alias), 400, "invalid_request");
+  assertApiError(() => parseChatCompletionRequest({
+    model: alias,
+    messages: [],
+    service_tier: "priority",
+  }, alias), 400, "invalid_request");
+  assertApiError(() => parseChatCompletionRequest({
+    model: alias,
+    messages: [],
+    serviceTier: "flex",
+    service_tier: "default",
+  }, alias), 400, "invalid_request");
+  assertApiError(() => parseChatCompletionRequest({
+    model: alias,
+    messages: [
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [{ id: "call_1", type: "function", function: { name: "remember", arguments: "{}" } }],
+      },
+      { role: "tool", tool_call_id: "call_1", content: "not validated" },
+    ],
+    tools: [{ type: "function", function: {
+      name: "remember",
+      strict: true,
+      parameters: {
+        type: "object",
+        properties: { memory: { type: "string" } },
+        required: ["memory"],
+        additionalProperties: false,
+      },
+    } }],
+  }, alias), 400, "invalid_tools");
 });
 
 test("rejects unsupported models, modes, and message content", () => {

@@ -227,6 +227,7 @@ test("tool chat completions stay symbolic end to end", async (t) => {
         messages: [{ role: "user", content: "Remember Ada." }],
         max_tokens: 200,
         serviceTier: "flex",
+        service_tier: "flex",
         tools: [{ type: "function", function: {
           name: "add_memory",
           description: "Store a memory",
@@ -243,7 +244,42 @@ test("tool chat completions stay symbolic end to end", async (t) => {
     assert.match(runner.runs[0]!.invocation.prompt, /symbolic tool calls only/i);
     assert.deepEqual((runner.runs[0]!.invocation.outputSchema as any).properties.tool_calls.maxItems, 8);
     await waitFor(() => logs.length === 1);
-    assert.deepEqual(JSON.parse(logs[0]!).requestShape.unknownFieldCount, 0);
+    const requestShape = JSON.parse(logs[0]!).requestShape;
+    assert.equal(requestShape.unknownFieldCount, 0);
+    assert.deepEqual(requestShape.knownFields.map((field: { field: string }) => field.field), [
+      "max_tokens",
+      "messages",
+      "model",
+      "serviceTier",
+      "service_tier",
+      "tool_choice",
+      "tools",
+    ]);
+  } finally {
+    await harness.close();
+  }
+});
+
+test("strict tool schemas are rejected before Codex can run", async () => {
+  const runner = new FakeRunner();
+  const harness = await listen(runner);
+  try {
+    const response = await fetch(`${harness.origin}/v1/chat/completions`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({
+        model: config.publicModel,
+        messages: [],
+        tools: [{ type: "function", function: {
+          name: "add_memory",
+          strict: true,
+          parameters: { type: "object", required: ["memory"] },
+        } }],
+      }),
+    });
+    assert.equal(response.status, 400);
+    assert.equal((await response.json() as any).error.code, "invalid_tools");
+    assert.equal(runner.runs.length, 0);
   } finally {
     await harness.close();
   }

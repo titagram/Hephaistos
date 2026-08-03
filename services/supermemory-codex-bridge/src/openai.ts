@@ -87,6 +87,7 @@ const supportedRequestFields = new Set([
   "tools",
   "tool_choice",
   "serviceTier",
+  "service_tier",
 ]);
 const toolRequestFields = new Set(["tool_choice", "parallel_tool_calls", "function_call", "functions"]);
 
@@ -198,7 +199,7 @@ function parseTools(value: unknown): ChatTool[] {
     const { name, description, parameters, strict } = entry.function;
     if (typeof name !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(name) || names.has(name)
       || (description !== undefined && (typeof description !== "string" || description.length > 1_024))
-      || (strict !== undefined && typeof strict !== "boolean")
+      || (strict !== undefined && strict !== false)
       || !isRecord(parameters) || JSON.stringify(parameters).length > 32_768) {
       throw new ApiError(400, "invalid_tools", "Function tool definitions are malformed.");
     }
@@ -289,8 +290,10 @@ function parseCompatibilityHints(body: Record<string, unknown>): void {
   if (body.n !== undefined && body.n !== 1) {
     throw new ApiError(400, "unsupported_n", "Only n: 1 is supported.");
   }
-  if (body.serviceTier !== undefined && body.serviceTier !== "flex") {
-    invalidRequest("serviceTier must be flex.");
+  for (const name of ["serviceTier", "service_tier"]) {
+    if (body[name] !== undefined && body[name] !== "flex") {
+      invalidRequest(`${name} must be flex.`);
+    }
   }
 }
 
