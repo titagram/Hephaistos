@@ -7995,3 +7995,31 @@ file analizzati/omessi per budget, route/test promossi o omessi e nodi esclusi
 per capacita'. Il backend persiste questi dati in una colonna nullable e il
 frontend dichiara esplicitamente quando una ricerca riguarda un sottoinsieme
 indicizzato. I vecchi record senza coverage restano compatibili (`null`).
+
+# 2026-08-03 — Task 14 independent Backend review
+
+Review read-only del commit remoto
+`1d1b894d31f98129a8aa67a7602df5fb8344c335` contro `39f08e722`:
+**CHANGES_REQUESTED**. I tre contratti principali sono presenti: install
+plugin config-driven/fail-closed con `--enable`, connection template neutro
+`__PROJECT_ID__` con selezione React esplicita e route Inertia composta, URL
+derivati da `config('app.url')` e non da Host/X-Forwarded-Host. Il plaintext
+token/no-store resta coperto e il diff non contiene migration o token service.
+
+Finding: `HadesInstallInstructions::canonicalBaseUrl()` accetta URL HTTP(S)
+validi con metacaratteri RFC nel path, ma la variante Windows inserisce l'URL
+senza quoting dentro `powershell -Command`. La prova con
+`https://canonical.example.test/dev;Write-Output-PWNED` produce due statement
+PowerShell nel comando copiabile. Occorre quotare/escapare l'argomento URL per
+PowerShell (e aggiungere una regressione con `;`, `&` o `|`) oppure restringere
+il canonical URL a una grammatica che li rifiuta.
+
+Evidence fresca sul checkout host reale: focused PHP 19 test/255 assertion
+(19 warning ambientali), Node 6/6, bounded non-Graph Hades + PluginAuth +
+Dashboard Admin 2.096 assertion senza failure, route inventory 7 route, Pint
+ristretto 7/7, `php -l` 7/7, PHPStan 5 file senza errori, Vite build 2.311
+moduli riuscita e `git diff --check` pulito. Il container `app` e' stale
+(checksum test diverso e patch Task14 assente), quindi il suo singolo failure
+non e' evidence sul commit; tutti i gate autoritativi sono stati eseguiti sul
+checkout host. Gli artefatti Pest/Vite generati dalla review sono stati
+restaurati; sul remoto resta soltanto il documento utente untracked preesistente.

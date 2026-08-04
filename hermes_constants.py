@@ -45,12 +45,20 @@ def get_hermes_home_override() -> str | None:
 
 
 def _get_platform_default_hermes_home() -> Path:
-    """Return the platform-native default Hermes-compatible storage path."""
+    """Return the platform-native default Hades-compatible storage path.
+
+    Aligned with the Electron desktop app's ``resolveHermesHome()`` in
+    ``apps/desktop/electron/main.cjs`` — both default to ``~/.hades`` on
+    POSIX and ``%LOCALAPPDATA%\\\\hades`` on Windows.  Keeping these in sync
+    prevents the desktop backend from looking in a different HERMES_HOME than
+    the gateway writes to (which manifested as the gateway always showing
+    "disconnected" in the desktop app).
+    """
     if sys.platform == "win32":
         local_appdata = os.environ.get("LOCALAPPDATA", "").strip()
         base = Path(local_appdata) if local_appdata else Path.home() / "AppData" / "Local"
-        return base / "hermes"
-    return Path.home() / ".hermes"
+        return base / "hades"
+    return Path.home() / ".hades"
 
 
 def _same_resolved_path(left: str, right: str) -> bool:
@@ -138,16 +146,16 @@ def get_default_hermes_root() -> Path:
     """Return the root Hermes storage directory for profile-level operations.
 
     In standard deployments this is the platform-native Hermes-compatible
-    storage home (``~/.hermes`` on POSIX, ``%LOCALAPPDATA%\\hermes`` on
+    storage home (``~/.hades`` on POSIX, ``%LOCALAPPDATA%\\\\hades`` on
     native Windows).
 
     In Docker or custom deployments where ``HERMES_HOME`` points outside
-    ``~/.hermes`` (e.g. ``/opt/data``), returns ``HERMES_HOME`` directly
+    ``~/.hades`` (e.g. ``/opt/data``), returns ``HERMES_HOME`` directly
     — that IS the root.
 
     In profile mode where ``HERMES_HOME`` is ``<root>/profiles/<name>``,
     returns ``<root>`` so that ``profile list`` can see all profiles.
-    Works both for standard (``~/.hermes/profiles/coder``) and Docker
+    Works both for standard (``~/.hades/profiles/coder``) and Docker
     (``/opt/data/profiles/coder``) layouts.
 
     Import-safe — no dependencies beyond stdlib.
@@ -159,7 +167,7 @@ def get_default_hermes_root() -> Path:
     env_path = Path(env_home)
     try:
         env_path.resolve().relative_to(native_home.resolve())
-        # HERMES_HOME is under ~/.hermes (normal or profile mode)
+        # HERMES_HOME is under ~/.hades (normal or profile mode)
         return native_home
     except ValueError:
         pass
@@ -671,12 +679,12 @@ def display_hermes_home() -> str:
 
     Uses ``~/`` shorthand for readability::
 
-        default:  ``~/.hermes``
-        profile:  ``~/.hermes/profiles/coder``
+        default:  ``~/.hades``
+        profile:  ``~/.hades/profiles/coder``
         custom:   ``/opt/hermes-custom``
 
     Use this in **user-facing** print/log messages instead of hardcoding
-    ``~/.hermes``.  For code that needs a real ``Path``, use
+    ``~/.hades``.  For code that needs a real ``Path``, use
     :func:`get_hermes_home` instead.
     """
     home = get_hermes_home()
