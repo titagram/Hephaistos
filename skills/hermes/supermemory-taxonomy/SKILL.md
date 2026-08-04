@@ -40,6 +40,7 @@ Always tag every stored memory with these three dimensions. Values are lowercase
 | `infra` | Server setup, Docker, Traefik, rclone, Google Drive, backups |
 | `personal` | Personal notes, preferences, non-technical facts |
 | `skills` | Skill authoring, skill-hub, curator operations |
+| `langchain` | LangChain/LangSmith platform docs knowledge base (project:langchain in supermemory) |
 
 ### `topic` — What area within the project
 
@@ -123,6 +124,7 @@ Pre-filter mentally: search with `[project:X]` and review results, ignoring entr
 4. **Searching without the tag.** `supermemory_search(query="errore import")` returns everything. Always include `[project:X]` or `[topic:Y]` in the query unless the user asked for an unbounded search.
 5. **Metadata-only tagging.** Don't rely on metadata alone — it's invisible to `supermemory_search`. Tags MUST be in the content text.
 6. **Inconsistent tag spelling.** `hephaistos` not `hephastos` or `Hephaistos`. Stick to the taxonomy table exactly.
+7. **Bulk store in a burst.** Supermemory v0.0.6 self-hosted goes OOM with rapid-fire stores (46 docs in 15s crashed the server). Store max 1 per 10-15s, max 3 in a row, then a long pause.
 
 ## Maintenance
 
