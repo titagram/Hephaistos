@@ -1,20 +1,36 @@
 ---
 name: aristea-wiki
-description: Consulta e aggiorna la Wiki Aristea tramite il server MCP remoto versionato.
-version: 1.0.0
+description: Use when consulting or safely updating the Aristea Wiki through its remote MCP server.
+version: 1.1.0
+author: Hermes Agent
+license: MIT
 required_environment_variables:
   - name: ARISTEA_MCP_TOKEN
     prompt: Token di accesso al server MCP Aristea
     required_for: Connessione a mcp-aristea.persephone.cc
+metadata:
+  hermes:
+    tags: [mcp, wiki, aristea, versioning, knowledge-base]
+    related_skills: []
 ---
 
 # Wiki Aristea
 
-Usa il server MCP `aristea_wiki` per cercare, consultare e aggiornare contenuti della Wiki Aristea.
+## Overview
+
+Usa il server MCP remoto `aristea_wiki` per consultare e aggiornare la Wiki Aristea tramite le sue API versionate. Il server applica autenticazione Bearer e rate limiting; la Wiki resta l'autorità per validazione, revisioni e conflitti.
+
+## When to Use
+
+- L'utente chiede di cercare, leggere o aggiornare contenuti nella Wiki Aristea.
+- Serve consultare revisioni, aggiungere commenti o ripristinare una revisione specifica.
+- Serve modificare una pagina preservando fonti, metadati e significato esistente.
+
+Non usare per contenuti non destinati alla Wiki o per aggirare conflitti, limiti di richiesta o autenticazione.
 
 ## Configurazione client
 
-Il server MCP remoto è `https://mcp-aristea.persephone.cc/mcp` e richiede questo header configurato in `~/.hermes/config.yaml`:
+Configura il server MCP senza incorporare segreti in file versionati:
 
 ```yaml
 mcp_servers:
@@ -22,33 +38,52 @@ mcp_servers:
     url: "https://mcp-aristea.persephone.cc/mcp"
     headers:
       Authorization: "Bearer ${ARISTEA_MCP_TOKEN}"
+    timeout: 30
 ```
 
-Non chiedere mai di inviare il token in chat. Quando la skill è caricata localmente, Hermes raccoglie il token tramite secure secret entry e non ne espone il valore al modello.
+`ARISTEA_MCP_TOKEN` è un secret locale richiesto. Non chiedere mai di inviarlo in chat, non stamparlo e non salvarlo in `config.yaml`, skill, codice o repository. Su canali chat il secret deve essere già configurato nell'ambiente del client.
+
+**Criterio di completamento:** il client espone `aristea_wiki` e il token non compare in output o sorgenti versionate.
 
 ## Consultazione
 
-1. Per cercare, usa `wiki_search` o `wiki_list_pages`.
-2. Per una pagina nota, usa `wiki_get_page` e annota `currentRevision`.
-3. Per capire decisioni precedenti o una modifica controversa, usa `wiki_get_revisions`.
-4. Non inventare pagine, fonti, revisioni o contenuto assente.
+1. Cerca con `wiki_search` oppure sfoglia con `wiki_list_pages`.
+2. Leggi la pagina scelta con `wiki_get_page`; per un'eventuale modifica annota `currentRevision`.
+3. Usa `wiki_get_revisions` quando servono contesto storico, autore o contenuto di una revisione.
+4. Riporta soltanto informazioni restituite dalla Wiki; non inventare pagine, fonti, revisioni o contenuto assente.
 
-## Modifica di una pagina
+**Criterio di completamento:** ogni affermazione sulla pagina è riconducibile alla risposta della Wiki.
 
-1. Leggi sempre la pagina con `wiki_get_page` immediatamente prima di modificarla.
-2. Conserva testo, fonti e significato non interessati dalla richiesta.
-3. Usa `wiki_update_page` con `baseRevision` uguale a `currentRevision` appena letto e con una `note` breve e descrittiva.
-4. Se la Wiki risponde con conflitto `409`, non ritentare automaticamente: rileggi pagina e revisioni, spiega il conflitto e chiedi come procedere.
+## Modifica sicura
+
+1. Rileggi sempre la pagina con `wiki_get_page` immediatamente prima di scrivere.
+2. Verifica testo, fonti e metadati; conserva tutto ciò che non è oggetto della richiesta.
+3. Per `wiki_update_page`, invia `baseRevision` uguale alla `currentRevision` appena letta, un autore e una `note` breve ma descrittiva.
+4. Se la Wiki restituisce `409`, non ritentare automaticamente: rileggi pagina e revisioni, presenta il conflitto e chiedi come procedere.
 5. Dopo una scrittura, comunica slug, URL e revisione risultante.
+
+**Criterio di completamento:** l'aggiornamento ha una nuova revisione confermata dalla Wiki, oppure un conflitto è esplicitamente presentato senza overwrite.
 
 ## Creazione, commenti e restore
 
-- Usa `wiki_create_page` solo quando la richiesta di creare una nuova pagina è esplicita.
-- Usa `wiki_add_comment` per discussioni che non devono modificare il contenuto principale.
-- `wiki_restore_page_revision` richiede `confirm: true`, una revisione di base corrente e una richiesta utente esplicita. Il restore crea una nuova revisione e non cancella la cronologia.
+- Chiama `wiki_create_page` solo per una richiesta esplicita di nuova pagina.
+- Usa `wiki_add_comment` per discussioni che non devono cambiare il contenuto principale.
+- Chiama `wiki_restore_page_revision` solo su richiesta esplicita, con `confirm: true` e una revisione di base corrente. Il restore crea una nuova revisione e non cancella la cronologia.
 
-## Sicurezza
+**Criterio di completamento:** pagina, commento o revisione risultante è identificabile nella risposta del tool.
 
-- Il server applica un Bearer token e rate limiting; non aggirare né riprovare ripetutamente dopo un `429`.
-- Non fornire credenziali Basic Auth della wiki ai tool o nei documenti.
-- Il token condiviso dell'MVP identifica gli aggiornamenti come `MCP Aristea`; non dichiarare attribuzioni personali non verificabili.
+## Common Pitfalls
+
+1. **Scrittura da una revisione obsoleta.** Rileggi appena prima di aggiornare e usa `baseRevision` corrente.
+2. **Retry cieco dopo `409` o `429`.** Il primo richiede una rilettura e decisione dell'utente; il secondo una pausa secondo `Retry-After`.
+3. **Token in chat o commit.** Mantieni `ARISTEA_MCP_TOKEN` esclusivamente nel secure secret store o nell'ambiente locale del client.
+4. **Attribuzione inventata.** Nell'MVP il server usa l'autore di servizio `MCP Aristea`; non attribuire modifiche a persone senza fonte verificabile.
+
+## Verification Checklist
+
+- [ ] Il client usa `https://mcp-aristea.persephone.cc/mcp`.
+- [ ] Il Bearer token è referenziato come `${ARISTEA_MCP_TOKEN}`, non scritto in chiaro.
+- [ ] La pagina è stata riletta prima di ogni aggiornamento.
+- [ ] `baseRevision`, autore e nota sono presenti in ogni modifica.
+- [ ] Un eventuale `409` non è stato ritentato automaticamente.
+- [ ] La risposta finale riporta pagina e revisione risultante oppure il conflitto bloccante.
