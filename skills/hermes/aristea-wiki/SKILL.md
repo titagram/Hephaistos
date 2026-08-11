@@ -5,7 +5,7 @@ version: 1.1.0
 author: Hermes Agent
 license: MIT
 required_environment_variables:
-  - name: ARISTEA_MCP_TOKEN
+  - name: MCP_ARISTEA_WIKI_API_KEY
     prompt: Token di accesso al server MCP Aristea
     required_for: Connessione a mcp-aristea.persephone.cc
 metadata:
@@ -19,6 +19,8 @@ metadata:
 ## Overview
 
 Usa il server MCP remoto `aristea_wiki` per consultare e aggiornare la Wiki Aristea tramite le sue API versionate. Il server applica autenticazione Bearer e rate limiting; la Wiki resta l'autorità per validazione, revisioni e conflitti.
+
+Per il deploy e la verifica pubblica del server, consulta [`references/remote-mcp-deployment.md`](references/remote-mcp-deployment.md): separa DNS, TLS, routing, autenticazione e framing SSE del protocollo.
 
 ## When to Use
 
@@ -37,11 +39,11 @@ mcp_servers:
   aristea_wiki:
     url: "https://mcp-aristea.persephone.cc/mcp"
     headers:
-      Authorization: "Bearer ${ARISTEA_MCP_TOKEN}"
+      Authorization: "Bearer ${MCP_ARISTEA_WIKI_API_KEY}"
     timeout: 30
 ```
 
-`ARISTEA_MCP_TOKEN` è un secret locale richiesto. Non chiedere mai di inviarlo in chat, non stamparlo e non salvarlo in `config.yaml`, skill, codice o repository. Su canali chat il secret deve essere già configurato nell'ambiente del client.
+`MCP_ARISTEA_WIKI_API_KEY` è un secret locale richiesto. Non chiedere mai di inviarlo in chat, non stamparlo e non salvarlo in `config.yaml`, skill, codice o repository. Su canali chat il secret deve essere già configurato nell'ambiente del client.
 
 **Criterio di completamento:** il client espone `aristea_wiki` e il token non compare in output o sorgenti versionate.
 
@@ -76,13 +78,13 @@ mcp_servers:
 
 1. **Scrittura da una revisione obsoleta.** Rileggi appena prima di aggiornare e usa `baseRevision` corrente.
 2. **Retry cieco dopo `409` o `429`.** Il primo richiede una rilettura e decisione dell'utente; il secondo una pausa secondo `Retry-After`.
-3. **Token in chat o commit.** Mantieni `ARISTEA_MCP_TOKEN` esclusivamente nel secure secret store o nell'ambiente locale del client.
+3. **Token in chat o commit.** Mantieni `MCP_ARISTEA_WIKI_API_KEY` esclusivamente nel secure secret store o nell'ambiente locale del client.
 4. **Attribuzione inventata.** Nell'MVP il server usa l'autore di servizio `MCP Aristea`; non attribuire modifiche a persone senza fonte verificabile.
 
 ## Verification Checklist
 
 - [ ] Il client usa `https://mcp-aristea.persephone.cc/mcp`.
-- [ ] Il Bearer token è referenziato come `${ARISTEA_MCP_TOKEN}`, non scritto in chiaro.
+- [ ] Il Bearer token è referenziato come `${MCP_ARISTEA_WIKI_API_KEY}`, non scritto in chiaro.
 - [ ] La pagina è stata riletta prima di ogni aggiornamento.
 - [ ] `baseRevision`, autore e nota sono presenti in ogni modifica.
 - [ ] Un eventuale `409` non è stato ritentato automaticamente.
