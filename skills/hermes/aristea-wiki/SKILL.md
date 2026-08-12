@@ -1,7 +1,7 @@
 ---
 name: aristea-wiki
 description: Use when consulting or safely updating the Aristea Wiki through its remote MCP server.
-version: 1.1.0
+version: 1.3.0
 author: Hermes Agent
 license: MIT
 required_environment_variables:
@@ -49,12 +49,40 @@ mcp_servers:
 
 ## Consultazione
 
-1. Cerca con `wiki_search` oppure sfoglia con `wiki_list_pages`.
-2. Leggi la pagina scelta con `wiki_get_page`; per un'eventuale modifica annota `currentRevision`.
-3. Usa `wiki_get_revisions` quando servono contesto storico, autore o contenuto di una revisione.
-4. Riporta soltanto informazioni restituite dalla Wiki; non inventare pagine, fonti, revisioni o contenuto assente.
+1. Usa `wiki_search` soltanto per discovery globale: può restituire risultati `page`, `question` e `decision` sintetici.
+2. Non interpretare l'excerpt di una `question` come risposta: può contenere soltanto il suo contesto.
+3. Per una pagina usa `wiki_get_page`; per una domanda usa `wiki_get_question`; per una decisione usa `wiki_get_decision` prima di formulare conclusioni.
+4. Usa `wiki_get_revisions` quando servono contesto storico, autore o contenuto di una revisione di pagina.
+5. Riporta soltanto informazioni restituite dalla Wiki; non inventare pagine, fonti, revisioni, risposte o decisioni.
 
-**Criterio di completamento:** ogni affermazione sulla pagina è riconducibile alla risposta della Wiki.
+**Criterio di completamento:** ogni affermazione è riconducibile alla rappresentazione completa dell'entità restituita dalla Wiki, non al solo risultato sintetico di ricerca.
+
+## Domande: retrieval e risposta
+
+Le `question` sono quesiti di dominio da risolvere. Non sono query dell'utente e non sono automaticamente fonti informative.
+
+1. Elenca o filtra con `wiki_list_questions`, usando stato, priorità, area, destinatario o testo quando disponibili.
+2. Prima di interpretare o rispondere, chiama sempre `wiki_get_question` sull'ID stabile, per esempio `ECO-01`.
+3. Tratta `question`, `context` e `answer` come campi distinti: `context` spiega il problema ma **non è la risposta**.
+4. Considera una domanda risolta soltanto quando `status` è `Risolta` e `answer` è non vuota.
+5. Per rispondere usa `wiki_update_question`, preservando dalla lettura corrente area, priorità, origine, destinatario, testo, contesto e pagine collegate. Non inventare la risposta e non copiare automaticamente `context` in `answer`.
+6. Usa `In discussione` per una risposta ancora da validare; usa `Risolta` solo quando la risposta è effettivamente confermata.
+7. Dopo l'aggiornamento comunica ID, stato e risposta registrata.
+
+**Criterio di completamento:** la risposta compare nel campo `answer` della domanda riletta e lo stato è coerente; il contesto non è stato presentato come risposta.
+
+## Decisioni
+
+Una `decision` formalizza una scelta progettuale. Resta distinta sia dalla domanda sorgente sia dalla sua risposta.
+
+1. Elenca con `wiki_list_decisions` e leggi il record completo con `wiki_get_decision`.
+2. Crea una decisione con `wiki_create_decision` solo su richiesta esplicita o quando l'utente conferma che una risposta costituisce una scelta da formalizzare.
+3. Se deriva da una domanda, valorizza `sourceQuestionId`; non usare il body della decisione al posto del campo `answer` della domanda.
+4. Prima di `wiki_update_decision`, rileggi la decisione e preserva `sourceQuestionId`, `sourceCommentId` e pagine collegate non coinvolte dalla richiesta.
+5. Usa gli stati `Proposta`, `Approvata` e `Superata` secondo il livello di conferma effettivo; non promuovere automaticamente una proposta.
+6. Dopo una scrittura comunica ID, stato, domanda sorgente e pagine collegate.
+
+**Criterio di completamento:** la scelta è registrata come decisione distinta e i suoi collegamenti sorgente sono preservati.
 
 ## Modifica sicura
 
@@ -80,6 +108,8 @@ mcp_servers:
 2. **Retry cieco dopo `409` o `429`.** Il primo richiede una rilettura e decisione dell'utente; il secondo una pausa secondo `Retry-After`.
 3. **Token in chat o commit.** Mantieni `MCP_ARISTEA_WIKI_API_KEY` esclusivamente nel secure secret store o nell'ambiente locale del client.
 4. **Attribuzione inventata.** Nell'MVP il server usa l'autore di servizio `MCP Aristea`; non attribuire modifiche a persone senza fonte verificabile.
+5. **Context scambiato per answer.** Un risultato di ricerca per una question può mostrare il contesto come excerpt: usa `wiki_get_question` e verifica esplicitamente `status` e `answer`.
+6. **Decisione usata come risposta.** Se una scelta deriva da una domanda, aggiorna la domanda e registra separatamente la decisione con `sourceQuestionId` quando richiesto.
 
 ## Verification Checklist
 
@@ -88,4 +118,7 @@ mcp_servers:
 - [ ] La pagina è stata riletta prima di ogni aggiornamento.
 - [ ] `baseRevision`, autore e nota sono presenti in ogni modifica.
 - [ ] Un eventuale `409` non è stato ritentato automaticamente.
-- [ ] La risposta finale riporta pagina e revisione risultante oppure il conflitto bloccante.
+- [ ] Un risultato `question` o `decision` di `wiki_search` è stato verificato con il relativo tool `get`.
+- [ ] Una domanda è dichiarata risolta solo con `status=Risolta` e `answer` non vuota; `context` non è stato usato come risposta.
+- [ ] Una decisione derivata da una domanda conserva `sourceQuestionId` e resta distinta dalla risposta.
+- [ ] La risposta finale riporta l'entità e lo stato/revisione risultante oppure il conflitto bloccante.

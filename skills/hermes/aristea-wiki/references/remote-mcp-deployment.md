@@ -24,7 +24,7 @@ Riferimento operativo per il server MCP remoto Aristea dopo una modifica a Docke
 5. **Protocollo MCP**
    - Inizializzare il protocollo e richiedere `tools/list`.
    - Streamable HTTP può restituire eventi SSE (`event: message` / `data: {...}`) anche quando la richiesta è HTTP POST: il verifier deve estrarre `data:` prima di fare JSON parse.
-   - Verificare che siano esposti gli otto tool Aristea e fare almeno una chiamata read-only (`wiki_list_pages` o `wiki_search`) contro la Wiki reale.
+   - Verificare che siano esposti i quindici tool Aristea e fare almeno una chiamata read-only (`wiki_list_pages`, `wiki_list_questions` o `wiki_search`) contro la Wiki reale.
 
 6. **Rate limit**
    - In un ambiente di test, superare il burst da un IP isolato e verificare `429` e `Retry-After`.
