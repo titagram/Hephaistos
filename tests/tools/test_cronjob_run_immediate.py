@@ -21,6 +21,7 @@ class TestCronjobRunExecutesImmediately:
         """action='run' must claim the job then fire it through run_one_job."""
         ran = {"job": "after-run", "last_status": "ok", "last_error": None}
         with patch("tools.cronjob_tools.resolve_job_ref", return_value=dict(_JOB)), \
+             patch("tools.cronjob_tools.make_fire_claim_owner", return_value="manual-owner"), \
              patch("tools.cronjob_tools.claim_job_for_fire", return_value=True) as m_claim, \
              patch("cron.scheduler.run_one_job", return_value=True) as m_run, \
              patch("tools.cronjob_tools.get_job", return_value=ran):
@@ -29,8 +30,9 @@ class TestCronjobRunExecutesImmediately:
         assert out["success"] is True
         assert out["job"]["executed"] is True
         assert out["job"]["execution_success"] is True
-        m_claim.assert_called_once_with("job-run-1")   # at-most-once claim taken
-        m_run.assert_called_once()                       # fired via the shared body
+        m_claim.assert_called_once_with("job-run-1", owner="manual-owner")
+        fired_job = m_run.call_args.args[0]
+        assert fired_job["fire_claim"]["by"] == "manual-owner"
 
     def test_run_skips_when_claim_lost(self):
         """If the scheduler already holds the fire claim, do NOT double-run."""
@@ -68,9 +70,24 @@ class TestCronjobRunExecutesImmediately:
         assert res["success"] is False
         m_run.assert_not_called()
 
+    def test_execute_job_now_does_not_run_after_claim_is_replaced(self):
+        """The common runner fences replacement between claim and dispatch."""
+        replacement = {**_JOB, "fire_claim": {"by": "replacement-owner"}}
+        with patch("tools.cronjob_tools.make_fire_claim_owner", return_value="stale-owner"), \
+             patch("tools.cronjob_tools.claim_job_for_fire", return_value=True), \
+             patch("cron.scheduler.renew_job_fire_claim", return_value=False), \
+             patch("cron.scheduler.run_job") as m_execute, \
+             patch("tools.cronjob_tools.get_job", return_value=replacement):
+            res = _execute_job_now(dict(_JOB))
+
+        assert res["claimed"] is True
+        assert res["success"] is False
+        m_execute.assert_not_called()
+
     def test_execute_job_now_marks_failure_on_exception(self):
         """An exception during fire is captured, marked failed, not propagated."""
-        with patch("tools.cronjob_tools.claim_job_for_fire", return_value=True), \
+        with patch("tools.cronjob_tools.make_fire_claim_owner", return_value="manual-owner"), \
+             patch("tools.cronjob_tools.claim_job_for_fire", return_value=True), \
              patch("cron.scheduler.run_one_job", side_effect=RuntimeError("boom")), \
              patch("tools.cronjob_tools.mark_job_run") as m_mark, \
              patch("tools.cronjob_tools.get_job", return_value=dict(_JOB)):
@@ -78,4 +95,9 @@ class TestCronjobRunExecutesImmediately:
         assert res["claimed"] is True
         assert res["success"] is False
         assert "boom" in res["error"]
-        m_mark.assert_called_once()
+        m_mark.assert_called_once_with(
+            "job-run-1",
+            False,
+            "boom",
+            fire_claim_owner="manual-owner",
+        )

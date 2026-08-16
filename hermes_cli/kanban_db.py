@@ -4939,6 +4939,123 @@ def _completion_board_slug(
     return _normalize_board_slug(board) or get_current_board()
 
 
+_REVIEW_PASS_VERDICTS = frozenset({"pass", "passed", "approve", "approved"})
+_REVIEW_FAIL_VERDICTS = frozenset({"fail", "failed", "changes_requested"})
+
+
+def _managed_review_outcome(
+    conn: sqlite3.Connection,
+    task_id: str,
+    metadata: Optional[dict],
+) -> tuple[str, str, str] | None:
+    """Return ``(verdict, upstream_id, run_id)`` for a managed review node."""
+    row = conn.execute(
+        "SELECT n.node_kind, n.run_id "
+        "FROM kanban_org_nodes AS n "
+        "WHERE n.task_id = ? AND n.state = 'active' "
+        "AND n.node_kind IN ('task_review', 'global_review')",
+        (task_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    review = metadata.get("review") if isinstance(metadata, dict) else None
+    raw_verdict = review.get("verdict") if isinstance(review, dict) else None
+    verdict = str(raw_verdict or "").strip().lower()
+    if verdict not in _REVIEW_PASS_VERDICTS | _REVIEW_FAIL_VERDICTS:
+        raise ValueError(
+            "managed OrgRun reviews require metadata.review.verdict to be "
+            "'pass' or 'fail'"
+        )
+    expected_parent_kind = (
+        "execution" if row["node_kind"] == "task_review" else "integration"
+    )
+    parents = conn.execute(
+        "SELECT p.task_id "
+        "FROM kanban_org_nodes AS p "
+        "JOIN task_links AS l ON l.parent_id = p.task_id "
+        "WHERE p.run_id = ? AND p.state = 'active' "
+        "AND p.node_kind = ? AND l.child_id = ?",
+        (row["run_id"], expected_parent_kind, task_id),
+    ).fetchall()
+    if len(parents) != 1:
+        raise ValueError(
+            f"managed {row['node_kind']} must have exactly one "
+            f"{expected_parent_kind} parent"
+        )
+    return verdict, str(parents[0]["task_id"]), str(row["run_id"])
+
+
+def _return_managed_review_for_changes(
+    conn: sqlite3.Connection,
+    task_id: str,
+    upstream_id: str,
+    run_id: str,
+    *,
+    summary: Optional[str],
+    result: Optional[str],
+    metadata: Optional[dict],
+    expected_run_id: Optional[int],
+) -> bool:
+    """Atomically return a failed managed review to its upstream worker."""
+    handoff = summary if summary is not None else result
+    with write_txn(conn):
+        params: tuple[object, ...] = (task_id,)
+        run_guard = ""
+        if expected_run_id is not None:
+            run_guard = " AND current_run_id = ?"
+            params = (task_id, int(expected_run_id))
+        current = conn.execute(
+            "SELECT current_run_id FROM tasks WHERE id = ? "
+            "AND status IN ('running', 'ready', 'blocked')" + run_guard,
+            params,
+        ).fetchone()
+        if current is None:
+            return False
+        updated = conn.execute(
+            "UPDATE tasks SET status='ready', result=NULL, completed_at=NULL, "
+            "claim_lock=NULL, claim_expires=NULL, worker_pid=NULL, "
+            "block_kind=NULL WHERE id=? AND status='done'",
+            (upstream_id,),
+        )
+        if updated.rowcount != 1:
+            raise ValueError("managed review upstream is not completed")
+        closed_run_id = _end_run(
+            conn,
+            task_id,
+            outcome="changes_requested",
+            status="changes_requested",
+            summary=handoff,
+            metadata=metadata,
+        )
+        conn.execute(
+            "UPDATE tasks SET status='todo', result=NULL, completed_at=NULL, "
+            "claim_lock=NULL, claim_expires=NULL, worker_pid=NULL, "
+            "block_kind='dependency' WHERE id=?",
+            (task_id,),
+        )
+        _append_event(
+            conn,
+            task_id,
+            "changes_requested",
+            {"upstream_task_id": upstream_id, "summary": handoff},
+            run_id=closed_run_id,
+        )
+        _append_event(
+            conn,
+            upstream_id,
+            "review_feedback",
+            {
+                "review_task_id": task_id,
+                "summary": handoff,
+                "metadata": metadata,
+            },
+        )
+        from hermes_cli.org_run_store import refresh_org_run_state
+
+        refresh_org_run_state(conn, run_id)
+    return True
+
+
 def complete_task(
     conn: sqlite3.Connection,
     task_id: str,
@@ -5007,6 +5124,21 @@ def complete_task(
             raise HallucinatedCardsError(phantom_cards, task_id)
     else:
         verified_cards = []
+
+    managed_review = _managed_review_outcome(conn, task_id, metadata)
+    if managed_review is not None:
+        verdict, upstream_id, managed_run_id = managed_review
+        if verdict in _REVIEW_FAIL_VERDICTS:
+            return _return_managed_review_for_changes(
+                conn,
+                task_id,
+                upstream_id,
+                managed_run_id,
+                summary=summary,
+                result=result,
+                metadata=metadata,
+                expected_run_id=expected_run_id,
+            )
 
     with write_txn(conn):
         if expected_run_id is None:
@@ -9386,6 +9518,29 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
     if task.body and task.body.strip():
         lines.append("## Body")
         lines.append(_cap(task.body, _CTX_MAX_BODY_BYTES))
+        lines.append("")
+
+    review_feedback_rows = conn.execute(
+        "SELECT payload FROM task_events "
+        "WHERE task_id = ? AND kind = 'review_feedback' "
+        "ORDER BY id DESC LIMIT 3",
+        (task_id,),
+    ).fetchall()
+    if review_feedback_rows:
+        lines.append("## Review feedback to remediate")
+        for feedback_row in reversed(review_feedback_rows):
+            try:
+                feedback = json.loads(feedback_row["payload"] or "{}")
+            except (TypeError, json.JSONDecodeError):
+                continue
+            feedback_summary = _cap(str(feedback.get("summary") or ""))
+            if feedback_summary:
+                lines.append(feedback_summary)
+            feedback_metadata = feedback.get("metadata")
+            if isinstance(feedback_metadata, dict):
+                lines.append(
+                    f"_metadata_: `{_cap(json.dumps(feedback_metadata, ensure_ascii=False, sort_keys=True))}`"
+                )
         lines.append("")
 
     # Attachments — files uploaded to this task (PDFs, source docs,

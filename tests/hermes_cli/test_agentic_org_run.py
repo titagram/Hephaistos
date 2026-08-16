@@ -132,6 +132,85 @@ def test_materialize_builds_simplified_local_topology_with_logical_roles(tmp_pat
         )
 
 
+def test_failed_task_review_reopens_execution_then_pass_advances_org_run(tmp_path):
+    plan = _plan(global_review=False)
+    with kb.connect(tmp_path / "kanban.db") as conn:
+        topology = materialize_org_run(
+            conn, plan, _validation(plan), board="default"
+        )
+        execution_id = topology.tasks["runtime"].execution_id
+        review_id = topology.tasks["runtime"].review_id
+        assert review_id is not None
+
+        assert kb.complete_task(
+            conn,
+            execution_id,
+            summary="Implementation candidate is ready for independent review.",
+            metadata={"changed_files": ["hermes_cli/kanban.py"]},
+        )
+        assert kb.get_task(conn, review_id).status == "ready"
+        assert kb.claim_task(conn, review_id) is not None
+
+        assert kb.complete_task(
+            conn,
+            review_id,
+            summary="FAIL: the candidate does not preserve dispatcher recovery.",
+            metadata={
+                "review": {
+                    "verdict": "fail",
+                    "findings": ["dispatcher recovery regression"],
+                }
+            },
+        )
+
+        assert kb.get_task(conn, execution_id).status == "ready"
+        assert kb.get_task(conn, review_id).status == "todo"
+        assert kb.get_task(conn, topology.integration_id).status == "todo"
+        assert kb.latest_run(conn, review_id).outcome == "changes_requested"
+        worker_context = kb.build_worker_context(conn, execution_id)
+        assert "FAIL: the candidate does not preserve dispatcher recovery." in worker_context
+        assert "dispatcher recovery regression" in worker_context
+
+        assert kb.claim_task(conn, execution_id) is not None
+        assert kb.complete_task(
+            conn,
+            execution_id,
+            summary="Remediated candidate is ready for independent review.",
+        )
+        assert kb.get_task(conn, review_id).status == "ready"
+        assert kb.claim_task(conn, review_id) is not None
+        assert kb.complete_task(
+            conn,
+            review_id,
+            summary="PASS: dispatcher recovery is preserved.",
+            metadata={"review": {"verdict": "pass"}},
+        )
+        assert kb.get_task(conn, topology.integration_id).status == "ready"
+
+
+def test_managed_review_cannot_complete_without_structured_verdict(tmp_path):
+    plan = _plan(global_review=False)
+    with kb.connect(tmp_path / "kanban.db") as conn:
+        topology = materialize_org_run(
+            conn, plan, _validation(plan), board="default"
+        )
+        execution_id = topology.tasks["runtime"].execution_id
+        review_id = topology.tasks["runtime"].review_id
+        assert review_id is not None
+
+        assert kb.complete_task(conn, execution_id, summary="Candidate ready.")
+        assert kb.claim_task(conn, review_id) is not None
+
+        with pytest.raises(
+            ValueError,
+            match="managed OrgRun reviews require metadata.review.verdict",
+        ):
+            kb.complete_task(conn, review_id, summary="FAIL without metadata")
+
+        assert kb.get_task(conn, review_id).status == "running"
+        assert kb.get_task(conn, topology.integration_id).status == "todo"
+
+
 @pytest.mark.parametrize(
     ("risk", "task_review", "global_review", "want_task_review", "want_global_review"),
     [

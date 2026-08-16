@@ -236,7 +236,17 @@ _LEGACY_HOME_TARGET_ENV_VARS = {
     "QQBOT_HOME_CHANNEL": "QQ_HOME_CHANNEL",
 }
 
-from cron.jobs import get_due_jobs, mark_job_run, save_job_output, advance_next_run
+from cron.jobs import (
+    advance_next_run,
+    claim_job_for_fire,
+    get_due_jobs,
+    make_fire_claim_owner,
+    mark_job_run,
+    renew_job_fire_claim,
+    save_job_output,
+)
+
+_FIRE_CLAIM_HEARTBEAT_SECONDS = 60.0
 
 # Sentinel: when a cron agent has nothing new to report, it can start its
 # response with this marker to suppress delivery.  Output is still saved
@@ -2752,6 +2762,59 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
             logger.debug("Job '%s': failed to reap stale auxiliary clients: %s", job_id, e)
 
 
+def _claim_due_job(job: dict) -> Optional[dict]:
+    """Claim a built-in ticker fire through the cross-process store CAS."""
+    owner = make_fire_claim_owner()
+    if not claim_job_for_fire(
+        job["id"],
+        owner=owner,
+        expected_next_run_at=job.get("next_run_at"),
+    ):
+        return None
+    claimed = dict(job)
+    claimed["fire_claim"] = {"by": owner}
+    return claimed
+
+
+def _start_fire_claim_heartbeat(job: dict):
+    """Keep a long-running job's store lease fresh without blocking its worker."""
+    owner = (job.get("fire_claim") or {}).get("by")
+    if not owner:
+        return None
+
+    stop = threading.Event()
+    claim_lost = threading.Event()
+
+    def _heartbeat() -> None:
+        while not stop.wait(_FIRE_CLAIM_HEARTBEAT_SECONDS):
+            try:
+                renewed = renew_job_fire_claim(job["id"], owner=owner)
+            except Exception as exc:
+                logger.warning("Failed to renew fire claim for job %s: %s", job["id"], exc)
+                continue
+            if not renewed:
+                claim_lost.set()
+                return
+
+    thread = threading.Thread(
+        target=_heartbeat,
+        name=f"cron-claim-{job['id'][:12]}",
+        daemon=True,
+    )
+    thread.start()
+    return stop, claim_lost, thread
+
+
+def _renew_fire_claim_with_retry(job_id: str, owner: str, *, phase: str) -> bool:
+    """Confirm ownership with one bounded retry for transient store errors."""
+    for _attempt in range(2):
+        try:
+            return renew_job_fire_claim(job_id, owner=owner)
+        except Exception as exc:
+            logger.warning("Failed to %s fire claim for job %s: %s", phase, job_id, exc)
+    return False
+
+
 def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -> bool:
     """Run ONE due job end-to-end: execute → save output → deliver → mark.
 
@@ -2759,20 +2822,47 @@ def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -
     that BOTH the built-in ticker and an external provider's ``fire_due`` (e.g.
     Chronos) run the identical sequence — no duplicated correctness.
 
-    It does NOT decide whether the job is due, claim it, or compute the next
-    run — those are the caller's concern (``tick`` advances ``next_run_at``
-    under the file lock before dispatch; an external provider claims via the
-    store CAS). This function only fires the given job once.
+    It does NOT decide whether the job is due or acquire its initial claim;
+    those are the caller's concern. Both built-in and external callers use the
+    store CAS before entering this function. While the job runs, this shared
+    body renews that claim and releases it through owner-checked completion.
 
     Returns True if the job was processed (even if the job itself failed —
-    failure is recorded via ``mark_job_run``), False only if processing raised.
+    failure is recorded via ``mark_job_run``), False if processing raised or
+    the caller no longer owns the durable fire claim.
     """
+    claim_owner = (job.get("fire_claim") or {}).get("by")
+    claim_kwargs = {"fire_claim_owner": claim_owner} if claim_owner else {}
+    if claim_owner:
+        owns_claim = _renew_fire_claim_with_retry(job["id"], claim_owner, phase="validate")
+        if not owns_claim:
+            logger.warning("Skipping job %s after fire claim ownership was lost", job["id"])
+            return False
+
+    heartbeat = _start_fire_claim_heartbeat(job)
+
+    def _claim_is_current(phase: str) -> bool:
+        if heartbeat is None:
+            return True
+        _stop, claim_lost, _thread = heartbeat
+        if claim_lost.is_set() or not _renew_fire_claim_with_retry(
+            job["id"], claim_owner, phase=phase
+        ):
+            logger.warning("Discarding result for job %s after fire claim ownership was lost", job["id"])
+            return False
+        return True
+
     try:
         success, output, final_response, error = run_job(job)
+
+        if not _claim_is_current("validate result"):
+            return False
 
         output_file = save_job_output(job["id"], output)
         if verbose:
             logger.info("Output saved to: %s", output_file)
+        if not _claim_is_current("validate saved result"):
+            return False
 
         # Deliver the final response to the origin/target chat.
         # If the agent responded with [SILENT], skip delivery (but
@@ -2794,6 +2884,8 @@ def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -
 
         delivery_error = None
         if should_deliver:
+            if not _claim_is_current("validate delivery"):
+                return False
             try:
                 delivery_error = _deliver_result(job, deliver_content, adapters=adapters, loop=loop)
             except Exception as de:
@@ -2807,13 +2899,24 @@ def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -
             success = False
             error = "Agent completed but produced empty response (model error, timeout, or misconfiguration)"
 
-        mark_job_run(job["id"], success, error, delivery_error=delivery_error)
+        mark_job_run(
+            job["id"],
+            success,
+            error,
+            delivery_error=delivery_error,
+            **claim_kwargs,
+        )
         return True
 
     except Exception as e:
         logger.error("Error processing job %s: %s", job['id'], e)
-        mark_job_run(job["id"], False, str(e))
+        mark_job_run(job["id"], False, str(e), **claim_kwargs)
         return False
+    finally:
+        if heartbeat is not None:
+            stop, _claim_lost, thread = heartbeat
+            stop.set()
+            thread.join(timeout=1)
 
 
 def _notify_provider_jobs_changed() -> None:
@@ -2876,14 +2979,6 @@ def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> i
         if verbose:
             logger.info("%s - %s job(s) due", _hermes_now().strftime('%H:%M:%S'), len(due_jobs))
 
-        # Advance next_run_at for all recurring jobs FIRST, under the file lock,
-        # before any execution begins.  This preserves at-most-once semantics.
-        # For parallel jobs that are already running, advance_next_run keeps
-        # bumping next_run_at forward so the grace window never expires.
-        # mark_job_run() overwrites next_run_at on completion.
-        for job in due_jobs:
-            advance_next_run(job["id"])
-
         # Resolve max parallel workers: env var > config.yaml > unbounded.
         # Set HERMES_CRON_MAX_PARALLEL=1 to restore old serial behaviour.
         _max_workers: Optional[int] = None
@@ -2912,11 +3007,16 @@ def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> i
             )
 
         def _process_job(job: dict) -> bool:
-            """Run one due job end-to-end. Thin wrapper around the shared
-            module-level ``run_one_job`` so ``tick`` and external providers
-            (Chronos ``fire_due``) use the identical execute→save→deliver→mark
-            body."""
-            return run_one_job(job, adapters=adapters, loop=loop, verbose=verbose)
+            """Claim and run one due job when its worker actually starts.
+
+            Claiming here rather than before executor submission prevents a
+            queued job from holding an unrenewed lease that can expire before
+            execution begins.
+            """
+            claimed = _claim_due_job(job)
+            if claimed is None:
+                return False
+            return run_one_job(claimed, adapters=adapters, loop=loop, verbose=verbose)
 
         # Partition due jobs: those with a per-job workdir mutate
         # os.environ["TERMINAL_CWD"] inside run_job, which is process-global —

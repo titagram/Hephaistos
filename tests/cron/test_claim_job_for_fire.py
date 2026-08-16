@@ -82,3 +82,64 @@ def test_mark_job_run_clears_claim(temp_home):
     assert get_job(jid).get("fire_claim") is None
     # …and the re-armed recurring job is claimable again.
     assert claim_job_for_fire(jid) is True
+
+
+def test_active_owner_can_renew_stale_claim(temp_home):
+    """A live run refreshes its lease before the stale-claim TTL expires."""
+    from cron.jobs import (
+        claim_job_for_fire,
+        create_job,
+        get_job,
+        load_jobs,
+        renew_job_fire_claim,
+        save_jobs,
+    )
+
+    job = create_job(prompt="x", schedule="every 5m", name="renew")
+    jid = job["id"]
+    assert claim_job_for_fire(jid, owner="runner-a") is True
+
+    jobs = load_jobs()
+    stored = next(item for item in jobs if item["id"] == jid)
+    stored["fire_claim"]["at"] = "2000-01-01T00:00:00+00:00"
+    save_jobs(jobs)
+
+    assert renew_job_fire_claim(jid, owner="runner-b") is False
+    assert renew_job_fire_claim(jid, owner="runner-a") is True
+    assert get_job(jid)["fire_claim"]["by"] == "runner-a"
+    assert claim_job_for_fire(jid, owner="runner-b") is False
+
+
+def test_stale_runner_cannot_clear_new_owner_claim(temp_home):
+    """A late completion must not erase the lease of a replacement runner."""
+    from cron.jobs import claim_job_for_fire, create_job, get_job, mark_job_run
+
+    job = create_job(prompt="x", schedule="every 5m", name="ownership")
+    jid = job["id"]
+    assert claim_job_for_fire(jid, owner="runner-a") is True
+    assert claim_job_for_fire(jid, owner="runner-b", claim_ttl_seconds=0) is True
+
+    mark_job_run(jid, success=True, fire_claim_owner="runner-a")
+    assert get_job(jid)["fire_claim"]["by"] == "runner-b"
+
+    mark_job_run(jid, success=True, fire_claim_owner="runner-b")
+    assert get_job(jid).get("fire_claim") is None
+
+
+def test_queued_snapshot_cannot_claim_completed_occurrence(temp_home):
+    """A delayed worker must not execute an occurrence another replica finished."""
+    from cron.jobs import claim_job_for_fire, create_job, get_job, mark_job_run
+
+    job = create_job(prompt="x", schedule="every 5m", name="queued")
+    jid = job["id"]
+    queued_next_run = get_job(jid)["next_run_at"]
+
+    assert claim_job_for_fire(jid, owner="runner-b") is True
+    mark_job_run(jid, success=True, fire_claim_owner="runner-b")
+
+    assert claim_job_for_fire(
+        jid,
+        owner="queued-runner-a",
+        expected_next_run_at=queued_next_run,
+    ) is False
+    assert get_job(jid).get("fire_claim") is None

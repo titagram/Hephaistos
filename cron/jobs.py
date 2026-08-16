@@ -1225,7 +1225,8 @@ def remove_job(job_id: str) -> bool:
 
 
 def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
-                 delivery_error: Optional[str] = None):
+                 delivery_error: Optional[str] = None,
+                 fire_claim_owner: Optional[str] = None):
     """
     Mark a job as having been run.
     
@@ -1239,6 +1240,14 @@ def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
         jobs = load_jobs()
         for i, job in enumerate(jobs):
             if job["id"] == job_id:
+                if fire_claim_owner is not None:
+                    current_claim = job.get("fire_claim") or {}
+                    if current_claim.get("by") != fire_claim_owner:
+                        logger.info(
+                            "Ignoring stale completion for job '%s': claim owner changed",
+                            job_id,
+                        )
+                        return
                 now = _hermes_now().isoformat()
                 job["last_run_at"] = now
                 job["last_status"] = "ok" if success else "error"
@@ -1346,16 +1355,29 @@ def _machine_id() -> str:
     return f"{host}:{os.getpid()}"
 
 
-def claim_job_for_fire(job_id: str, *, claim_ttl_seconds: int = 300) -> bool:
+def make_fire_claim_owner() -> str:
+    """Return a unique owner token for one concrete job execution."""
+    return f"{_machine_id()}:{uuid.uuid4().hex}"
+
+
+def claim_job_for_fire(
+    job_id: str,
+    *,
+    claim_ttl_seconds: int = 300,
+    owner: Optional[str] = None,
+    expected_next_run_at: Optional[str] = None,
+) -> bool:
     """Atomically claim a job for a single external 'fire' (multi-machine
     at-most-once). Returns True iff THIS caller won the claim.
 
-    Used by the external-provider fire path (``CronScheduler.fire_due``) when an
-    external scheduler (Chronos) signals a job is due across N gateway replicas:
-    exactly one wins. Single-machine deployments always win.
+    Used by both the built-in ticker and the external-provider fire path
+    (``CronScheduler.fire_due``), so competing gateway replicas and scheduler
+    providers share one ownership boundary.
 
-    Under the file lock: reject if the job is missing/disabled/paused. If a
-    fresh claim (younger than ``claim_ttl_seconds``) already exists, lose.
+    Under the file lock: reject if the job is missing/disabled/paused. A
+    caller with a queued due-job snapshot may pass ``expected_next_run_at``;
+    if storage has advanced to another occurrence, that stale worker loses.
+    If a fresh claim (younger than ``claim_ttl_seconds``) already exists, lose.
     Otherwise stamp a ``fire_claim`` and, for recurring jobs, advance
     ``next_run_at`` (mirrors ``advance_next_run``'s at-most-once bump so a stale
     re-delivery for the old time can't re-fire). One-shots keep ``next_run_at``
@@ -1363,9 +1385,9 @@ def claim_job_for_fire(job_id: str, *, claim_ttl_seconds: int = 300) -> bool:
     ``mark_job_run`` clears the claim on completion so a re-armed recurring job
     is claimable again next fire.
 
-    The stale-claim TTL means a machine that crashed after claiming but before
-    completing doesn't wedge the job forever — after the TTL another fire can
-    reclaim it.
+    Active executions renew their lease. The stale-claim TTL means a machine
+    that crashed after claiming but before completing doesn't wedge the job
+    forever — after the TTL another fire can reclaim it.
     """
     with _jobs_lock():
         jobs = load_jobs()
@@ -1373,6 +1395,11 @@ def claim_job_for_fire(job_id: str, *, claim_ttl_seconds: int = 300) -> bool:
             if job["id"] != job_id:
                 continue
             if not job.get("enabled", True) or job.get("state") == "paused":
+                return False
+            if (
+                expected_next_run_at is not None
+                and job.get("next_run_at") != expected_next_run_at
+            ):
                 return False
             now = _hermes_now()
             existing = job.get("fire_claim")
@@ -1383,12 +1410,32 @@ def claim_job_for_fire(job_id: str, *, claim_ttl_seconds: int = 300) -> bool:
                         return False  # someone holds a fresh claim
                 except Exception:
                     pass  # malformed claim → overwrite
-            job["fire_claim"] = {"at": now.isoformat(), "by": _machine_id()}
+            job["fire_claim"] = {
+                "at": now.isoformat(),
+                "by": owner or make_fire_claim_owner(),
+            }
             kind = job.get("schedule", {}).get("kind")
             if kind in {"cron", "interval"}:
                 nxt = compute_next_run(job["schedule"], now.isoformat())
                 if nxt:
                     job["next_run_at"] = nxt
+            save_jobs(jobs)
+            return True
+        return False
+
+
+def renew_job_fire_claim(job_id: str, *, owner: str) -> bool:
+    """Refresh an active execution lease iff ``owner`` still holds it."""
+    with _jobs_lock():
+        jobs = load_jobs()
+        for job in jobs:
+            if job["id"] != job_id:
+                continue
+            claim = job.get("fire_claim") or {}
+            if claim.get("by") != owner:
+                return False
+            claim["at"] = _hermes_now().isoformat()
+            job["fire_claim"] = claim
             save_jobs(jobs)
             return True
         return False
@@ -1541,6 +1588,7 @@ def _get_due_jobs_locked() -> List[Dict[str, Any]]:
                             rj["next_run_at"] = new_next
                             needs_save = True
                             break
+                    job["next_run_at"] = new_next
                     # Fall through to due.append(job) — execute once now
 
             due.append(job)

@@ -1544,6 +1544,7 @@ class TestRunJobSessionPersistence:
 
         with patch("cron.scheduler._hermes_home", tmp_path), \
              patch("cron.scheduler.get_due_jobs", return_value=[job]), \
+             patch("cron.scheduler._claim_due_job", side_effect=lambda due: due), \
              patch("cron.scheduler.advance_next_run"), \
              patch("cron.scheduler.mark_job_run") as mock_mark, \
              patch("cron.scheduler.save_job_output", return_value="/tmp/out.md"), \
@@ -2326,6 +2327,11 @@ class TestRunJobSkillBacked:
 class TestSilentDelivery:
     """Verify that [SILENT] responses suppress delivery while still saving output."""
 
+    @pytest.fixture(autouse=True)
+    def _claim_synthetic_due_jobs(self):
+        with patch("cron.scheduler._claim_due_job", side_effect=lambda job: job):
+            yield
+
     def _make_job(self):
         return {
             "id": "monitor-job",
@@ -2855,7 +2861,8 @@ class TestParallelTick:
         lock_dir = tmp_path / "cron"
         lock_dir.mkdir()
         lock_file = lock_dir / ".tick.lock"
-        with patch("cron.scheduler._get_lock_paths", return_value=(lock_dir, lock_file)):
+        with patch("cron.scheduler._get_lock_paths", return_value=(lock_dir, lock_file)), \
+             patch("cron.scheduler._claim_due_job", side_effect=lambda job: job):
             yield
 
     def test_parallel_jobs_run_concurrently(self):

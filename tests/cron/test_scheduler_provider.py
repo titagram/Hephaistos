@@ -338,12 +338,106 @@ def test_fire_due_default_claims_then_runs(monkeypatch):
     from cron.scheduler_provider import InProcessCronScheduler
 
     ran = []
-    monkeypatch.setattr(jobs, "claim_job_for_fire", lambda jid: True, raising=False)
-    monkeypatch.setattr(jobs, "get_job", lambda jid: {"id": jid, "name": "t"})
-    monkeypatch.setattr(sched, "run_one_job", lambda job, **kw: ran.append(job["id"]) or True)
+    claims = []
+    monkeypatch.setattr(jobs, "make_fire_claim_owner", lambda: "provider-owner", raising=False)
+    monkeypatch.setattr(
+        jobs,
+        "claim_job_for_fire",
+        lambda jid, *, owner: claims.append((jid, owner)) or True,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        jobs,
+        "get_job",
+        lambda jid: {"id": jid, "name": "t", "fire_claim": {"by": "provider-owner"}},
+    )
+    monkeypatch.setattr(
+        jobs,
+        "renew_job_fire_claim",
+        lambda jid, *, owner: True,
+        raising=False,
+    )
+    monkeypatch.setattr(sched, "renew_job_fire_claim", lambda jid, *, owner: True)
+    monkeypatch.setattr(
+        sched,
+        "run_one_job",
+        lambda job, **kw: ran.append((job["id"], job["fire_claim"]["by"])) or True,
+    )
 
     assert InProcessCronScheduler().fire_due("j1") is True
-    assert ran == ["j1"]
+    assert claims == [("j1", "provider-owner")]
+    assert ran == [("j1", "provider-owner")]
+
+
+def test_fire_due_retries_one_transient_owner_validation_error(monkeypatch):
+    """A transient store error must not strand a provider-owned occurrence."""
+    import cron.jobs as jobs
+    import cron.scheduler as sched
+    from cron.scheduler_provider import InProcessCronScheduler
+
+    attempts = []
+    ran = []
+
+    def flaky_renew(jid, *, owner):
+        attempts.append((jid, owner))
+        if len(attempts) == 1:
+            raise OSError("transient store error")
+        return True
+
+    monkeypatch.setattr(jobs, "make_fire_claim_owner", lambda: "provider-owner", raising=False)
+    monkeypatch.setattr(jobs, "claim_job_for_fire", lambda _jid, *, owner: True, raising=False)
+    monkeypatch.setattr(
+        jobs,
+        "get_job",
+        lambda jid: {"id": jid, "name": "t", "fire_claim": {"by": "provider-owner"}},
+    )
+    monkeypatch.setattr(jobs, "renew_job_fire_claim", flaky_renew, raising=False)
+    monkeypatch.setattr(sched, "renew_job_fire_claim", flaky_renew)
+    monkeypatch.setattr(
+        sched,
+        "run_one_job",
+        lambda job, **_kw: ran.append(job["fire_claim"]["by"]) or True,
+    )
+
+    assert InProcessCronScheduler().fire_due("j1") is True
+    assert attempts == [("j1", "provider-owner"), ("j1", "provider-owner")]
+    assert ran == ["provider-owner"]
+
+
+def test_fire_due_never_executes_as_replacement_owner(monkeypatch):
+    """A stalled claimant must not adopt a replacement runner's owner token."""
+    import cron.jobs as jobs
+    import cron.scheduler as sched
+    from cron.scheduler_provider import InProcessCronScheduler
+
+    ran = []
+    monkeypatch.setattr(jobs, "make_fire_claim_owner", lambda: "stale-owner", raising=False)
+    monkeypatch.setattr(
+        jobs,
+        "claim_job_for_fire",
+        lambda jid, *, owner: True,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        jobs,
+        "get_job",
+        lambda jid: {"id": jid, "name": "t", "fire_claim": {"by": "replacement-owner"}},
+    )
+    monkeypatch.setattr(
+        jobs,
+        "renew_job_fire_claim",
+        lambda jid, *, owner: False,
+        raising=False,
+    )
+    monkeypatch.setattr(sched, "renew_job_fire_claim", lambda jid, *, owner: False)
+    monkeypatch.setattr(
+        sched,
+        "run_one_job",
+        lambda job, **kw: ran.append(job["fire_claim"]["by"]) or True,
+    )
+
+    assert InProcessCronScheduler().fire_due("j1") is False
+    assert ran == []
 
 
 def test_fire_due_lost_claim_does_not_run(monkeypatch):
@@ -354,7 +448,13 @@ def test_fire_due_lost_claim_does_not_run(monkeypatch):
     from cron.scheduler_provider import InProcessCronScheduler
 
     ran = []
-    monkeypatch.setattr(jobs, "claim_job_for_fire", lambda jid: False, raising=False)
+    monkeypatch.setattr(jobs, "make_fire_claim_owner", lambda: "provider-owner", raising=False)
+    monkeypatch.setattr(
+        jobs,
+        "claim_job_for_fire",
+        lambda jid, *, owner: False,
+        raising=False,
+    )
     monkeypatch.setattr(sched, "run_one_job", lambda job, **kw: ran.append(job["id"]) or True)
 
     assert InProcessCronScheduler().fire_due("j1") is False
@@ -369,7 +469,13 @@ def test_fire_due_missing_job_does_not_run(monkeypatch):
     from cron.scheduler_provider import InProcessCronScheduler
 
     ran = []
-    monkeypatch.setattr(jobs, "claim_job_for_fire", lambda jid: True, raising=False)
+    monkeypatch.setattr(jobs, "make_fire_claim_owner", lambda: "provider-owner", raising=False)
+    monkeypatch.setattr(
+        jobs,
+        "claim_job_for_fire",
+        lambda jid, *, owner: True,
+        raising=False,
+    )
     monkeypatch.setattr(jobs, "get_job", lambda jid: None)
     monkeypatch.setattr(sched, "run_one_job", lambda job, **kw: ran.append(job["id"]) or True)
 

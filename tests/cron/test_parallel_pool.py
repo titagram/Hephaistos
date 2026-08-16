@@ -12,6 +12,14 @@ from unittest.mock import patch
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _claim_synthetic_due_jobs(monkeypatch):
+    """Pool tests exercise dispatch after the durable claim boundary."""
+    import cron.scheduler as sched
+
+    monkeypatch.setattr(sched, "_claim_due_job", lambda job: job)
+
+
 class TestPersistentPool:
     """_get_parallel_pool returns a persistent ThreadPoolExecutor."""
 
@@ -222,6 +230,56 @@ class TestSequentialPool:
         barrier.wait()
         time.sleep(0.1)
         sched._shutdown_parallel_pool()
+
+    def test_sequential_job_claim_is_acquired_when_worker_starts(self, tmp_path, monkeypatch):
+        """A queued job must not hold an expiring lease before it can execute."""
+        import cron.scheduler as sched
+
+        sched._parallel_pool = None
+        sched._parallel_pool_max_workers = None
+        sched._sequential_pool = None
+        sched._running_job_ids.clear()
+
+        first_started = threading.Event()
+        release_first = threading.Event()
+        second_claim_attempted = threading.Event()
+        runs = []
+        jobs = [
+            {"id": "first", "name": "first", "workdir": str(tmp_path)},
+            {"id": "second", "name": "second", "workdir": str(tmp_path)},
+        ]
+
+        def claim_at_start(job):
+            if job["id"] == "second":
+                second_claim_attempted.set()
+                return None  # another runtime owns it by worker start
+            return {**job, "fire_claim": {"by": "first-owner"}}
+
+        def run(job):
+            runs.append(job["id"])
+            first_started.set()
+            assert release_first.wait(timeout=2)
+            return True, "out", "resp", None
+
+        monkeypatch.setattr(sched, "get_due_jobs", lambda: jobs)
+        monkeypatch.setattr(sched, "_claim_due_job", claim_at_start)
+        monkeypatch.setattr(sched, "renew_job_fire_claim", lambda *_a, **_kw: True)
+        monkeypatch.setattr(sched, "run_job", run)
+        monkeypatch.setattr(sched, "save_job_output", lambda *_a, **_kw: "/tmp/out")
+        monkeypatch.setattr(sched, "mark_job_run", lambda *_a, **_kw: None)
+        monkeypatch.setattr(sched, "_deliver_result", lambda *_a, **_kw: None)
+
+        try:
+            assert sched.tick(verbose=False, sync=False) == 2
+            assert first_started.wait(timeout=1)
+            assert second_claim_attempted.is_set() is False
+
+            release_first.set()
+            assert second_claim_attempted.wait(timeout=1)
+            assert runs == ["first"]
+        finally:
+            release_first.set()
+            sched._shutdown_parallel_pool()
 
     def test_sequential_running_guard_prevents_double_dispatch(self, tmp_path, monkeypatch):
         """A workdir job already in _running_job_ids is skipped on next tick."""

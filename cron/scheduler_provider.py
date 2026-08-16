@@ -86,22 +86,37 @@ class CronScheduler(ABC):
         """Run a single job NOW via the shared orchestrator. Called by the
         inbound fire webhook when an external scheduler signals a job is due.
 
-        The default claims the job with a store-level compare-and-set
-        (multi-machine at-most-once), then runs it via the shared
-        ``run_one_job`` body. Built-in never calls this (it has its own tick
-        loop); an external provider routes its inbound fire here.
+        The default claims the job with a store-level compare-and-set, which
+        deduplicates overlapping/in-flight deliveries, then runs it via the
+        shared ``run_one_job`` body. Because this interface receives only a job
+        ID, it cannot identify a sequential replay after the prior occurrence
+        completed; providers needing that guarantee must carry an occurrence
+        token. Built-in never calls this (it has its own tick loop); an external
+        provider routes its inbound fire here.
 
         Returns True if THIS caller claimed and ran the job, False if the claim
         was lost (another machine/retry won it) or the job no longer exists.
         """
-        from cron.jobs import claim_job_for_fire, get_job
-        from cron.scheduler import run_one_job
+        from cron.jobs import (
+            claim_job_for_fire,
+            get_job,
+            make_fire_claim_owner,
+        )
+        from cron.scheduler import _renew_fire_claim_with_retry, run_one_job
 
-        if not claim_job_for_fire(job_id):
+        owner = make_fire_claim_owner()
+        if not claim_job_for_fire(job_id, owner=owner):
             return False  # another machine already claimed this fire
         job = get_job(job_id)
         if job is None:
             return False  # job removed (e.g. repeat-N exhausted) between arm and fire
+        # Validate the token we actually won, rather than trusting the owner in
+        # a later snapshot. If this caller stalled past the lease and another
+        # runner reclaimed it, adopting that replacement token would let the
+        # stale caller heartbeat and complete as the new owner.
+        if not _renew_fire_claim_with_retry(job_id, owner, phase="validate provider claim"):
+            return False
+        job = {**job, "fire_claim": {"by": owner}}
         return run_one_job(job, adapters=adapters, loop=loop)
 
     def reconcile(self) -> None:

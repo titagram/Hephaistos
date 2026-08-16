@@ -314,10 +314,22 @@ def test_project_reports_backfills_a_historical_completed_org_run(
                         task_id,
                         claimer="historical-report-test",
                     )
+                    node = conn.execute(
+                        "SELECT node_kind FROM kanban_org_nodes "
+                        "WHERE task_id = ? AND state = 'active'",
+                        (task_id,),
+                    ).fetchone()
+                    metadata = (
+                        {"review": {"verdict": "pass"}}
+                        if node is not None
+                        and node["node_kind"] in {"task_review", "global_review"}
+                        else None
+                    )
                     assert kb.complete_task(
                         conn,
                         task_id,
                         summary=f"completed {task_id}",
+                        metadata=metadata,
                     )
 
     with kb.connect(board="default") as conn:
