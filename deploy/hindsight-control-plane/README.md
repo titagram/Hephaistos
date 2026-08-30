@@ -5,6 +5,7 @@ Production deployment of the Sinervis Control Plane, maintained as a fork of the
 ## Public endpoint
 
 - UI: `https://persephone.cc/hindsight-ui`
+- Aristea Wiki: `https://persephone.cc/hindsight-ui/wikis/aristea`
 - Dataplane remains at `https://persephone.cc/hindsight` and is not modified by this Compose project.
 
 The UI is compiled with `NEXT_PUBLIC_BASE_PATH=/hindsight-ui`; do not replace the image with the stock root-path image without rebuilding it.
@@ -16,6 +17,7 @@ The UI is compiled with `NEXT_PUBLIC_BASE_PATH=/hindsight-ui`; do not replace th
 - The Control Plane uses its built-in access-key login (`HINDSIGHT_CP_ACCESS_KEY`).
 - The dataplane tenant key (`HINDSIGHT_CP_DATAPLANE_API_KEY`) remains server-side.
 - The container reaches the localhost-only API through the existing `172.18.0.1:18888` systemd socket proxy.
+- The read-only Wiki UI reaches the canonical Aristea REST API through server-side BFF routes; browsers never connect to Wiki storage directly.
 - PostgreSQL and `127.0.0.1:8888` remain unexposed.
 
 Runtime secrets are stored outside the repository in:
@@ -62,6 +64,8 @@ Expected behavior:
 - `/`: redirect to the Sinervis overview at `/hindsight-ui/dashboard`;
 - unauthenticated page request: redirect to `/hindsight-ui/login`;
 - successful login sets an HttpOnly, Secure, SameSite=Lax session cookie;
+- authenticated `/wikis/aristea` renders the canonical navigation, page content, dashboard counters, and search results;
+- `/api/wikis/aristea/navigation`, `/dashboard`, `/pages/<slug>`, and `/search?q=...` proxy the canonical Aristea JSON status and payload without caching;
 - container has no direct host port binding.
 
 If the `traefik_default` subnet changes, update both this Compose file's `extra_hosts` gateway and the existing Hindsight socket bridge binding.

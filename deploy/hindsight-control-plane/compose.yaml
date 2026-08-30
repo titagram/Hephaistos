@@ -10,7 +10,7 @@ services:
         INCLUDE_CP: "true"
         INCLUDE_API: "false"
         NEXT_PUBLIC_BASE_PATH: /hindsight-ui
-    image: local/sinervis-control-plane:0.9.2-milestone-a
+    image: local/sinervis-control-plane:0.9.2-wiki-readonly
     container_name: hindsight-control-plane
     restart: unless-stopped
     env_file:
