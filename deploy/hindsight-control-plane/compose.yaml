@@ -1,0 +1,63 @@
+name: hindsight-control-plane
+
+services:
+  control-plane:
+    build:
+      context: https://github.com/vectorize-io/hindsight.git#ebad478240d3171bb88201ececda5e8d9883d22d
+      dockerfile: docker/standalone/Dockerfile
+      target: cp-only
+      args:
+        INCLUDE_CP: "true"
+        INCLUDE_API: "false"
+        NEXT_PUBLIC_BASE_PATH: /hindsight-ui
+    image: local/hindsight-control-plane:0.9.2-hindsight-ui
+    container_name: hindsight-control-plane
+    restart: unless-stopped
+    env_file:
+      - /home/ubuntu/.config/hindsight/control-plane.env
+    environment:
+      NODE_ENV: production
+      HINDSIGHT_ENABLE_API: "false"
+      HINDSIGHT_ENABLE_CP: "true"
+      HINDSIGHT_CP_HOSTNAME: 0.0.0.0
+      HINDSIGHT_CP_PORT: "9999"
+      HINDSIGHT_CP_DATAPLANE_API_URL: http://host.docker.internal:18888
+      NEXT_PUBLIC_BASE_PATH: /hindsight-ui
+    extra_hosts:
+      - "host.docker.internal:172.18.0.1"
+    networks:
+      - proxy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9999/hindsight-ui/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: traefik_default
+      traefik.http.routers.hindsight-ui-http.entrypoints: web
+      traefik.http.routers.hindsight-ui-http.rule: Host(`persephone.cc`) && PathPrefix(`/hindsight-ui`)
+      traefik.http.routers.hindsight-ui-http.priority: "600"
+      traefik.http.routers.hindsight-ui-http.middlewares: hindsight-ui-https
+      traefik.http.middlewares.hindsight-ui-https.redirectscheme.scheme: https
+      traefik.http.middlewares.hindsight-ui-https.redirectscheme.permanent: "true"
+      traefik.http.routers.hindsight-ui.entrypoints: websecure
+      traefik.http.routers.hindsight-ui.rule: Host(`persephone.cc`) && PathPrefix(`/hindsight-ui`)
+      traefik.http.routers.hindsight-ui.priority: "600"
+      traefik.http.routers.hindsight-ui.middlewares: hindsight-ui-home
+      traefik.http.routers.hindsight-ui.tls: "true"
+      traefik.http.routers.hindsight-ui.tls.certresolver: le
+      traefik.http.middlewares.hindsight-ui-home.redirectregex.regex: "^https?://([^/]+)/hindsight-ui/?$"
+      traefik.http.middlewares.hindsight-ui-home.redirectregex.replacement: "https://$${1}/hindsight-ui/banks/hermes?view=reflect"
+      traefik.http.middlewares.hindsight-ui-home.redirectregex.permanent: "false"
+      traefik.http.services.hindsight-ui.loadbalancer.server.port: "9999"
+
+networks:
+  proxy:
+    external: true
+    name: traefik_default
