@@ -1,6 +1,6 @@
-# Hindsight Control Plane deployment
+# Sinervis Control Plane deployment
 
-Production deployment of the Hindsight 0.9.2 Control Plane for the existing bare-metal dataplane.
+Production deployment of the Sinervis Control Plane, maintained as a fork of the Hindsight 0.9.2 Control Plane, for the existing bare-metal dataplane.
 
 ## Public endpoint
 
@@ -47,7 +47,7 @@ docker compose ps
 docker compose logs --tail=100 control-plane
 ```
 
-The build uses upstream release `v0.9.2`, pinned to commit `ebad478240d3171bb88201ececda5e8d9883d22d`, and target `cp-only`.
+The build uses the permanent local fork at `/home/ubuntu/Sinervis`, whose upstream baseline is release `v0.9.2` at commit `ebad478240d3171bb88201ececda5e8d9883d22d`, and target `cp-only`. The fork's exact baseline and intentional divergences are recorded in `/home/ubuntu/Sinervis/SINERVIS_UPSTREAM.md`.
 
 ## Verification
 
@@ -59,6 +59,7 @@ curl -I https://persephone.cc/hindsight-ui/
 Expected behavior:
 
 - `/api/health`: HTTP 200 and dataplane status `connected`;
+- `/`: redirect to the Sinervis overview at `/hindsight-ui/dashboard`;
 - unauthenticated page request: redirect to `/hindsight-ui/login`;
 - successful login sets an HttpOnly, Secure, SameSite=Lax session cookie;
 - container has no direct host port binding.
