@@ -23,6 +23,17 @@ key for this exact outcome, and only project-local references you actually
 have. Put an optional short narrative in a regular UTF-8 file; never use stdin
 or construct it through shell interpolation.
 
+The `hades backend` command is supplied by the optional
+`titagram/hades-backend-plugin`, not by the core CLI. Before preparing a
+logbook write, run `hades backend --help`. If the CLI reports `backend` as an
+invalid command, treat the logbook as unavailable: do not install or enable
+the plugin without explicit user approval, do not enqueue anything through
+private Python APIs, and report that the durable project change was recorded
+only in its ordinary project artifacts (for example Git), not in the Hades
+logbook. The published installation flow is `hades plugins install
+titagram/hades-backend-plugin --enable`, followed by project pairing, but it
+must be user-approved and configured before this skill can write remotely.
+
 Use a lowercase 40-hex SHA for a `commit` reference and a safe project-relative
 path for a `file` reference. The CLI and backend validate those two identifier
 shapes but do not prove that the commit or file exists. For resource-ID
