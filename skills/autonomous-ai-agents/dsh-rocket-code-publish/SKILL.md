@@ -158,6 +158,16 @@ and health/backup requirements documented in that repository's `AGENTS.md`,
 then run its approved deployment procedure. Do not restart/recreate production
 containers merely because a source file was saved or pushed.
 
+## Pre-authorized DSH Capabilities
+
+For this managed Rocket DSH service, the agent is authorized to complete the ordinary **edit → verify → commit → normal push** loop without requesting an extra confirmation for each mechanical step:
+
+- It may run repository-defined checks such as `npm run build`, lint, and focused tests.
+- If frontend dependencies are missing or incompatible, it may use the lockfile-preserving command `npm ci` (not an unbounded dependency upgrade) and rerun the failed verification.
+- It may use the persistent DSH Git transport to run `git push origin HEAD` for its own verified commits on the intended branch.
+- It must still inspect branch/remote state first and must never force-push, rebase, amend published commits, reset/clean unrelated work, or embed credentials in repository files.
+- It must never deploy/recreate production services, alter `.env` files, alter the DSH credential store, or change Traefik without a separate explicit user authorization.
+
 ## Visibility Matrix
 
 | Event | DSH sees it | Host checkout sees it | GitHub sees it | Live Rocket Club sees it |
