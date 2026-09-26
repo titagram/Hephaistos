@@ -166,7 +166,28 @@ For this managed Rocket DSH service, the agent is authorized to complete the ord
 - If frontend dependencies are missing or incompatible, it may use the lockfile-preserving command `npm ci` (not an unbounded dependency upgrade) and rerun the failed verification.
 - It may use the persistent DSH Git transport to run `git push origin HEAD` for its own verified commits on the intended branch.
 - It must still inspect branch/remote state first and must never force-push, rebase, amend published commits, reset/clean unrelated work, or embed credentials in repository files.
-- It must never deploy/recreate production services, alter `.env` files, alter the DSH credential store, or change Traefik without a separate explicit user authorization.
+- It may deploy the current verified non-`main` feature/fix branch only to the explicitly authorized Rocket Club staging target (`gtsystems.tech`) through the restricted SSH gateway below. It must never deploy/recreate any other service or target, alter `.env` files, alter the DSH credential store, or change Traefik.
+
+## Restricted Rocket Club Staging Gateway
+
+The DSH environment has a dedicated private SSH key with a forced-command gateway. It grants **no interactive shell**, no forwarding, and no access outside the Rocket Club staging operations. Invoke it explicitly because the service user's OpenSSH home differs from `$HOME`:
+
+```bash
+SSH='ssh -F /var/lib/dsh/.ssh/config -o BatchMode=yes rocket-staging'
+$SSH 'rocket status'
+$SSH 'rocket build'
+$SSH 'rocket deploy-staging'
+$SSH 'rocket logs nginx'
+```
+
+`rocket deploy-staging` is intentionally constrained to the current clean, pushed `feat/*`, `fix/*`, or `chore/*` branch; it rejects `main`/`master`, validates the stable Compose project `rocket`, builds the app and nginx images, runs the project migration/cache steps, recreates the Rocket services only, and reports the public HTTPS status. It does not edit branch history, `.env`, Traefik, or unrelated host resources.
+
+For safe app diagnostics, an allowlisted Artisan call can use a base64-encoded JSON array, for example:
+
+```bash
+ARGS=$(printf '%s' '["migrate:status"]' | base64 -w0)
+$SSH "rocket artisan $ARGS"
+```
 
 ## Visibility Matrix
 
