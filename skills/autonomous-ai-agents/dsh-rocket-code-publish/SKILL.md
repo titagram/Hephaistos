@@ -189,6 +189,56 @@ ARGS=$(printf '%s' '["migrate:status"]' | base64 -w0)
 $SSH "rocket artisan $ARGS"
 ```
 
+## Codex Credential Synchronization
+
+The DSH Codex provider authenticates through an OAuth grant that the host Codex
+CLI rotates on every refresh, so a one-off copy into the DSH vault is
+invalidated as soon as the host refreshes. The symptom is:
+
+```text
+PI_AI_ERROR: Encountered invalidated oauth token for user, failing request
+```
+
+Two things must both be true in `/var/lib/dsh/.credentials.yaml`:
+
+| Location | Correct content |
+|---|---|
+| `refs.OPENAI_CODEX_API_KEY` | the OAuth **access** token |
+| `records["llm-pi-ai/openai-codex"].payload` | `{type: oauth, access, refresh, expires, accountId}` |
+
+The reference is what the route actually resolves, and `openai-codex` sends it
+verbatim as `Authorization: Bearer <access>`. Storing a **refresh** token there
+fails with the error above even though the grant record is valid — the grant is
+only consulted by the OAuth login/refresh flow, not by an `apiKeyEnv` route.
+
+This is maintained automatically by a root-owned sync:
+
+```text
+/usr/local/sbin/dsh-codex-credential-sync
+dsh-codex-credential-sync.timer   # every 5 minutes, plus 2 min after boot
+```
+
+It rewrites only those two entries, preserves every other record (including the
+browser-session grant), keeps the file at mode `0600` owned by `node`, snapshots
+the previous document under `/var/backups/dsh-codex-credential/`, and never logs
+or prints credential material. Run it manually after any host Codex re-login:
+
+```bash
+sudo /usr/local/sbin/dsh-codex-credential-sync
+```
+
+Verify a real authenticated call (the web patch is required, because plain
+`--profile headless` defaults to a different provider):
+
+```bash
+docker exec -u node rocket-agent-rocket-agent-1 sh -lc \
+  'cd /workspace/rocket-club && dsh --profile headless \
+     --patch /var/lib/dsh/profiles/web/cordis.patch.yml "Reply with exactly: CODEX_OK"'
+```
+
+Never overwrite the whole credential document: it also holds the DSH browser
+session. Edit the single `refs` entry and the single record only.
+
 ## Visibility Matrix
 
 | Event | DSH sees it | Host checkout sees it | GitHub sees it | Live Rocket Club sees it |
